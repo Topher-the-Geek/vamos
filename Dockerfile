@@ -10,7 +10,8 @@ WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
 COPY main.go ./
-RUN go build -o main main.go
+COPY internal/ ./internal/
+RUN go build -o vamos .
 
 FROM fedora:44
 
@@ -27,7 +28,6 @@ ENV BUILDAH_ISOLATION=chroot
 VOLUME /var/lib/containers
 
 WORKDIR /build
-COPY --from=build /build/main ./
-COPY script.js ./
+COPY --from=build /build/vamos /usr/local/bin/vamos
 
-ENTRYPOINT ["./main"]
+ENTRYPOINT ["vamos"]

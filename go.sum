@@ -232,6 +232,8 @@ github.com/sirupsen/logrus v1.9.4 h1:TsZE7l11zFCLZnZ+teH4Umoq5BhEIfIzfRDZ1Uzql2w
 github.com/sirupsen/logrus v1.9.4/go.mod h1:ftWc9WdOfJ0a92nsE2jF5u5ZwH8Bv2zdeOC42RjbV2g=
 github.com/smallstep/pkcs7 v0.2.1 h1:6Kfzr/QizdIuB6LSv8y1LJdZ3aPSfTNhTLqAx9CTLfA=
 github.com/smallstep/pkcs7 v0.2.1/go.mod h1:RcXHsMfL+BzH8tRhmrF1NkkpebKpq3JEM66cOFxanf0=
+github.com/spf13/afero v1.15.0 h1:b/YBCLWAJdFWJTN9cLhiXXcD7mzKn9Dm86dNnfyQw1I=
+github.com/spf13/afero v1.15.0/go.mod h1:NC2ByUVxtQs4b3sIUphxK0NioZnmxgyCrfzeuq8lxMg=
 github.com/spf13/cobra v1.10.2 h1:DMTTonx5m65Ic0GOoRY2c16WCbHxOOw6xxezuLaBpcU=
 github.com/spf13/cobra v1.10.2/go.mod h1:7C1pvHqHw5A4vrJfjNwvOdzYu0Gml16OCs2GRiTUUS4=
 github.com/spf13/pflag v1.0.9/go.mod h1:McXfInJRrz4CZXVZOBLb0bTZqETkiAhM9Iw0y3An2Bg=
@@ -294,6 +296,8 @@ go.podman.io/image/v5 v5.41.2 h1:YnVaFrGLPWSBmipKfNvlOsGcBtk5bUxlPxQ+A6CS/uo=
 go.podman.io/image/v5 v5.41.2/go.mod h1:T/bzxEFpdpAzyHabPmcq5K+my3wBsht22sFkFjJSKT4=
 go.podman.io/storage v1.64.2 h1:sIBU2vsdGo2gghTF17oxw4G4gojEZkPmt0LKiZWIwqc=
 go.podman.io/storage v1.64.2/go.mod h1:ft0DzCRMZs1yn0rszmLYXEEwgd7IIc66JRwSRPUDwwc=
+go.starlark.net v0.0.0-20260908191801-89a6a09411d5 h1:X8HyonnLxrmAbdeMIEGEJVZ/yg6WykLZyAZmpCLSfMA=
+go.starlark.net v0.0.0-20260908191801-89a6a09411d5/go.mod h1:Iue6g6iirlfLoVi/DYCi5/x0h/bAOuWF3dULTKpt2Vo=
 go.yaml.in/yaml/v2 v2.4.4 h1:tuyd0P+2Ont/d6e2rl3be67goVK4R6deVxCUX5vyPaQ=
 go.yaml.in/yaml/v2 v2.4.4/go.mod h1:gMZqIpDtDqOfM0uNfy0SkpRhvUryYH0Z6wdMYcacYXQ=
 go.yaml.in/yaml/v3 v3.0.4/go.mod h1:DhzuOOF2ATzADvBadXxruRBLzYTpT36CKvDb3+aBEFg=
