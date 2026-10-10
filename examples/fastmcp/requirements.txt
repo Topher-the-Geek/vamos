@@ -1,0 +1,2 @@
+# Runtime dependencies of the server. Lock with the command in README.md.
+fastmcp>=4.0,<5

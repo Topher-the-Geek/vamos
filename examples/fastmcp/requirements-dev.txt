@@ -1,0 +1,6 @@
+# Tools for linting, type checking, and testing. Lock with the command in README.md.
+-r requirements.txt
+pyright[nodejs]
+pytest
+pytest-asyncio
+ruff

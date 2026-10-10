@@ -1,0 +1,6 @@
+# The image only needs the Go sources; keep examples, node_modules, and .venv out of the context.
+*
+!go.mod
+!go.sum
+!main.go
+!internal

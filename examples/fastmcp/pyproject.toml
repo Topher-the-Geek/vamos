@@ -1,0 +1,40 @@
+# Tool settings only; dependencies live in requirements*.txt.
+
+[tool.ruff]
+line-length = 120
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "COM812", # conflicts with the formatter
+    "CPY001", # the repository has no copyright headers
+    "D203",   # incompatible with D211
+    "D213",   # incompatible with D212
+]
+
+[tool.ruff.lint.per-file-ignores]
+"test_*.py" = [
+    "D103", # test names describe the test
+    "S101", # pytest uses assert
+]
+
+[tool.pyright]
+pythonVersion = "3.14"
+typeCheckingMode = "strict"
+venvPath = "."
+venv = ".venv"
+# Checks beyond strict.
+reportImplicitOverride = "error"
+reportImplicitStringConcatenation = "error"
+reportImportCycles = "error"
+reportMissingSuperCall = "error"
+reportPropertyTypeMismatch = "error"
+reportUninitializedInstanceVariable = "error"
+reportUnnecessaryTypeIgnoreComment = "error"
+reportUnusedCallResult = "error"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+addopts = ["--strict-config", "--strict-markers"]
+filterwarnings = ["error"]

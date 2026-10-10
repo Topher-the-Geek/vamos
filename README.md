@@ -39,7 +39,7 @@ build(
 Sources and their parent directories within the project must not be symbolic links.
 Links inside a source directory are copied as links, as Docker's `COPY` does.
 
-See [example/](example/).
+See [examples/nodejs/](examples/nodejs/).
 
 ## Build
 
@@ -69,7 +69,7 @@ Run with full privileges, loading the image straight into the host's Docker:
 ```
 docker run --rm -it --privileged \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -v "$PWD/example:/example" \
+  -v "$PWD/examples/nodejs:/example" \
   vamos load vamos-example -C /example
 ```
 
@@ -81,7 +81,7 @@ docker run --rm -it \
   --security-opt seccomp=unconfined \
   --security-opt apparmor=unconfined \
   --security-opt label=disable \
-  -v "$PWD/example:/example" -v "$PWD/output:/output" \
+  -v "$PWD/examples/nodejs:/example" -v "$PWD/output:/output" \
   vamos write /output/example.tar -t vamos-example -C /example
 ```
 
@@ -93,9 +93,10 @@ On success it prints `Image built! <destination> <image-id>`.
 ## Run the built image
 
 ```
-docker run --rm vamos-example
+docker run -i --rm vamos-example
 ```
 
 If you wrote a tarball, `docker load -i output/example.tar` first.
 
-The example runs `script.js`, which prints the time the image was built.
+The example is an [MCP](https://modelcontextprotocol.io) server with an `echo` tool, speaking MCP over stdin and
+stdout. Send it a request with `docker run -i --rm vamos-example < examples/nodejs/echo-request.jsonl`.

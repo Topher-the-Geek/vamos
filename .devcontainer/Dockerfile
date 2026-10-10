@@ -16,10 +16,14 @@ RUN dnf -y install \
     jq \
     less \
     netavark \
+    nodejs24 \
+    nodejs24-npm \
     openssh-clients \
     procps-ng \
+    python3 \
     tar \
     tree \
+    uv \
     which \
     zip \
  && dnf clean all
