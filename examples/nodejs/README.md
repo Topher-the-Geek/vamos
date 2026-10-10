@@ -1,8 +1,10 @@
 # nodejs example
 
 An [MCP](https://modelcontextprotocol.io) server with one tool, `echo`, built with the official
-[TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk). It speaks MCP over stdio. Node runs
-`server.ts` directly by stripping its types, so there is no build step.
+[TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk). It speaks MCP over stdio. In
+development, Node runs `server.ts` directly by stripping its types. The image runs `server.js`, which a `task`
+in `BUILD` compiles with `npm run build` (`tsconfig.build.json`); only the compiled file and the runtime
+dependencies reach the image.
 
 ## Develop
 

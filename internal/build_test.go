@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -20,15 +21,18 @@ import (
 	"github.com/google/go-containerregistry/pkg/registry"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
+	"github.com/spf13/afero"
 	"go.podman.io/image/v5/pkg/sysregistriesv2"
 )
 
 // helloBuild copies a source file into busybox and sets a command that echoes.
 var helloBuild = map[string]string{
-	"BUILD": `
-build(
-    base="` + busybox + `",
-    sources=["hello.txt"],
+	"BUILD": pullBusybox + `
+glob(name="hello", include=["hello.txt"])
+layer(
+    name="app",
+    base="busybox",
+    sources=["hello"],
     destination="/data",
     command=["echo", "hello from vamos"],
 )
@@ -173,7 +177,8 @@ func TestWriteFileMode(t *testing.T) {
 func TestWriteInsideProject(t *testing.T) {
 	requireBuildah(t)
 	fsys, root := diskProject(t, map[string]string{
-		"BUILD":     `build(base="` + busybox + `", sources=["."], destination="/app")`,
+		"BUILD": pullBusybox + `glob(name="project", include=["."])` + "\n" +
+			`layer(name="app", base="busybox", sources=["project"], destination="/app")`,
 		"hello.txt": "hello, file\n",
 	}, nil)
 	out := filepath.Join(root, projectDir, "app.tar")
@@ -197,7 +202,7 @@ func TestWriteKeepsExistingFileOnFailure(t *testing.T) {
 	if err := os.WriteFile(out, []byte("an old image"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fsys := project(t, map[string]string{"BUILD": `build(base="` + busybox + `", run=["false"])`})
+	fsys := project(t, map[string]string{"BUILD": pullBusybox + `layer(name="app", base="busybox", run=["false"])`})
 
 	vamos(t, fsys, "write", out, "-C", projectDir).failsWith(t, false, `run ["false"] failed`)
 
@@ -210,10 +215,32 @@ func TestWriteKeepsExistingFileOnFailure(t *testing.T) {
 	}
 }
 
+func TestScratch(t *testing.T) {
+	requireBuildah(t)
+	// Nothing is pulled: the image holds only the layer's sources.
+	fsys := project(t, map[string]string{
+		"BUILD": `glob(name="hello", include=["hello.txt"])` + "\n" +
+			`layer(name="app", base="scratch", sources=["hello"], destination="/data")`,
+		"hello.txt": "hello, file\n",
+	})
+	out := filepath.Join(t.TempDir(), "app.tar")
+
+	vamos(t, fsys, "write", out, "-C", projectDir).succeeds(t)
+
+	img, err := tarball.ImageFromPath(out, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := imagePaths(t, img, ""), []string{"/data", "/data/hello.txt"}; !slices.Equal(got, want) {
+		t.Errorf("files in image = %q, want %q", got, want)
+	}
+}
+
 func TestSourceDirectory(t *testing.T) {
 	requireBuildah(t)
 	fsys := project(t, map[string]string{
-		"BUILD":           `build(base="` + busybox + `", sources=["site"], destination="/srv")`,
+		"BUILD": pullBusybox + `glob(name="site", include=["site"])` + "\n" +
+			`layer(name="app", base="busybox", sources=["site"], destination="/srv")`,
 		"site/index.html": "<h1>hi</h1>",
 		"site/css/a.css":  "h1 {}",
 	})
@@ -225,19 +252,124 @@ func TestSourceDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Like Docker's COPY, a directory's contents are copied into the destination.
-	if got := imageFile(t, img, "/srv/index.html"); got != "<h1>hi</h1>" {
-		t.Errorf("/srv/index.html = %q", got)
+	// A directory and everything in it keep their paths relative to the BUILD file.
+	if got := imageFile(t, img, "/srv/site/index.html"); got != "<h1>hi</h1>" {
+		t.Errorf("/srv/site/index.html = %q", got)
 	}
-	if got := imageFile(t, img, "/srv/css/a.css"); got != "h1 {}" {
-		t.Errorf("/srv/css/a.css = %q", got)
+	if got := imageFile(t, img, "/srv/site/css/a.css"); got != "h1 {}" {
+		t.Errorf("/srv/site/css/a.css = %q", got)
+	}
+}
+
+func TestSourcePaths(t *testing.T) {
+	requireBuildah(t)
+	fsys := project(t, map[string]string{
+		"BUILD": pullBusybox + `
+glob(name="code", include=["main.sh", "lib/util.sh", "lib"])
+glob(name="docs", include=["./docs/README.md", "main.sh"])
+layer(name="app", base="busybox", sources=["code", "docs"], destination="/app")
+`,
+		"main.sh":        "echo main",
+		"lib/util.sh":    "echo util",
+		"lib/more.sh":    "echo more",
+		"docs/README.md": "# app",
+		"docs/other.md":  "not included",
+	})
+	out := filepath.Join(t.TempDir(), "app.tar")
+
+	vamos(t, fsys, "write", out, "-C", projectDir).succeeds(t)
+
+	img, err := tarball.ImageFromPath(out, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Each file keeps its path relative to the BUILD file, however many globs include it.
+	want := []string{
+		"/app/docs",
+		"/app/docs/README.md",
+		"/app/lib",
+		"/app/lib/more.sh",
+		"/app/lib/util.sh",
+		"/app/main.sh",
+	}
+	if got := imagePaths(t, img, "/app"); !slices.Equal(got, want) {
+		t.Errorf("files in /app = %q, want %q", got, want)
+	}
+}
+
+// TestIncludeProject includes the whole project, through a link to it, as a linked $PWD gives.
+func TestIncludeProject(t *testing.T) {
+	requireBuildah(t)
+	root := t.TempDir()
+	real := filepath.Join(root, "real")
+	// "-vendor" sorts before ".", and its link would fail to copy twice.
+	if err := os.MkdirAll(filepath.Join(real, "-vendor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	build := pullBusybox + `glob(name="all", include=["-vendor", "."])` + "\n" +
+		`layer(name="app", base="busybox", sources=["all"], destination="/app")`
+	if err := os.WriteFile(filepath.Join(real, "BUILD"), []byte(build), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../BUILD", filepath.Join(real, "-vendor", "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real", filepath.Join(root, projectDir)); err != nil {
+		t.Fatal(err)
+	}
+	fsys := afero.NewBasePathFs(afero.NewOsFs(), root)
+	out := filepath.Join(t.TempDir(), "app.tar")
+
+	vamos(t, fsys, "write", out, "-C", projectDir).succeeds(t)
+
+	img, err := tarball.ImageFromPath(out, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"/app/-vendor", "/app/-vendor/link", "/app/BUILD"}
+	if got := imagePaths(t, img, "/app"); !slices.Equal(got, want) {
+		t.Errorf("files in /app = %q, want %q", got, want)
+	}
+}
+
+func TestDestinationModes(t *testing.T) {
+	requireBuildah(t)
+	fsys := project(t, map[string]string{
+		"BUILD": pullBusybox + `glob(name="code", include=["app.sh"])` + "\n" +
+			`glob(name="nested", include=["tmp/app.sh"])` + "\n" +
+			`layer(name="tmp", base="busybox", sources=["code"], destination="/tmp")` + "\n" +
+			`layer(name="root", base="tmp", sources=["nested"], destination="/")` + "\n" +
+			`layer(name="app", base="root", sources=["code"], destination="/app")`,
+		"app.sh":     "echo hi",
+		"tmp/app.sh": "echo hi",
+	})
+	out := filepath.Join(t.TempDir(), "app.tar")
+
+	vamos(t, fsys, "write", out, "-C", projectDir).succeeds(t)
+
+	img, err := tarball.ImageFromPath(out, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Sources are added from a private temporary folder, whose mode must not reach the image,
+	// and the folders that hold them on the host must not replace the image's own.
+	modes := map[string]int64{}
+	walkImage(t, img, func(hdr *tar.Header, r io.Reader) bool {
+		modes[imagePath(hdr)] = hdr.Mode & 0o7777
+		return false
+	})
+	for path, want := range map[string]int64{"/tmp": 0o1777, "/app": 0o755} {
+		if got := modes[path]; got != want {
+			t.Errorf("mode of %s = %#o, want %#o", path, got, want)
+		}
 	}
 }
 
 func TestSourceSymlinks(t *testing.T) {
 	requireBuildah(t)
 	fsys, root := diskProject(t, map[string]string{
-		"BUILD":           `build(base="` + busybox + `", sources=["site"], destination="/srv")`,
+		"BUILD": pullBusybox + `glob(name="site", include=["site"])` + "\n" +
+			`layer(name="app", base="busybox", sources=["site"], destination="/srv")`,
 		"site/index.html": "<h1>hi</h1>",
 	}, map[string]string{
 		"site/home.html": "index.html",
@@ -257,13 +389,300 @@ func TestSourceSymlinks(t *testing.T) {
 	}
 	// Like Docker's COPY, links are copied as links, so nothing outside the project is read.
 	for path, want := range map[string]string{
-		"/srv/home.html": "index.html",
-		"/srv/secret":    "/etc/hostname",
-		"/srv/lib":       "../shared",
+		"/srv/site/home.html": "index.html",
+		"/srv/site/secret":    "/etc/hostname",
+		"/srv/site/lib":       "../shared",
 	} {
 		if got := imageLink(t, img, path); got != want {
 			t.Errorf("%s links to %q, want %q", path, got, want)
 		}
+	}
+}
+
+func TestSteps(t *testing.T) {
+	requireBuildah(t)
+	fsys := project(t, map[string]string{
+		"BUILD": pullBusybox + `
+glob(name="deps_files", include=["deps.txt"])
+layer(
+    name="deps",
+    base="busybox",
+    sources=["deps_files"],
+    destination="/deps",
+    run=["sh", "-c", "echo installed > /deps/installed.txt"],
+    command=["echo", "from deps"],
+)
+
+glob(name="app_files", include=["app.txt"])
+layer(
+    name="app",
+    base="deps",
+    sources=["app_files"],
+    destination="/app",
+    run=["cat", "/deps/installed.txt"],
+)
+`,
+		"deps.txt": "a dependency\n",
+		"app.txt":  "the app\n",
+	})
+	out := filepath.Join(t.TempDir(), "app.tar")
+	before := unnamedImages(t)
+
+	r := vamos(t, fsys, "write", out, "-C", projectDir).succeeds(t)
+
+	// Each layer is added to the image of the one before.
+	if !strings.Contains(r.stdout, "installed") {
+		t.Errorf("stdout = %q, want the app step to see the deps step's files", r.stdout)
+	}
+	img, err := tarball.ImageFromPath(out, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]string{
+		"/deps/deps.txt":      "a dependency\n",
+		"/deps/installed.txt": "installed\n",
+		"/app/app.txt":        "the app\n",
+	} {
+		if got := imageFile(t, img, path); got != want {
+			t.Errorf("%s = %q, want %q", path, got, want)
+		}
+	}
+	// Like Docker's FROM, a layer keeps its base's command unless it sets one.
+	if got, want := imageCmd(t, img), []string{"echo", "from deps"}; !slices.Equal(got, want) {
+		t.Errorf("command = %q, want %q", got, want)
+	}
+	assertNoNewImages(t, before)
+}
+
+func TestStepFails(t *testing.T) {
+	requireBuildah(t)
+	fsys := project(t, map[string]string{
+		"BUILD": pullBusybox + `
+layer(name="deps", base="busybox", run=["touch", "/installed"])
+layer(name="app", base="deps", run=["false"])
+`,
+	})
+	out := t.TempDir()
+	before := unnamedImages(t)
+
+	vamos(t, fsys, "write", filepath.Join(out, "app.tar"), "-C", projectDir).
+		failsWith(t, false, `layer "app": run ["false"] failed`)
+	assertNoFiles(t, out)
+	assertNoNewImages(t, before)
+}
+
+func TestTask(t *testing.T) {
+	requireBuildah(t)
+	fsys := project(t, map[string]string{
+		"BUILD": pullBusybox + `
+glob(name="input", include=["input.txt"])
+
+task(
+    name="shout",
+    base="busybox",
+    sources=["input"],
+    destination="/work",
+    command=["sh", "-c", """
+        mkdir -p /work/out/sub
+        tr a-z A-Z < /work/input.txt > /work/out/upper.txt
+        echo nested > /work/out/sub/nested.txt
+        echo left out > /work/out/skipped.txt
+        echo shouting
+    """],
+    source="/work/out",
+    include=["upper.txt", "sub"],
+)
+
+# A task can use another's output.
+task(
+    name="count",
+    base="busybox",
+    sources=["shout"],
+    destination="/count",
+    command=["sh", "-c", "wc -c < /count/upper.txt > /count/size.txt"],
+    source="/count",
+    include=["size.txt"],
+)
+
+layer(name="app", base="busybox", sources=["shout", "count", "input"], destination="/app")
+`,
+		"input.txt": "hello\n",
+	})
+	out := filepath.Join(t.TempDir(), "app.tar")
+	before := unnamedImages(t)
+
+	r := vamos(t, fsys, "write", out, "-C", projectDir).succeeds(t)
+
+	if !strings.Contains(r.stdout, "shouting") {
+		t.Errorf("stdout = %q, want the task's output", r.stdout)
+	}
+	img, err := tarball.ImageFromPath(out, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only the included files reach the layer, at their paths relative to the task's source.
+	want := []string{"/app/input.txt", "/app/size.txt", "/app/sub", "/app/sub/nested.txt", "/app/upper.txt"}
+	if got := imagePaths(t, img, "/app"); !slices.Equal(got, want) {
+		t.Errorf("files in /app = %q, want %q", got, want)
+	}
+	for path, want := range map[string]string{
+		"/app/upper.txt":      "HELLO\n",
+		"/app/sub/nested.txt": "nested\n",
+		"/app/size.txt":       "6\n",
+	} {
+		if got := imageFile(t, img, path); got != want {
+			t.Errorf("%s = %q, want %q", path, got, want)
+		}
+	}
+	// A task's image is discarded.
+	if got := imagePaths(t, img, "/work"); len(got) > 0 {
+		t.Errorf("files in /work = %q, want none from the task", got)
+	}
+	assertNoNewImages(t, before)
+}
+
+// TestTaskOutputModes checks that files a task makes keep their modes, special bits included.
+func TestTaskOutputModes(t *testing.T) {
+	requireBuildah(t)
+	fsys := project(t, map[string]string{
+		"BUILD": pullBusybox + `
+task(
+    name="make",
+    base="busybox",
+    command=["sh", "-c", """
+        mkdir -p /out/shared
+        echo tool > /out/tool
+        chmod 4750 /out/tool
+        chmod 1777 /out/shared
+    """],
+    source="/out",
+    include=["tool", "shared"],
+)
+layer(name="app", base="busybox", sources=["make"], destination="/app")
+`,
+	})
+	out := filepath.Join(t.TempDir(), "app.tar")
+
+	vamos(t, fsys, "write", out, "-C", projectDir).succeeds(t)
+
+	img, err := tarball.ImageFromPath(out, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	modes := map[string]int64{}
+	walkImage(t, img, func(hdr *tar.Header, r io.Reader) bool {
+		modes[imagePath(hdr)] = hdr.Mode & 0o7777
+		return false
+	})
+	for path, want := range map[string]int64{"/app/tool": 0o4750, "/app/shared": 0o1777} {
+		if got := modes[path]; got != want {
+			t.Errorf("mode of %s = %#o, want %#o", path, got, want)
+		}
+	}
+}
+
+// TestTaskOutputLinks checks that links made by a task resolve within its container.
+func TestTaskOutputLinks(t *testing.T) {
+	requireBuildah(t)
+	marker := "/vamos-test-" + strings.ToLower(t.Name()) // exists only in the container
+	fsys := project(t, map[string]string{
+		"BUILD": pullBusybox + `
+task(
+    name="make",
+    base="busybox",
+    command=["sh", "-c", """
+        mkdir -p ` + marker + `
+        echo inside > ` + marker + `/file.txt
+        ln -s ` + marker + ` /out
+    """],
+    source="/out",
+    include=["file.txt"],
+)
+layer(name="app", base="busybox", sources=["make"], destination="/app")
+`,
+	})
+	out := filepath.Join(t.TempDir(), "app.tar")
+
+	vamos(t, fsys, "write", out, "-C", projectDir).succeeds(t)
+
+	img, err := tarball.ImageFromPath(out, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := imageFile(t, img, "/app/file.txt"); got != "inside\n" {
+		t.Errorf("/app/file.txt = %q, want the file from the container", got)
+	}
+}
+
+func TestTaskFailures(t *testing.T) {
+	requireBuildah(t)
+	tests := []struct {
+		name    string
+		command string
+		source  string
+		include string
+		want    []string
+	}{
+		{
+			name:    "command fails",
+			command: `["false"]`,
+			source:  "/",
+			include: "bin",
+			want:    []string{`task "make": command ["false"] failed`, "exit status 1"},
+		},
+		{
+			name:    "source not found",
+			command: `["true"]`,
+			source:  "/nope",
+			include: "app",
+			want:    []string{`task "make": source "/nope" not found`},
+		},
+		{
+			name:    "source is a file",
+			command: `["true"]`,
+			source:  "/bin/sh",
+			include: "app",
+			want:    []string{`task "make": source "/bin/sh" is not a directory`},
+		},
+		{
+			name:    "include not found",
+			command: `["mkdir", "/out"]`,
+			source:  "/out",
+			include: "app.js",
+			want:    []string{`task "make": include "app.js" not found in /out`},
+		},
+		{
+			// Followed on the host, the link would read the host's /etc/passwd.
+			name:    "include is a link",
+			command: `["sh", "-c", "mkdir /out && ln -s /etc/passwd /out/passwd"]`,
+			source:  "/out",
+			include: "passwd",
+			want:    []string{`task "make": include "passwd" is a symbolic link`},
+		},
+		{
+			name:    "include has a link parent",
+			command: `["sh", "-c", "mkdir /out && ln -s /etc /out/etc"]`,
+			source:  "/out",
+			include: "etc/passwd",
+			want:    []string{`task "make": include "etc/passwd" has symbolic link parent "/out/etc"`},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fsys := project(t, map[string]string{
+				"BUILD": pullBusybox +
+					`task(name="make", base="busybox", command=` + tt.command +
+					`, source="` + tt.source + `", include=["` + tt.include + `"])` + "\n" +
+					`layer(name="app", base="busybox", sources=["make"], destination="/app")`,
+			})
+			out := t.TempDir()
+			before := unnamedImages(t)
+
+			vamos(t, fsys, "write", filepath.Join(out, "app.tar"), "-C", projectDir).
+				failsWith(t, false, tt.want...)
+			assertNoFiles(t, out)
+			assertNoNewImages(t, before)
+		})
 	}
 }
 
@@ -399,7 +818,7 @@ func TestLoadWithoutDocker(t *testing.T) {
 	t.Setenv("DOCKER_HOST", "unix:///nonexistent/docker.sock")
 
 	fsys := project(t, map[string]string{
-		"BUILD": `build(base="` + busybox + `", run=["echo", "build completed"])`,
+		"BUILD": pullBusybox + `layer(name="app", base="busybox", run=["echo", "build completed"])`,
 	})
 	r := vamos(t, fsys, "load", "app:dev", "-C", projectDir).
 		failsWith(t, false, "loading into Docker", "/nonexistent/docker.sock")
@@ -431,10 +850,12 @@ func TestLoadIntoDocker(t *testing.T) {
 func TestRunStep(t *testing.T) {
 	requireBuildah(t)
 	fsys := project(t, map[string]string{
-		"BUILD": `
-build(
-    base="` + busybox + `",
-    sources=["build.sh"],
+		"BUILD": pullBusybox + `
+glob(name="script", include=["build.sh"])
+layer(
+    name="app",
+    base="busybox",
+    sources=["script"],
     destination="/src",
     run=["sh", "/src/build.sh"],
 )
@@ -465,7 +886,9 @@ func TestRunStepSucceeds(t *testing.T) {
 	requireBuildah(t)
 	for _, run := range []string{`["true"]`, `["echo", "hi"]`, `["sh", "-c", "exit 0"]`} {
 		t.Run(run, func(t *testing.T) {
-			fsys := project(t, map[string]string{"BUILD": `build(base="` + busybox + `", run=` + run + `)`})
+			fsys := project(t, map[string]string{
+				"BUILD": pullBusybox + `layer(name="app", base="busybox", run=` + run + `)`,
+			})
 			vamos(t, fsys, "write", filepath.Join(t.TempDir(), "app.tar"), "-C", projectDir).succeeds(t)
 		})
 	}
@@ -482,25 +905,27 @@ func TestRunStepFailures(t *testing.T) {
 	}{
 		{
 			name:  "false",
-			build: `build(base="` + busybox + `", run=["false"])`,
+			build: pullBusybox + `layer(name="app", base="busybox", run=["false"])`,
 			want:  []string{`run ["false"] failed`, "exit status 1"},
 		},
 		{
 			name:  "exit code",
-			build: `build(base="` + busybox + `", run=["sh", "-c", "exit 3"])`,
+			build: pullBusybox + `layer(name="app", base="busybox", run=["sh", "-c", "exit 3"])`,
 			want:  []string{`run ["sh" "-c" "exit 3"] failed`, "exit status 3"},
 		},
 		{
 			name:  "command not found",
-			build: `build(base="` + busybox + `", run=["no-such-compiler", "main.c"])`,
+			build: pullBusybox + `layer(name="app", base="busybox", run=["no-such-compiler", "main.c"])`,
 			want:  []string{`run ["no-such-compiler" "main.c"] failed`, "no-such-compiler"},
 		},
 		{
 			name: "source doesn't compile",
-			build: `
-build(
-    base="` + busybox + `",
-    sources=["app.sh"],
+			build: pullBusybox + `
+glob(name="script", include=["app.sh"])
+layer(
+    name="app",
+    base="busybox",
+    sources=["script"],
     destination="/src",
     run=["sh", "-n", "/src/app.sh"],
 )
@@ -530,7 +955,7 @@ build(
 func TestInterrupted(t *testing.T) {
 	requireBuildah(t)
 	fsys := project(t, map[string]string{
-		"BUILD": `build(base="` + busybox + `", run=["sh", "-c", "echo started; sleep 1"])`,
+		"BUILD": pullBusybox + `layer(name="app", base="busybox", run=["sh", "-c", "echo started; sleep 1"])`,
 	})
 	out := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
@@ -553,24 +978,27 @@ type writerFunc func(p []byte) (int, error)
 
 func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 
-func TestBaseImageNotFound(t *testing.T) {
+func TestPullImageNotFound(t *testing.T) {
 	requireBuildah(t)
-	base := "docker.io/library/vamos-no-such-image:latest"
-	fsys := project(t, map[string]string{"BUILD": `build(base="` + base + `")`})
+	fsys := project(t, map[string]string{
+		"BUILD": `pull(name="base", image="vamos-no-such-image")` + "\n" + `layer(name="app", base="base")`,
+	})
 	out := t.TempDir()
 
 	vamos(t, fsys, "write", filepath.Join(out, "app.tar"), "-C", projectDir).
-		failsWith(t, false, `base image "`+base+`"`, "check the name")
+		failsWith(t, false, `pull "base": image "docker.io/library/vamos-no-such-image:latest"`, "check the name")
 	assertNoFiles(t, out)
 }
 
-func TestBaseImageUnreachable(t *testing.T) {
+func TestPullImageUnreachable(t *testing.T) {
 	requireBuildah(t)
-	fsys := project(t, map[string]string{"BUILD": `build(base="127.0.0.1:1/app")`})
+	fsys := project(t, map[string]string{
+		"BUILD": `pull(name="base", image="127.0.0.1:1/app")` + "\n" + `layer(name="app", base="base")`,
+	})
 	out := t.TempDir()
 
 	r := vamos(t, fsys, "write", filepath.Join(out, "app.tar"), "--tls-verify=false", "-C", projectDir).
-		failsWith(t, false, `base image "127.0.0.1:1/app"`, "connection refused")
+		failsWith(t, false, `pull "base": image "127.0.0.1:1/app:latest"`, "connection refused")
 	// The name is fine, so don't suggest checking it.
 	if strings.Contains(r.err.Error(), "check the name") {
 		t.Errorf("error = %q, want no hint about the name", r.err)

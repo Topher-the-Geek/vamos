@@ -1,0 +1,10 @@
+{
+  // Compiles the server to dist/ for the image; tsconfig.json only type checks.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rewriteRelativeImportExtensions": true,
+    "outDir": "dist"
+  },
+  "include": ["server.ts"]
+}

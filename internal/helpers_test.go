@@ -19,11 +19,12 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/spf13/afero"
 	"go.podman.io/buildah"
+	"go.podman.io/storage"
 )
 
-// busybox is the base image for tests that build. It is pulled once and cached in
-// the local container store.
-const busybox = "docker.io/library/busybox:1.36"
+// pullBusybox declares the base image for tests, as the step "busybox", in one line.
+// Tests that build pull it once, and later runs find it in the local container store.
+const pullBusybox = `pull(name="busybox", image="docker.io/library/busybox", tag="1.36")` + "\n"
 
 // projectDir is where in-memory test projects live.
 const projectDir = "/project"
@@ -92,6 +93,43 @@ func diskProject(t *testing.T, files, links map[string]string) (fsys afero.Fs, r
 		}
 	}
 	return fsys, root
+}
+
+// unnamedImages returns the IDs of the images in the local container store that have no
+// name, as the images of a BUILD file's intermediate steps do.
+func unnamedImages(t *testing.T) map[string]bool {
+	t.Helper()
+	options, err := storage.DefaultStoreOptions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := storage.GetStore(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Shutdown(false)
+	images, err := store.Images()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]bool{}
+	for _, img := range images {
+		if len(img.Names) == 0 {
+			ids[img.ID] = true
+		}
+	}
+	return ids
+}
+
+// assertNoNewImages fails the test if the local container store has unnamed images that
+// aren't in before, such as an intermediate step's image left behind.
+func assertNoNewImages(t *testing.T, before map[string]bool) {
+	t.Helper()
+	for id := range unnamedImages(t) {
+		if !before[id] {
+			t.Errorf("image %s left in the container store", id)
+		}
+	}
 }
 
 // result is the outcome of one vamos invocation.

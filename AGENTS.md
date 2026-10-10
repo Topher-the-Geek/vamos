@@ -14,8 +14,9 @@ Guidance for coding agents working on vamos. [README.md](README.md) covers what 
   Keep it that way; all other code goes in `internal/`.
 - `internal/cli.go` — Cobra commands, argument checks, destinations (`docker://`, `docker-daemon:`,
   `docker-archive:`).
-- `internal/buildfile.go` — runs `BUILD` with starlark-go and validates `build()` arguments.
-- `internal/image.go` — builds and commits the image with buildah.
+- `internal/buildfile.go` — runs `BUILD` with starlark-go and validates its `glob()`, `pull()`,
+  `layer()` and `task()` steps.
+- `internal/image.go` — pulls, then runs each layer and task with buildah, and commits the last layer.
 - `examples/` — sample `BUILD` projects, each an MCP server with an echo tool: `nodejs/` (TypeScript) and
   `fastmcp/` (Python). Each has its own lint and tests; see its README.
 
@@ -58,6 +59,7 @@ The first run pulls `busybox:1.36` from Docker Hub; later runs use the local con
 - Use `.succeeds(t)` and `.failsWith(t, usage, wants...)`. `usage` is true only for command-line
   mistakes; runtime errors must not print usage.
 - Failing builds must leave nothing behind; check with `assertNoFiles`.
+- Test BUILD files start with `pullBusybox`, which declares the step `busybox`.
 - Tests that build call `requireBuildah(t)` so `-short` and non-root runs skip them.
 - Write table cases as keyed struct literals, one field per line.
 - `TestMain` must call `buildah.InitReexec()` first, because buildah re-executes the test binary to
@@ -134,8 +136,15 @@ Errors are a feature here, and every user mistake should have a test for its mes
   using the Docker connection settings from the environment.
 - containers/image caches `registries.conf` regardless of `CONTAINERS_REGISTRIES_CONF`; tests that
   set it must call `sysregistriesv2.InvalidateCache`.
-- buildah reads sources from disk, so `buildImage` copies them from the `afero.Fs` into a
-  temporary build folder first.
+- buildah reads sources from disk, so `addSources` copies them from the `afero.Fs` into a
+  temporary build folder first, at their paths relative to the `BUILD` file, then adds that whole
+  folder to the destination. `TestDestinationModes` checks the folder's own mode doesn't leak.
+- `collectOutput` reads a task's files from its mounted container on the host, where an absolute link
+  would point at the host's own files. So it resolves `source` with `securejoin` and refuses links
+  along included paths; `TestTaskOutputLinks` and `TestTaskFailures` cover this.
+- Only `pull()` reaches registries: layers use `PullNever` on image IDs (or `scratch`). Intermediate
+  layers are committed unnamed to local storage and deleted when `buildImage` returns; tests check this with
+  `assertNoNewImages`.
 - `--tls-verify=false` lets a registry use plain HTTP, both for pushing and for pulling the base image.
   Without the flag, `registries.conf` decides, so leave `DockerInsecureSkipTLSVerify` unset.
 

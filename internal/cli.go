@@ -68,7 +68,7 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		spec, err := loadBuildFile(fsys, absDir)
+		file, err := loadBuildFile(fsys, absDir)
 		if err != nil {
 			return err
 		}
@@ -76,7 +76,7 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 		imageId, err := buildImage(cmd.Context(), buildOptions{
 			fs:            fsys,
 			dir:           absDir,
-			spec:          spec,
+			file:          file,
 			dest:          dest.ref,
 			action:        dest.action,
 			systemContext: systemContext,

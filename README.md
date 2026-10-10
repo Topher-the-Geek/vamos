@@ -24,22 +24,82 @@ Run `vamos <command> --help` for details.
 
 ## BUILD files
 
-A `BUILD` file calls `build()` exactly once:
+A `BUILD` file declares named steps. `pull()` fetches an image from a registry, `glob()` names a set of
+files beside the `BUILD` file, and `layer()` adds a layer to the image of an earlier step, which may itself be
+a `layer()`. `task()` runs a command on an image and collects the files it makes, as Docker's multi-stage
+builds do, for later steps' sources. Only `pull()` contacts a registry.
 
 ```python
-build(
-    base="docker.io/library/node:12-alpine",       # required: image to build from
-    sources=["script.js"],                         # files relative to the BUILD file
-    destination="/home/node",                      # directory to copy sources into
-    run=["sh", "-c", "date > /home/node/build-date.txt"],  # command run at build time
-    command=["node", "/home/node/script.js"],      # the image's default command
+pull(
+    name="node",                                   # required: names the step for later layers
+    image="docker.io/library/node",                # required: image to fetch, without a tag
+    tag="24-alpine",                               # defaults to "latest"
+)
+
+glob(
+    name="package-manifest",                       # required: names the files for layers' sources
+    include=["package.json", "package-lock.json"], # required: files or directories relative to the BUILD file
+)
+
+layer(
+    name="packages",                               # required: names the step
+    base="node",                                   # required: an earlier pull() or layer(), or "scratch"
+    sources=["package-manifest"],                  # earlier glob()s and task()s to copy in
+    destination="/app",                            # directory to copy sources into
+    run=["npm", "ci", "--prefix", "/app"],         # command run at build time
+)
+
+layer(
+    name="dev-packages",                           # adds the compiler, for the task below
+    base="node",
+    sources=["package-manifest"],
+    destination="/build",
+    run=["npm", "ci", "--prefix", "/build"],
+)
+
+glob(
+    name="server-source",
+    include=["server.ts", "tsconfig.json", "tsconfig.build.json"],
+)
+
+task(
+    name="compile",                                # required: names the files for sources
+    base="dev-packages",                           # required: an earlier pull() or layer(), or "scratch"
+    sources=["server-source"],                     # earlier glob()s and task()s to copy in
+    destination="/build",                          # directory to copy sources into
+    command=["npm", "run", "build", "--prefix", "/build"],  # command to run
+    source="/build/dist",                          # required: directory the files are made in
+    include=["server.js"],                         # required: files or directories relative to source
+)
+
+layer(
+    name="server",
+    base="packages",
+    sources=["compile"],
+    destination="/app",
+    command=["node", "/app/server.js"],            # the image's default command
 )
 ```
 
-Sources and their parent directories within the project must not be symbolic links.
-Links inside a source directory are copied as links, as Docker's `COPY` does.
+The last `layer()` makes the image. Every other step must be used by a later `layer()` or `task()`, as its base
+or in its sources, so nothing is declared but left out. A layer keeps its base's files and command, as Docker's `FROM`
+does; the images of earlier layers are discarded once the last one is done. A pulled image is kept in local
+storage and reused. `base="scratch"` starts from an empty image, so no step may be named `scratch`.
+A task's image is discarded once its files are collected, so its base can hold build tools the image
+doesn't need. A task can't be a base.
 
-See [examples/nodejs/](examples/nodejs/).
+Sources keep their paths relative to the `BUILD` file, or to a task's `source`, beneath `destination`: with
+`include=["src/main.ts"]` and `destination="/app"`, the file lands at `/app/src/main.ts`. A directory brings
+everything in it, and `"."` the whole project. Patterns such as `*.ts` aren't supported yet.
+Folders above an included path that the image already has, such as `/tmp` for `include=["tmp/x"]` and
+`destination="/"`, keep their own mode and owner. A step's sources can't include the same path from two places,
+such as the project and a task, since one would replace the other.
+
+Included paths and their parent directories, within the project or a task's `source`, must not be symbolic
+links. Links in `source` itself are resolved within the task's container.
+Links inside an included directory are copied as links, as Docker's `COPY` does.
+
+See [examples/nodejs/](examples/nodejs/) and [examples/fastmcp/](examples/fastmcp/).
 
 ## Build
 

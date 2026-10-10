@@ -4,6 +4,8 @@ import { defineConfig } from "eslint/config";
 import tseslint from "typescript-eslint";
 
 export default defineConfig(
+    // Output of `npm run build`.
+    { ignores: ["dist/"] },
     tseslint.configs.strictTypeChecked,
     tseslint.configs.stylisticTypeChecked,
     {
