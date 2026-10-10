@@ -1,0 +1,28 @@
+{
+  "name": "vamos_${localWorkspaceFolderBasename}",
+  "dockerFile": "Dockerfile",
+  "workspaceMount": "source=${localWorkspaceFolder}/..,target=/worktrees,type=bind,consistency=cached",
+  "workspaceFolder": "/worktrees/${localWorkspaceFolderBasename}",
+  "containerEnv": {
+    "GITHUB_TOKEN": "${localEnv:GITHUB_TOKEN}",
+    "WORKSPACE_FOLDER": "/worktrees/${localWorkspaceFolderBasename}"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "anthropic.claude-code",
+        "golang.go",
+        "ms-azuretools.vscode-docker",
+        "openai.chatgpt",
+        "streetsidesoftware.code-spell-checker"
+      ]
+    }
+  },
+  "mounts": [
+    "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
+  ],
+  "runArgs": [
+    "--name=vamos_${localWorkspaceFolderBasename}",
+    "--privileged"
+  ]
+}
