@@ -19,7 +19,7 @@ import (
 )
 
 // cachedBuild is a BUILD file with a layer and a task whose results are cached, and a final layer
-// that uses both. Its steps print a value unique to the test, so that results cached by other
+// that uses both. Its targets print a value unique to the test, so that results cached by other
 // tests or earlier runs are never reused.
 func cachedBuild(nonce string) string {
 	return pullBusybox + fmt.Sprintf(`
@@ -27,20 +27,24 @@ glob(name="input", include=["input.txt"])
 layer(
     name="deps",
     base="busybox",
-    sources=["input"],
-    destination="/deps",
-    run=["sh", "-c", "echo deps %[1]s; echo deps warning %[1]s >&2; echo %[1]s > /deps/nonce.txt"],
+    steps=[
+        add("input", "/deps"),
+        build_env(LANG="C", TZ="UTC"),
+        env(GREETING="hello", NAME="vamos"),
+        run(["sh", "-c", "echo deps %[1]s; echo deps warning %[1]s >&2; echo %[1]s > /deps/nonce.txt"]),
+    ],
 )
 task(
     name="size",
     base="busybox",
-    sources=["input"],
-    destination="/work",
-    command=["sh", "-c", "echo size %[1]s; wc -c < /work/input.txt > /work/size.txt; echo %[1]s > /work/nonce.txt"],
+    steps=[
+        add("input", "/work"),
+        run(["sh", "-c", "echo size %[1]s; wc -c < /work/input.txt > /work/size.txt; echo %[1]s > /work/nonce.txt"]),
+    ],
     source="/work",
     include=["size.txt", "nonce.txt"],
 )
-layer(name="app", base="deps", sources=["size"], destination="/app")
+layer(name="app", base="deps", steps=[add("size", "/app")])
 `, nonce)
 }
 
@@ -49,7 +53,7 @@ func newNonce() string {
 	return fmt.Sprintf("%016x", rand.Uint64())
 }
 
-// TestCacheReuse checks that a second build reuses the cached results of every step, the last
+// TestCacheReuse checks that a second build reuses the cached results of every target, the last
 // layer included, says so, and prints what they printed when they ran, and that it sends the
 // same image.
 func TestCacheReuse(t *testing.T) {
@@ -59,23 +63,23 @@ func TestCacheReuse(t *testing.T) {
 	dir := t.TempDir()
 
 	first := vamos(t, fsys, "write", filepath.Join(dir, "1.tar"), "-C", projectDir).succeeds(t)
-	assertSteps(t, first, map[string]string{`layer "deps"`: "building", `task "size"`: "building"})
+	assertTargets(t, first, map[string]string{`layer "deps"`: "building", `task "size"`: "building"})
 
 	second := vamos(t, fsys, "write", filepath.Join(dir, "2.tar"), "-C", projectDir).succeeds(t)
-	assertSteps(t, second, map[string]string{
+	assertTargets(t, second, map[string]string{
 		`layer "deps"`: "cached",
 		`task "size"`:  "cached",
 		`layer "app"`:  "cached",
 	})
 	for _, want := range []string{"deps " + nonce, "size " + nonce} {
 		if !strings.Contains(second.stdout, want) {
-			t.Errorf("stdout = %q, want the cached step's output %q replayed", second.stdout, want)
+			t.Errorf("stdout = %q, want the cached target's output %q replayed", second.stdout, want)
 		}
 	}
 	if want := "deps warning " + nonce; !strings.Contains(second.stderr, want) {
-		t.Errorf("stderr = %q, want the cached step's errors %q replayed", second.stderr, want)
+		t.Errorf("stderr = %q, want the cached target's errors %q replayed", second.stderr, want)
 	}
-	// TestRebuildReproducible checks that running the steps again makes the same image too.
+	// TestRebuildReproducible checks that running the targets again makes the same image too.
 	if a, b := builtID(t, first), builtID(t, second); a != b {
 		t.Errorf("second build made image %s, want the first's %s", b, a)
 	}
@@ -87,7 +91,7 @@ func TestCacheReuse(t *testing.T) {
 	}
 }
 
-// TestCacheMisses checks which changes to a step's inputs make it run again.
+// TestCacheMisses checks which changes to a target's inputs make it run again.
 func TestCacheMisses(t *testing.T) {
 	requireBuildah(t)
 	tests := []struct {
@@ -119,8 +123,41 @@ func TestCacheMisses(t *testing.T) {
 			want: map[string]string{`layer "deps"`: "building", `task "size"`: "cached"},
 		},
 		{
-			// Step names aren't inputs, so renaming a step keeps its result.
-			name: "step renamed",
+			name: "step added",
+			change: func(t *testing.T, fsys afero.Fs, build string) string {
+				add := `add("input", "/deps"),`
+				return strings.Replace(build, add, `build_env(LANG="C"), `+add, 1)
+			},
+			want: map[string]string{`layer "deps"`: "building", `task "size"`: "cached"},
+		},
+		{
+			name: "variable's value",
+			change: func(t *testing.T, fsys afero.Fs, build string) string {
+				return strings.Replace(build, `GREETING="hello"`, `GREETING="hola"`, 1)
+			},
+			want: map[string]string{`layer "deps"`: "building", `task "size"`: "cached"},
+		},
+		{
+			name: "add destination",
+			change: func(t *testing.T, fsys afero.Fs, build string) string {
+				return strings.Replace(build, `add("input", "/deps")`, `add("input", "/deps/input")`, 1)
+			},
+			want: map[string]string{`layer "deps"`: "building", `task "size"`: "cached"},
+		},
+		{
+			// Variables have different names, so their order makes no difference. TestEnvOrder checks
+			// that it makes no difference to the image either.
+			name: "variables reordered",
+			change: func(t *testing.T, fsys afero.Fs, build string) string {
+				build = strings.Replace(build, `build_env(LANG="C", TZ="UTC")`, `build_env(TZ="UTC", LANG="C")`, 1)
+				env := `env(GREETING="hello", NAME="vamos")`
+				return strings.Replace(build, env, `env(NAME="vamos", GREETING="hello")`, 1)
+			},
+			want: map[string]string{`layer "deps"`: "cached", `task "size"`: "cached"},
+		},
+		{
+			// Target names aren't inputs, so renaming a target keeps its result.
+			name: "target renamed",
 			change: func(t *testing.T, fsys afero.Fs, build string) string {
 				build = strings.Replace(build, `name="deps"`, `name="dependencies"`, 1)
 				return strings.Replace(build, `base="deps"`, `base="dependencies"`, 1)
@@ -146,13 +183,13 @@ func TestCacheMisses(t *testing.T) {
 			build = tt.change(t, fsys, build)
 			must(t, afero.WriteFile(fsys, filepath.Join(projectDir, "BUILD"), []byte(build), 0o644))
 			r := vamos(t, fsys, "write", filepath.Join(dir, "2.tar"), "-C", projectDir).succeeds(t)
-			assertSteps(t, r, tt.want)
+			assertTargets(t, r, tt.want)
 		})
 	}
 }
 
 // TestCacheUnchangedOutput checks that when a task runs again but makes the same files, the
-// steps that use them are reused.
+// targets that use them are reused.
 func TestCacheUnchangedOutput(t *testing.T) {
 	requireBuildah(t)
 	nonce := newNonce()
@@ -162,13 +199,14 @@ glob(name="input", include=["input.txt"])
 task(
     name="size",
     base="busybox",
-    sources=["input"],
-    destination="/work",
-    command=["sh", "-c", "echo %[1]s; wc -c < /work/input.txt > /work/size.txt"],
+    steps=[
+        add("input", "/work"),
+        run(["sh", "-c", "echo %[1]s; wc -c < /work/input.txt > /work/size.txt"]),
+    ],
     source="/work",
     include=["size.txt"],
 )
-layer(name="sized", base="busybox", sources=["size"], destination="/app", run=["echo", "%[1]s"])
+layer(name="sized", base="busybox", steps=[add("size", "/app"), run(["echo", "%[1]s"])])
 layer(name="app", base="sized")
 `, nonce),
 		"input.txt": "hello\n",
@@ -179,7 +217,7 @@ layer(name="app", base="sized")
 	// The same number of bytes, so the same size.txt.
 	must(t, afero.WriteFile(fsys, filepath.Join(projectDir, "input.txt"), []byte("HELLO\n"), 0o644))
 	r := vamos(t, fsys, "write", filepath.Join(dir, "2.tar"), "-C", projectDir).succeeds(t)
-	assertSteps(t, r, map[string]string{`task "size"`: "building", `layer "sized"`: "cached"})
+	assertTargets(t, r, map[string]string{`task "size"`: "building", `layer "sized"`: "cached"})
 }
 
 // TestCacheSourceEditedDuringBuild checks that a source file edited while a build reads it is
@@ -192,7 +230,7 @@ func TestCacheSourceEditedDuringBuild(t *testing.T) {
 	fsys := project(t, map[string]string{
 		"BUILD": pullBusybox + `
 glob(name="input", include=["input.txt"])
-layer(name="app", base="busybox", sources=["input"], destination="/app", run=["cat", "/app/input.txt"])
+layer(name="app", base="busybox", steps=[add("input", "/app"), run(["cat", "/app/input.txt"])])
 `,
 		"input.txt": before,
 	})
@@ -206,9 +244,31 @@ layer(name="app", base="busybox", sources=["input"], destination="/app", run=["c
 
 	must(t, afero.WriteFile(fsys, input, []byte(before), 0o644))
 	r = vamos(t, fsys, "write", filepath.Join(dir, "2.tar"), "-C", projectDir).succeeds(t)
-	assertSteps(t, r, map[string]string{`layer "app"`: "building"})
+	assertTargets(t, r, map[string]string{`layer "app"`: "building"})
 	if !strings.Contains(r.stdout, before) {
 		t.Errorf("stdout = %q, want the layer built with the file as it was, %q", r.stdout, before)
+	}
+}
+
+// TestCacheGlobReadOnce checks that a glob's files are read once in a build, however many targets add
+// them, so that a file edited after they are read can't make the targets' files differ.
+func TestCacheGlobReadOnce(t *testing.T) {
+	requireBuildah(t)
+	nonce := newNonce()
+	before, edited := nonce+" before\n", nonce+" edited\n"
+	fsys := project(t, map[string]string{
+		"BUILD": pullBusybox + `
+glob(name="input", include=["input.txt"])
+layer(name="first", base="busybox", steps=[add("input", "/first"), run(["cat", "/first/input.txt"])])
+layer(name="app", base="first", steps=[add("input", "/app"), run(["cat", "/app/input.txt"])])
+`,
+		"input.txt": before,
+	})
+	// Storing a new file opens it twice, to hash it and then to copy it, so a third open is a second read.
+	r := vamos(t, &editedFs{Fs: fsys, name: filepath.Join(projectDir, "input.txt"), edit: edited, at: 3},
+		"write", filepath.Join(t.TempDir(), "app.tar"), "-C", projectDir).succeeds(t)
+	if got := strings.Count(r.stdout, before); got != 2 || strings.Contains(r.stdout, edited) {
+		t.Errorf("stdout = %q, want both layers built with the file as first read, %q", r.stdout, before)
 	}
 }
 
@@ -269,37 +329,37 @@ func TestCacheEntryRemoved(t *testing.T) {
 	}
 }
 
-// TestFailedStepNotCached checks that a step that fails is run again by the next build, while
-// the steps before it are reused.
-func TestFailedStepNotCached(t *testing.T) {
+// TestFailedTargetNotCached checks that a target that fails is run again by the next build, while
+// the targets before it are reused.
+func TestFailedTargetNotCached(t *testing.T) {
 	requireBuildah(t)
 	nonce := newNonce()
 	fsys := project(t, map[string]string{
 		"BUILD": pullBusybox + fmt.Sprintf(`
-layer(name="deps", base="busybox", run=["echo", %q])
-layer(name="broken", base="deps", run=["false"])
+layer(name="deps", base="busybox", steps=[run(["echo", %q])])
+layer(name="broken", base="deps", steps=[run(["false"])])
 layer(name="app", base="broken")
 `, nonce),
 	})
 	out := filepath.Join(t.TempDir(), "app.tar")
 	for range 2 {
-		r := vamos(t, fsys, "write", out, "-C", projectDir).failsWith(t, false, `layer "broken": run ["false"] failed`)
+		r := vamos(t, fsys, "write", out, "-C", projectDir).failsWith(t, false, `layer "broken": run(["false"]) failed`)
 		if !strings.Contains(r.stdout, `layer "broken": building`) {
-			t.Errorf("stdout = %q, want the failed step built again", r.stdout)
+			t.Errorf("stdout = %q, want the failed target built again", r.stdout)
 		}
 	}
-	r := vamos(t, fsys, "write", out, "-C", projectDir).failsWith(t, false, `layer "broken": run ["false"] failed`)
+	r := vamos(t, fsys, "write", out, "-C", projectDir).failsWith(t, false, `layer "broken": run(["false"]) failed`)
 	if !strings.Contains(r.stdout, `layer "deps": cached`) {
-		t.Errorf("stdout = %q, want the step before the failure reused", r.stdout)
+		t.Errorf("stdout = %q, want the target before the failure reused", r.stdout)
 	}
 }
 
-// assertSteps fails the test unless r reports each step in want, such as `layer "app"`, as
+// assertTargets fails the test unless r reports each target in want, such as `layer "app"`, as
 // "building" or "cached".
-func assertSteps(t *testing.T, r result, want map[string]string) {
+func assertTargets(t *testing.T, r result, want map[string]string) {
 	t.Helper()
-	for step, how := range want {
-		if line := step + ": " + how + "\n"; !strings.Contains(r.stdout, line) {
+	for target, how := range want {
+		if line := target + ": " + how + "\n"; !strings.Contains(r.stdout, line) {
 			t.Errorf("stdout = %q, want %q", r.stdout, line)
 		}
 	}
@@ -354,38 +414,42 @@ func newKeys(after, before map[string]bool) map[string]bool {
 	return added
 }
 
-// TestBuildSteps checks that `vamos build` runs only the named steps and the steps they use,
+// TestBuildTargets checks that `vamos build` runs only the named targets and the targets they use,
 // keeping the results in the cache for later builds.
-func TestBuildSteps(t *testing.T) {
+func TestBuildTargets(t *testing.T) {
 	requireBuildah(t)
 	fsys := project(t, map[string]string{"BUILD": cachedBuild(newNonce()), "input.txt": "hello\n"})
 
 	r := vamos(t, fsys, "build", "size", "-C", projectDir).ran(t)
-	assertSteps(t, r, map[string]string{`task "size"`: "building"})
+	assertTargets(t, r, map[string]string{`task "size"`: "building"})
 	if strings.Contains(r.stdout, `layer "deps"`) {
-		t.Errorf("stdout = %q, want only the named step and those it uses", r.stdout)
+		t.Errorf("stdout = %q, want only the named target and those it uses", r.stdout)
 	}
 
 	r = vamos(t, fsys, "build", "app", "size", "app", "-C", projectDir).ran(t)
-	assertSteps(t, r, map[string]string{`layer "deps"`: "building", `task "size"`: "cached", `layer "app"`: "building"})
+	assertTargets(t, r, map[string]string{
+		`layer "deps"`: "building",
+		`task "size"`:  "cached",
+		`layer "app"`:  "building",
+	})
 	if strings.Count(r.stdout, `layer "app"`) != 1 {
-		t.Errorf("stdout = %q, want a step named twice built once", r.stdout)
+		t.Errorf("stdout = %q, want a target named twice built once", r.stdout)
 	}
 	r = vamos(t, fsys, "build", "app", "-C", projectDir).ran(t)
-	assertSteps(t, r, map[string]string{`layer "app"`: "cached"})
+	assertTargets(t, r, map[string]string{`layer "app"`: "cached"})
 
 	r = vamos(t, fsys, "write", filepath.Join(t.TempDir(), "app.tar"), "-C", projectDir).succeeds(t)
-	assertSteps(t, r, map[string]string{`layer "deps"`: "cached", `task "size"`: "cached"})
+	assertTargets(t, r, map[string]string{`layer "deps"`: "cached", `task "size"`: "cached"})
 }
 
-// TestRebuild checks that `vamos build --rebuild` runs the named steps again, reusing the steps
+// TestRebuild checks that `vamos build --rebuild` runs the named targets again, reusing the targets
 // they use, and that later builds use the new result.
 func TestRebuild(t *testing.T) {
 	requireBuildah(t)
 	fsys := project(t, map[string]string{
 		"BUILD": pullBusybox + fmt.Sprintf(`
-layer(name="base", base="busybox", run=["echo", %q])
-layer(name="deps", base="base", run=["sh", "-c", "cat /proc/sys/kernel/random/uuid > /id"])
+layer(name="base", base="busybox", steps=[run(["echo", %q])])
+layer(name="deps", base="base", steps=[run(["sh", "-c", "cat /proc/sys/kernel/random/uuid > /id"])])
 layer(name="app", base="deps")
 `, newNonce()),
 	})
@@ -393,20 +457,20 @@ layer(name="app", base="deps")
 	vamos(t, fsys, "write", filepath.Join(dir, "1.tar"), "-C", projectDir).succeeds(t)
 
 	r := vamos(t, fsys, "build", "deps", "--rebuild", "-C", projectDir).ran(t)
-	assertSteps(t, r, map[string]string{`layer "base"`: "cached", `layer "deps"`: "rebuilding"})
+	assertTargets(t, r, map[string]string{`layer "base"`: "cached", `layer "deps"`: "rebuilding"})
 	if strings.Contains(r.stdout, "pulling again") {
-		t.Errorf("stdout = %q, want the steps the named step uses reused", r.stdout)
+		t.Errorf("stdout = %q, want the targets the named target uses reused", r.stdout)
 	}
 
 	r = vamos(t, fsys, "write", filepath.Join(dir, "2.tar"), "-C", projectDir).succeeds(t)
-	assertSteps(t, r, map[string]string{`layer "deps"`: "cached"})
+	assertTargets(t, r, map[string]string{`layer "deps"`: "cached"})
 	first, second := readImage(t, filepath.Join(dir, "1.tar")), readImage(t, filepath.Join(dir, "2.tar"))
 	if a, b := imageFile(t, first, "/id"), imageFile(t, second, "/id"); a == b {
 		t.Errorf("/id = %q after rebuilding, want it to differ from the first build's", b)
 	}
 }
 
-// TestRebuildReproducible checks that running every step again, rather than reusing their cached
+// TestRebuildReproducible checks that running every target again, rather than reusing their cached
 // results, makes the same image: files are stamped with the base image's time, not the build's.
 func TestRebuildReproducible(t *testing.T) {
 	requireBuildah(t)
@@ -415,7 +479,7 @@ func TestRebuildReproducible(t *testing.T) {
 	first := vamos(t, fsys, "write", filepath.Join(dir, "1.tar"), "-C", projectDir).succeeds(t)
 
 	r := vamos(t, fsys, "build", "deps", "size", "app", "--rebuild", "-C", projectDir).ran(t)
-	assertSteps(t, r, map[string]string{
+	assertTargets(t, r, map[string]string{
 		`layer "deps"`: "rebuilding",
 		`task "size"`:  "rebuilding",
 		`layer "app"`:  "rebuilding",
@@ -423,6 +487,24 @@ func TestRebuildReproducible(t *testing.T) {
 	second := vamos(t, fsys, "write", filepath.Join(dir, "2.tar"), "-C", projectDir).succeeds(t)
 	if a, b := builtID(t, first), builtID(t, second); a != b {
 		t.Errorf("rebuilt image %s, want the first build's %s", b, a)
+	}
+}
+
+// TestEnvOrder checks that the order of env()'s variables, which its target's key leaves out, makes no
+// difference to the image either, so that a target's cached result is the one it would make.
+func TestEnvOrder(t *testing.T) {
+	requireBuildah(t)
+	build := cachedBuild(newNonce())
+	fsys := project(t, map[string]string{"BUILD": build, "input.txt": "hello\n"})
+	dir := t.TempDir()
+	first := vamos(t, fsys, "write", filepath.Join(dir, "1.tar"), "-C", projectDir).succeeds(t)
+
+	build = strings.Replace(build, `env(GREETING="hello", NAME="vamos")`, `env(NAME="vamos", GREETING="hello")`, 1)
+	must(t, afero.WriteFile(fsys, filepath.Join(projectDir, "BUILD"), []byte(build), 0o644))
+	vamos(t, fsys, "build", "deps", "app", "--rebuild", "-C", projectDir).ran(t)
+	second := vamos(t, fsys, "write", filepath.Join(dir, "2.tar"), "-C", projectDir).succeeds(t)
+	if a, b := builtID(t, first), builtID(t, second); a != b {
+		t.Errorf("image with variables reordered is %s, want the first build's %s", b, a)
 	}
 }
 
@@ -436,7 +518,7 @@ func TestRebuildPull(t *testing.T) {
 	}
 }
 
-// TestTimestamp checks that --timestamp stamps the files of steps that run, and that it is
+// TestTimestamp checks that --timestamp stamps the files of targets that run, and that it is
 // left out of their keys: a later build reuses them, stamped as they were.
 func TestTimestamp(t *testing.T) {
 	requireBuildah(t)
@@ -447,7 +529,7 @@ func TestTimestamp(t *testing.T) {
 	vamos(t, fsys, "write", filepath.Join(dir, "1.tar"), "--timestamp", stamp.Format(time.RFC3339),
 		"-C", projectDir).succeeds(t)
 	r := vamos(t, fsys, "write", filepath.Join(dir, "2.tar"), "--timestamp", "0", "-C", projectDir).succeeds(t)
-	assertSteps(t, r, map[string]string{`layer "deps"`: "cached", `task "size"`: "cached"})
+	assertTargets(t, r, map[string]string{`layer "deps"`: "cached", `task "size"`: "cached"})
 
 	for _, name := range []string{"1.tar", "2.tar"} {
 		img := readImage(t, filepath.Join(dir, name))
@@ -474,7 +556,7 @@ func TestTimestamp(t *testing.T) {
 	}
 }
 
-// TestPrune checks that `vamos prune` removes every cached result, so that steps run again, and
+// TestPrune checks that `vamos prune` removes every cached result, so that targets run again, and
 // leaves pulled images, and cached images that also have other names, in the container store.
 // It empties the cache that every test, and every vamos on this machine, shares.
 func TestPrune(t *testing.T) {
@@ -521,7 +603,7 @@ func TestPrune(t *testing.T) {
 	}
 
 	r = vamos(t, fsys, "build", "app", "-C", projectDir).ran(t)
-	assertSteps(t, r, map[string]string{`layer "deps"`: "building", `task "size"`: "building"})
+	assertTargets(t, r, map[string]string{`layer "deps"`: "building", `task "size"`: "building"})
 }
 
 // readImage reads the image in the tarball at path.

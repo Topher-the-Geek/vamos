@@ -132,19 +132,20 @@ func TestPutFileChanged(t *testing.T) {
 	}
 }
 
-// editedFs is a filesystem in which the file name is changed to hold edit when it is opened a
-// second time, as if it were edited while a build reads it.
+// editedFs is a filesystem in which the file name is changed to hold edit when it is opened for the
+// at'th time, or the second if at is zero, as if it were edited while a build reads it.
 type editedFs struct {
 	afero.Fs
 	name, edit string
+	at         int
 	opened     int
 }
 
-// Open opens the file name, first editing it if it is name, opened once before.
+// Open opens the file name, first editing it if it is name, opened at-1 times before.
 func (f *editedFs) Open(name string) (afero.File, error) {
 	if name == f.name {
 		f.opened++
-		if f.opened == 2 {
+		if f.opened == max(f.at, 2) {
 			if err := afero.WriteFile(f.Fs, name, []byte(f.edit), 0o644); err != nil {
 				return nil, err
 			}
@@ -157,7 +158,15 @@ func (f *editedFs) Open(name string) (afero.File, error) {
 // none, or with one that can't be read, has no result.
 func TestActionResults(t *testing.T) {
 	c := newTestCache(t)
-	a := &action{Version: actionVersion, Kind: "task", Base: "scratch", Run: []string{"true"}}
+	a := &action{
+		Version: actionVersion,
+		Kind:    "task",
+		Base:    "scratch",
+		Steps: []actionStep{
+			{Op: "env", Vars: []string{"LANG=C"}},
+			{Op: "run", Argv: []string{"true"}},
+		},
+	}
 	key := a.key()
 	if r, err := c.result(key); err != nil || r != nil {
 		t.Fatalf("result before any = %v, %v; want none", r, err)
@@ -169,9 +178,13 @@ func TestActionResults(t *testing.T) {
 	}
 
 	b := *a
-	b.Run = []string{"false"}
+	b.Steps = []actionStep{a.Steps[0], {Op: "run", Argv: []string{"false"}}}
 	if b.key() == key {
 		t.Errorf("actions with different commands have the same key")
+	}
+	b.Steps = []actionStep{a.Steps[1], a.Steps[0]}
+	if b.key() == key {
+		t.Errorf("actions with steps in a different order have the same key")
 	}
 
 	must(t, os.WriteFile(c.actionPath(key), []byte("{"), 0o600))

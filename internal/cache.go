@@ -22,7 +22,7 @@ import (
 
 // cache is the local build cache. It has the two parts a remote cache server would hold, so one
 // server could later stand in for it: a content-addressed store of blobs, such as files, trees
-// of files and logs, and an action cache, which maps each step's key to its latest result.
+// of files and logs, and an action cache, which maps each target's key to its latest result.
 // The images of layers are kept in the container store instead, and results name them by digest.
 type cache struct {
 	dir string // holds cas/sha256/<hex>, ac/<hex> and tmp/
@@ -406,22 +406,31 @@ func fileModeOf(bits uint32) fs.FileMode {
 	return mode
 }
 
-// actionVersion changes whenever what a key covers, or how a step is built, changes, so that
+// actionVersion changes whenever what a key covers, or how a target is built, changes, so that
 // results built the old way aren't reused.
-const actionVersion = 1
+const actionVersion = 3
 
-// action is everything a step's result depends on. Its digest is the step's key in the
-// action cache. Step names are left out, so renaming a step keeps its results.
+// action is everything a target's result depends on. Its digest is the target's key in the
+// action cache. Target names are left out, so renaming a target keeps its results.
 type action struct {
-	Version     int      `json:"version"`
-	Kind        string   `json:"kind"`                  // "layer" or "task"
-	Base        string   `json:"base"`                  // image ID of the base, or "scratch"
-	Sources     *blob    `json:"sources,omitempty"`     // tree of the step's sources, as placed in destination
-	Destination string   `json:"destination,omitempty"` // where the sources go
-	Run         []string `json:"run,omitempty"`         // a layer's run step, or a task's command
-	Command     []string `json:"command,omitempty"`     // a layer's default command
-	Source      string   `json:"source,omitempty"`      // a task's directory of output
-	Include     []string `json:"include,omitempty"`     // a task's output, within source
+	Version int          `json:"version"`
+	Kind    string       `json:"kind"`              // "layer" or "task"
+	Base    string       `json:"base"`              // image ID of the base, or "scratch"
+	Steps   []actionStep `json:"steps,omitempty"`   // in the order applied
+	Command []string     `json:"command,omitempty"` // a layer's default command
+	Source  string       `json:"source,omitempty"`  // a task's directory of output
+	Include []string     `json:"include,omitempty"` // a task's output, within source
+}
+
+// actionStep is one step of an action. Op says which step, and which other
+// fields it uses.
+type actionStep struct {
+	Op    string   `json:"op"`              // "add", "run", "env", "build_env" or "workdir"
+	Files *blob    `json:"files,omitempty"` // add: tree of the files, as placed beneath dest
+	Dest  string   `json:"dest,omitempty"`  // add
+	Argv  []string `json:"argv,omitempty"`  // run
+	Vars  []string `json:"vars,omitempty"`  // env and build_env: NAME=value, sorted
+	Dir   string   `json:"dir,omitempty"`   // workdir
 }
 
 // key returns a's key in the action cache.
@@ -433,12 +442,12 @@ func (a *action) key() digest.Digest {
 	return digest.FromBytes(data)
 }
 
-// actionResult is the latest result of a step. Everything it names is in the cache or, for
+// actionResult is the latest result of a target. Everything it names is in the cache or, for
 // a layer's image, in the container store, so a result can be checked before it is reused.
 type actionResult struct {
 	Image  digest.Digest `json:"image,omitempty"`  // a layer's image: its config's digest and store ID
 	Output *blob         `json:"output,omitempty"` // a task's files, as a tree
-	Log    *blob         `json:"log,omitempty"`    // what its run step or command printed, if anything
+	Log    *blob         `json:"log,omitempty"`    // what its run() steps printed, if anything
 	Epoch  int64         `json:"epoch"`            // the time its files were stamped with, in Unix seconds
 }
 
@@ -457,7 +466,7 @@ func (c *cache) result(key digest.Digest) (*actionResult, error) {
 	}
 	var r actionResult
 	if err := json.Unmarshal(data, &r); err != nil {
-		// A result that can't be read is as good as none; the step's next run replaces it.
+		// A result that can't be read is as good as none; the target's next run replaces it.
 		return nil, nil
 	}
 	return &r, nil
@@ -487,8 +496,8 @@ const (
 	streamStderr byte = 2
 )
 
-// logRecorder keeps what a step prints to stdout and stderr, in the order it was written,
-// so that a later build can replay it when it reuses the step's result. It writes the log to the
+// logRecorder keeps what a target prints to stdout and stderr, in the order it was written,
+// so that a later build can replay it when it reuses the target's result. It writes the log to the
 // cache as it comes, so that a long one isn't held in memory.
 type logRecorder struct {
 	mu   sync.Mutex
@@ -518,7 +527,7 @@ type logWriter struct {
 }
 
 // Write records data and passes it on. An error recording it is kept for save to report, so that
-// the step's output still reaches the user.
+// the target's output still reaches the user.
 func (lw logWriter) Write(data []byte) (int, error) {
 	lw.l.mu.Lock()
 	if lw.l.err == nil {

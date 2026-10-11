@@ -16,19 +16,19 @@ import (
 	"go.starlark.net/syntax"
 )
 
-// buildFile is the sequence of steps declared by a BUILD file. Its last layer makes the image.
+// buildFile is the sequence of targets declared by a BUILD file. Its last layer makes the image.
 type buildFile struct {
-	path  string            // of the BUILD file, for messages
-	names []string          // of every step, globs included, in the order declared
-	kinds map[string]string // each step's kind, by name: "glob", "pull", "layer" or "task"
-	pulls []*pullSpec       // in the order declared
-	steps []*stepSpec       // layers and tasks, in the order declared; each uses only earlier steps
+	path    string            // of the BUILD file, for messages
+	names   []string          // of every target, globs included, in the order declared
+	kinds   map[string]string // each target's kind, by name: "glob", "pull", "layer" or "task"
+	pulls   []*pullSpec       // in the order declared
+	targets []*targetSpec     // layers and tasks, in the order declared; each uses only earlier targets
 }
 
-// final returns the index in steps of the last layer, which makes the image.
+// final returns the index in targets of the last layer, which makes the image.
 func (f *buildFile) final() int {
-	for i := len(f.steps) - 1; ; i-- {
-		if f.steps[i].output == nil {
+	for i := len(f.targets) - 1; ; i-- {
+		if f.targets[i].output == nil {
 			return i
 		}
 	}
@@ -43,29 +43,45 @@ type pullSpec struct {
 	image reference.NamedTagged
 }
 
-// fileSet is a set of files that steps can name in their sources: files in the project,
+// fileSet is a set of files that add() can name in its source: files in the project,
 // declared by glob(), or files a task makes.
 type fileSet struct {
 	name  string
-	task  *stepSpec // the task that makes the files, or nil for a glob
-	paths []string  // cleaned and relative, to the BUILD file or the task's source; directories include their contents
+	task  *targetSpec // the task that makes the files, or nil for a glob
+	paths []string    // cleaned, relative to the BUILD file or the task's source; directories include their contents
 }
 
-// stepSpec runs on another step's image, declared by a call to layer() or task(). A layer's
-// image becomes the base of later steps; a task's image is discarded once its output is collected.
-type stepSpec struct {
-	name        string
-	base        string     // name of an earlier pull or layer, or scratch
-	sources     []*fileSet // placed in destination at their relative paths
-	destination string
-	run         []string // a layer's run step, or a task's command
-	command     []string // a layer's default command
-	source      string   // a task's directory of output
-	output      *fileSet // a task's output, found in source; nil for a layer
+// targetSpec runs on another target's image, declared by a call to layer() or task(). A layer's
+// image becomes the base of later targets; a task's image is discarded once its output is collected.
+type targetSpec struct {
+	name    string
+	base    string   // name of an earlier pull or layer, or scratch
+	steps   []step   // applied in order
+	command []string // a layer's default command
+	source  string   // a task's directory of output
+	output  *fileSet // a task's output, found in source; nil for a layer
+}
+
+// sets returns the file sets that s's steps add, in order.
+func (s *targetSpec) sets() []*fileSet {
+	var sets []*fileSet
+	for _, in := range s.steps {
+		if set := in.source(); set != nil {
+			sets = append(sets, set)
+		}
+	}
+	return sets
+}
+
+// madeStep is a step made by a call to the builtin kind at pos.
+type madeStep struct {
+	step step
+	kind string
+	pos  syntax.Position
 }
 
 // loadBuildFile executes dir/BUILD from fsys, which must call layer() at least once.
-// Every step but the last layer must be used by a later step, as its base or in its sources,
+// Every target but the last layer must be used by a later target, as its base or added by it,
 // and the files named by glob() must exist within dir.
 func loadBuildFile(fsys afero.Fs, dir string) (*buildFile, error) {
 	info, err := fsys.Stat(dir)
@@ -87,11 +103,13 @@ func loadBuildFile(fsys afero.Fs, dir string) (*buildFile, error) {
 
 	file := &buildFile{path: buildPath, kinds: map[string]string{}}
 	fileSets := map[string]*fileSet{}    // globs and tasks, by name
-	declared := map[string]declaration{} // each step's name
-	used := map[string]bool{}            // names of steps that are a base or a source
+	declared := map[string]declaration{} // each target's name
+	used := map[string]bool{}            // names of targets that are a base or added
 	var images, files []string           // names of pulls and layers, and of globs and tasks, in order
+	var made []madeStep                  // every step made, in order
+	listed := map[step]bool{}            // steps in some target's list
 
-	// declare records name for the step being declared by the builtin running in thread.
+	// declare records name for the target being declared by the builtin running in thread.
 	declare := func(thread *starlark.Thread, name string) error {
 		if name == "" {
 			return errors.New("name must not be empty")
@@ -164,74 +182,79 @@ func loadBuildFile(fsys afero.Fs, dir string) (*buildFile, error) {
 		return starlark.None, nil
 	})
 
-	// addStep checks and declares s, which a call to fn names as sourceNames.
-	addStep := func(thread *starlark.Thread, fn *starlark.Builtin, s *stepSpec, sourceNames []string) error {
-		// Bases and sources must come earlier, so steps can't form a cycle.
+	// add implements add(source, dest), checking the targets it names as it is called.
+	add := starlark.NewBuiltin("add", func(
+		_ *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple,
+	) (starlark.Value, error) {
+		var name, dest string
+		if err := starlark.UnpackArgs(fn.Name(), args, kwargs,
+			"source", &name,
+			"dest", &dest,
+		); err != nil {
+			return nil, err
+		}
+
+		// Sources must come earlier, so targets can't form a cycle.
+		set, ok := fileSets[name]
+		if !ok {
+			if d, ok := declared[name]; ok {
+				return nil, fmt.Errorf("%s: source %q is a %s(), not a glob() or task()", fn.Name(), name, d.kind)
+			}
+			return nil, fmt.Errorf("%s: source %q is not an earlier glob() or task()%s",
+				fn.Name(), name, describeNames("globs and tasks", files))
+		}
+		if err := checkPath("dest", dest); err != nil {
+			return nil, fmt.Errorf("%s: %w", fn.Name(), err)
+		}
+		return &addStep{set: set, dest: dest}, nil
+	})
+
+	// addTarget checks and declares s, made by a call to fn.
+	addTarget := func(thread *starlark.Thread, fn *starlark.Builtin, s *targetSpec) error {
+		// Bases must come earlier, so targets can't form a cycle.
 		if d, ok := declared[s.base]; ok && fileSets[s.base] != nil {
 			return fmt.Errorf("%s: base %q is a %s(), not a pull() or layer()", fn.Name(), s.base, d.kind)
 		} else if !ok && s.base != scratch {
 			return fmt.Errorf("%s: base %q is not \"scratch\" or an earlier pull() or layer()%s",
-				fn.Name(), s.base, describeNames("steps", images))
-		}
-		for _, src := range sourceNames {
-			set, ok := fileSets[src]
-			if !ok {
-				if d, ok := declared[src]; ok {
-					return fmt.Errorf("%s: source %q is a %s(), not a glob() or task()", fn.Name(), src, d.kind)
-				}
-				return fmt.Errorf("%s: source %q is not an earlier glob() or task()%s",
-					fn.Name(), src, describeNames("globs and tasks", files))
-			}
-			s.sources = append(s.sources, set)
-		}
-		if err := checkOverlap(s.sources); err != nil {
-			return fmt.Errorf("%s: %w", fn.Name(), err)
-		}
-		if len(s.sources) > 0 && s.destination == "" {
-			return fmt.Errorf("%s: destination is required when sources are given", fn.Name())
-		}
-		if s.destination != "" && !path.IsAbs(s.destination) {
-			return fmt.Errorf("%s: destination %q must be an absolute path", fn.Name(), s.destination)
+				fn.Name(), s.base, describeNames("targets", images))
 		}
 		if err := declare(thread, s.name); err != nil {
 			return fmt.Errorf("%s: %w", fn.Name(), err)
 		}
 		used[s.base] = true
-		for _, src := range sourceNames {
-			used[src] = true
+		for _, in := range s.steps {
+			listed[in] = true
 		}
-		file.steps = append(file.steps, s)
+		for _, set := range s.sets() {
+			used[set.name] = true
+		}
+		file.targets = append(file.targets, s)
 		return nil
 	}
 
 	layer := starlark.NewBuiltin("layer", func(
 		thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple,
 	) (starlark.Value, error) {
-		var name, base, destination string
-		var sources, run, command *starlark.List
+		var name, base string
+		var steps, command *starlark.List
 		if err := starlark.UnpackArgs(fn.Name(), args, kwargs,
 			"name", &name,
 			"base", &base,
-			"sources?", &sources,
-			"destination?", &destination,
-			"run?", &run,
+			"steps?", &steps,
 			"command?", &command,
 		); err != nil {
 			return nil, err
 		}
 
-		s := &stepSpec{name: name, base: base, destination: destination}
-		sourceNames, err := stringList(fn.Name(), "sources", sources)
-		if err != nil {
-			return nil, err
-		}
-		if s.run, err = stringList(fn.Name(), "run", run); err != nil {
+		s := &targetSpec{name: name, base: base}
+		var err error
+		if s.steps, err = stepList(fn.Name(), steps); err != nil {
 			return nil, err
 		}
 		if s.command, err = stringList(fn.Name(), "command", command); err != nil {
 			return nil, err
 		}
-		if err := addStep(thread, fn, s, sourceNames); err != nil {
+		if err := addTarget(thread, fn, s); err != nil {
 			return nil, err
 		}
 		return starlark.None, nil
@@ -240,26 +263,21 @@ func loadBuildFile(fsys afero.Fs, dir string) (*buildFile, error) {
 	task := starlark.NewBuiltin("task", func(
 		thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple,
 	) (starlark.Value, error) {
-		var name, base, destination, source string
-		var sources, command, include *starlark.List
+		var name, base, source string
+		var steps, include *starlark.List
 		if err := starlark.UnpackArgs(fn.Name(), args, kwargs,
 			"name", &name,
 			"base", &base,
 			"source", &source,
 			"include", &include,
-			"sources?", &sources,
-			"destination?", &destination,
-			"command?", &command,
+			"steps?", &steps,
 		); err != nil {
 			return nil, err
 		}
 
-		s := &stepSpec{name: name, base: base, destination: destination, source: source}
-		sourceNames, err := stringList(fn.Name(), "sources", sources)
-		if err != nil {
-			return nil, err
-		}
-		if s.run, err = stringList(fn.Name(), "command", command); err != nil {
+		s := &targetSpec{name: name, base: base, source: source}
+		var err error
+		if s.steps, err = stepList(fn.Name(), steps); err != nil {
 			return nil, err
 		}
 		if !path.IsAbs(source) {
@@ -275,31 +293,55 @@ func loadBuildFile(fsys afero.Fs, dir string) (*buildFile, error) {
 			}
 		}
 		s.output = &fileSet{name: name, task: s, paths: paths}
-		if err := addStep(thread, fn, s, sourceNames); err != nil {
+		if err := addTarget(thread, fn, s); err != nil {
 			return nil, err
 		}
 		fileSets[name] = s.output
 		return starlark.None, nil
 	})
 
+	// track wraps a builtin that makes steps, recording each one it makes with where, so that
+	// one left out of every target's steps is reported rather than silently ignored.
+	track := func(b *starlark.Builtin) *starlark.Builtin {
+		return starlark.NewBuiltin(b.Name(), func(
+			thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple,
+		) (starlark.Value, error) {
+			v, err := b.CallInternal(thread, args, kwargs)
+			if in, ok := v.(step); ok {
+				made = append(made, madeStep{step: in, kind: b.Name(), pos: thread.CallFrame(1).Pos})
+			}
+			return v, err
+		})
+	}
+
 	thread := &starlark.Thread{Name: "BUILD"}
-	predeclared := starlark.StringDict{"glob": glob, "pull": pull, "layer": layer, "task": task}
+	predeclared := starlark.StringDict{"glob": glob, "pull": pull, "add": track(add), "layer": layer, "task": task}
+	for name, b := range stepBuiltins {
+		predeclared[name] = track(b.(*starlark.Builtin))
+	}
 	if _, err := starlark.ExecFileOptions(&syntax.FileOptions{}, thread, buildPath, src, predeclared); err != nil {
 		if evalErr, ok := err.(*starlark.EvalError); ok {
 			return nil, errors.New(describeEvalError(evalErr))
 		}
 		return nil, err
 	}
-	if !slices.ContainsFunc(file.steps, func(s *stepSpec) bool { return s.output == nil }) {
+	if !slices.ContainsFunc(file.targets, func(s *targetSpec) bool { return s.output == nil }) {
 		return nil, fmt.Errorf("%s: layer() was never called", buildPath)
 	}
 
-	// A step nothing uses would be silently left out of the image.
-	final := file.steps[file.final()].name
+	for _, m := range made {
+		if !listed[m.step] {
+			return nil, fmt.Errorf("%s: %s: %s is not in the steps of any layer() or task()",
+				m.pos, m.kind, m.step)
+		}
+	}
+
+	// A target nothing uses would be silently left out of the image.
+	final := file.targets[file.final()].name
 	for _, name := range files {
 		if !used[name] {
 			d := declared[name]
-			return nil, fmt.Errorf("%s: %s: %q is not in the sources of any later layer() or task()",
+			return nil, fmt.Errorf("%s: %s: %q is not added by any later layer() or task()",
 				d.pos, d.kind, name)
 		}
 	}
@@ -309,7 +351,7 @@ func loadBuildFile(fsys afero.Fs, dir string) (*buildFile, error) {
 				declared[p.name].pos, p.name)
 		}
 	}
-	for _, s := range file.steps {
+	for _, s := range file.targets {
 		if s.output == nil && !used[s.name] && s.name != final {
 			return nil, fmt.Errorf("%s: layer: %q is not the base of any later layer() or task(); "+
 				"only the last layer() makes the image", declared[s.name].pos, s.name)
@@ -318,18 +360,18 @@ func loadBuildFile(fsys afero.Fs, dir string) (*buildFile, error) {
 	return file, nil
 }
 
-// targets checks the names of steps to build, given on the command line, and returns them
+// parseTargets checks the names of targets to build, given on the command line, and returns them
 // without repeats.
-func (f *buildFile) targets(names []string) ([]string, error) {
+func (f *buildFile) parseTargets(names []string) ([]string, error) {
 	var targets []string
 	for _, name := range names {
 		switch f.kinds[name] {
 		case "":
-			hint := "; its steps are " + quoteNames(f.names)
+			hint := "; its targets are " + quoteNames(f.names)
 			if closest := closestName(name, f.names); closest != "" {
 				hint = fmt.Sprintf("; did you mean %q?", closest)
 			}
-			return nil, fmt.Errorf("%s has no step %q%s", f.path, name, hint)
+			return nil, fmt.Errorf("%s has no target %q%s", f.path, name, hint)
 		case "glob":
 			return nil, fmt.Errorf("%q is a glob(), whose files are read by every build; "+
 				"name a pull(), layer() or task() to build", name)
@@ -342,19 +384,19 @@ func (f *buildFile) targets(names []string) ([]string, error) {
 }
 
 // needs returns the names of the pulls, layers and tasks that building targets runs:
-// the targets themselves, and the steps they use, directly or not.
+// the targets themselves, and the targets they use, directly or not.
 func (f *buildFile) needs(targets []string) map[string]bool {
 	needed := map[string]bool{}
 	for _, name := range targets {
 		needed[name] = true
 	}
-	// Steps use only earlier steps, so one pass from the last finds everything.
-	for _, s := range slices.Backward(f.steps) {
+	// Targets use only earlier targets, so one pass from the last finds everything.
+	for _, s := range slices.Backward(f.targets) {
 		if !needed[s.name] {
 			continue
 		}
 		needed[s.base] = true
-		for _, set := range s.sources {
+		for _, set := range s.sets() {
 			if set.task != nil {
 				needed[set.task.name] = true
 			}
@@ -396,7 +438,7 @@ func editDistance(a, b string) int {
 	return row[len(b)]
 }
 
-// declaration records where a step's name was declared, and by which builtin.
+// declaration records where a target's name was declared, and by which builtin.
 type declaration struct {
 	kind string // "glob", "pull", "layer" or "task"
 	pos  syntax.Position
@@ -424,7 +466,7 @@ func parsePullImage(image, tag string) (reference.NamedTagged, error) {
 	return ref, nil
 }
 
-// describeNames lists the steps of a kind, such as "globs", declared so far, for an error
+// describeNames lists the targets of a kind, such as "globs", declared so far, for an error
 // about an unknown name.
 func describeNames(kind string, names []string) string {
 	if len(names) == 0 {
@@ -513,37 +555,6 @@ func checkInclude(fsys afero.Fs, dir, src string) error {
 		}
 	}
 	return nil
-}
-
-// checkOverlap reports whether sources from different places, the project or a task's output,
-// include the same path, so that one would silently replace the other's files.
-func checkOverlap(sources []*fileSet) error {
-	for i, a := range sources {
-		for _, b := range sources[i+1:] {
-			if a.task == b.task {
-				continue // the same files, copied once
-			}
-			for _, pa := range a.paths {
-				for _, pb := range b.paths {
-					if shared, ok := sharedPath(pa, pb); ok {
-						return fmt.Errorf("sources %q and %q both include %q", a.name, b.name, shared)
-					}
-				}
-			}
-		}
-	}
-	return nil
-}
-
-// sharedPath returns whichever of the cleaned relative paths a and b is within the other, if either is.
-func sharedPath(a, b string) (string, bool) {
-	switch {
-	case within(b, a):
-		return b, true
-	case within(a, b):
-		return a, true
-	}
-	return "", false
 }
 
 // within reports whether the cleaned relative path p is dir or inside it.

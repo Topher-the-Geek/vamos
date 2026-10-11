@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/registry"
+	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	"github.com/spf13/afero"
@@ -32,8 +34,7 @@ glob(name="hello", include=["hello.txt"])
 layer(
     name="app",
     base="busybox",
-    sources=["hello"],
-    destination="/data",
+    steps=[add("hello", "/data")],
     command=["echo", "hello from vamos"],
 )
 `,
@@ -178,7 +179,7 @@ func TestWriteInsideProject(t *testing.T) {
 	requireBuildah(t)
 	fsys, root := diskProject(t, map[string]string{
 		"BUILD": pullBusybox + `glob(name="project", include=["."])` + "\n" +
-			`layer(name="app", base="busybox", sources=["project"], destination="/app")`,
+			`layer(name="app", base="busybox", steps=[add("project", "/app")])`,
 		"hello.txt": "hello, file\n",
 	}, nil)
 	out := filepath.Join(root, projectDir, "app.tar")
@@ -202,9 +203,11 @@ func TestWriteKeepsExistingFileOnFailure(t *testing.T) {
 	if err := os.WriteFile(out, []byte("an old image"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fsys := project(t, map[string]string{"BUILD": pullBusybox + `layer(name="app", base="busybox", run=["false"])`})
+	fsys := project(t, map[string]string{
+		"BUILD": pullBusybox + `layer(name="app", base="busybox", steps=[run(["false"])])`,
+	})
 
-	vamos(t, fsys, "write", out, "-C", projectDir).failsWith(t, false, `run ["false"] failed`)
+	vamos(t, fsys, "write", out, "-C", projectDir).failsWith(t, false, `run(["false"]) failed`)
 
 	if b, _ := os.ReadFile(out); string(b) != "an old image" {
 		t.Errorf("app.tar = %q, want the old file untouched", b)
@@ -220,7 +223,7 @@ func TestScratch(t *testing.T) {
 	// Nothing is pulled: the image holds only the layer's sources.
 	fsys := project(t, map[string]string{
 		"BUILD": `glob(name="hello", include=["hello.txt"])` + "\n" +
-			`layer(name="app", base="scratch", sources=["hello"], destination="/data")`,
+			`layer(name="app", base="scratch", steps=[add("hello", "/data")])`,
 		"hello.txt": "hello, file\n",
 	})
 	out := filepath.Join(t.TempDir(), "app.tar")
@@ -240,7 +243,7 @@ func TestSourceDirectory(t *testing.T) {
 	requireBuildah(t)
 	fsys := project(t, map[string]string{
 		"BUILD": pullBusybox + `glob(name="site", include=["site"])` + "\n" +
-			`layer(name="app", base="busybox", sources=["site"], destination="/srv")`,
+			`layer(name="app", base="busybox", steps=[add("site", "/srv")])`,
 		"site/index.html": "<h1>hi</h1>",
 		"site/css/a.css":  "h1 {}",
 	})
@@ -267,7 +270,7 @@ func TestSourcePaths(t *testing.T) {
 		"BUILD": pullBusybox + `
 glob(name="code", include=["main.sh", "lib/util.sh", "lib"])
 glob(name="docs", include=["./docs/README.md", "main.sh"])
-layer(name="app", base="busybox", sources=["code", "docs"], destination="/app")
+layer(name="app", base="busybox", steps=[add("code", "/app"), add("docs", "/app")])
 `,
 		"main.sh":        "echo main",
 		"lib/util.sh":    "echo util",
@@ -307,7 +310,7 @@ func TestIncludeProject(t *testing.T) {
 		t.Fatal(err)
 	}
 	build := pullBusybox + `glob(name="all", include=["-vendor", "."])` + "\n" +
-		`layer(name="app", base="busybox", sources=["all"], destination="/app")`
+		`layer(name="app", base="busybox", steps=[add("all", "/app")])`
 	if err := os.WriteFile(filepath.Join(real, "BUILD"), []byte(build), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -337,9 +340,9 @@ func TestDestinationModes(t *testing.T) {
 	fsys := project(t, map[string]string{
 		"BUILD": pullBusybox + `glob(name="code", include=["app.sh"])` + "\n" +
 			`glob(name="nested", include=["tmp/app.sh"])` + "\n" +
-			`layer(name="tmp", base="busybox", sources=["code"], destination="/tmp")` + "\n" +
-			`layer(name="root", base="tmp", sources=["nested"], destination="/")` + "\n" +
-			`layer(name="app", base="root", sources=["code"], destination="/app")`,
+			`layer(name="tmp", base="busybox", steps=[add("code", "/tmp")])` + "\n" +
+			`layer(name="root", base="tmp", steps=[add("nested", "/")])` + "\n" +
+			`layer(name="app", base="root", steps=[add("code", "/app")])`,
 		"app.sh":     "echo hi",
 		"tmp/app.sh": "echo hi",
 	})
@@ -369,7 +372,7 @@ func TestSourceSymlinks(t *testing.T) {
 	requireBuildah(t)
 	fsys, root := diskProject(t, map[string]string{
 		"BUILD": pullBusybox + `glob(name="site", include=["site"])` + "\n" +
-			`layer(name="app", base="busybox", sources=["site"], destination="/srv")`,
+			`layer(name="app", base="busybox", steps=[add("site", "/srv")])`,
 		"site/index.html": "<h1>hi</h1>",
 	}, map[string]string{
 		"site/home.html": "index.html",
@@ -399,7 +402,7 @@ func TestSourceSymlinks(t *testing.T) {
 	}
 }
 
-func TestSteps(t *testing.T) {
+func TestTargets(t *testing.T) {
 	requireBuildah(t)
 	fsys := project(t, map[string]string{
 		"BUILD": pullBusybox + `
@@ -407,9 +410,10 @@ glob(name="deps_files", include=["deps.txt"])
 layer(
     name="deps",
     base="busybox",
-    sources=["deps_files"],
-    destination="/deps",
-    run=["sh", "-c", "echo installed > /deps/installed.txt"],
+    steps=[
+        add("deps_files", "/deps"),
+        run(["sh", "-c", "echo installed > /deps/installed.txt"]),
+    ],
     command=["echo", "from deps"],
 )
 
@@ -417,9 +421,10 @@ glob(name="app_files", include=["app.txt"])
 layer(
     name="app",
     base="deps",
-    sources=["app_files"],
-    destination="/app",
-    run=["cat", "/deps/installed.txt"],
+    steps=[
+        add("app_files", "/app"),
+        run(["cat", "/deps/installed.txt"]),
+    ],
 )
 `,
 		"deps.txt": "a dependency\n",
@@ -432,7 +437,7 @@ layer(
 
 	// Each layer is added to the image of the one before.
 	if !strings.Contains(r.stdout, "installed") {
-		t.Errorf("stdout = %q, want the app step to see the deps step's files", r.stdout)
+		t.Errorf("stdout = %q, want the app target to see the deps target's files", r.stdout)
 	}
 	img, err := tarball.ImageFromPath(out, nil)
 	if err != nil {
@@ -454,21 +459,169 @@ layer(
 	assertNoNewImages(t, before)
 }
 
-func TestStepFails(t *testing.T) {
+func TestTargetFails(t *testing.T) {
 	requireBuildah(t)
 	fsys := project(t, map[string]string{
 		"BUILD": pullBusybox + `
-layer(name="deps", base="busybox", run=["touch", "/installed"])
-layer(name="app", base="deps", run=["false"])
+layer(name="deps", base="busybox", steps=[run(["touch", "/installed"])])
+layer(name="app", base="deps", steps=[run(["false"])])
 `,
 	})
 	out := t.TempDir()
 	before := unnamedImages(t)
 
 	vamos(t, fsys, "write", filepath.Join(out, "app.tar"), "-C", projectDir).
-		failsWith(t, false, `layer "app": run ["false"] failed`)
+		failsWith(t, false, `layer "app": run(["false"]) failed`)
 	assertNoFiles(t, out)
 	assertNoNewImages(t, before)
+}
+
+// TestExpandedPathRelative checks that a path that is only relative once its variables are expanded
+// fails the target, saying what it became.
+func TestExpandedPathRelative(t *testing.T) {
+	requireBuildah(t)
+	fsys := project(t, map[string]string{
+		"BUILD": pullBusybox + `
+layer(name="app", base="busybox", steps=[build_env(DIR="srv"), workdir("$DIR/app")])
+`,
+	})
+	out := t.TempDir()
+	before := unnamedImages(t)
+
+	vamos(t, fsys, "write", filepath.Join(out, "app.tar"), "-C", projectDir).failsWith(t, false,
+		`layer "app": workdir("$DIR/app") failed: path "$DIR/app" is "srv/app", which must be an absolute path`)
+	assertNoFiles(t, out)
+	assertNoNewImages(t, before)
+}
+
+// TestSteps checks that a layer applies its steps in order: that files added later replace
+// those added before, that env() and workdir() reach later runs and the image, as in a Dockerfile, that
+// build_env() reaches only the target's later runs, and that values, add()'s dest and workdir()'s path refer to
+// variables set before them.
+func TestSteps(t *testing.T) {
+	requireBuildah(t)
+	fsys := project(t, map[string]string{
+		"BUILD": pullBusybox + `
+glob(name="conf", include=["app.conf"])
+task(
+    name="generated",
+    base="busybox",
+    steps=[run(["sh", "-c", "mkdir /out && echo generated > /out/app.conf"])],
+    source="/out",
+    include=["app.conf"],
+)
+layer(
+    name="base",
+    base="busybox",
+    steps=[
+        run(["test", "!", "-e", "/etc/app/app.conf"]),
+        build_env(CONF="/etc"),
+        add("conf", "/etc/app"),
+        add("generated", "${CONF}/app"),
+        env(GREETING="hello", **{"MODE": "image"}),
+        build_env(MODE="build", TOOL="cc", ROOT="/srv/"),
+        workdir("$ROOT/app/"),
+        run(["sh", "-c", "echo $GREETING $MODE $TOOL > during.txt"]),
+        env(MODE="final"),
+        run(["sh", "-c", "echo $MODE $TOOL > after.txt"]),
+        # Each value sees the variables as they were before the call: MODE is still "final" in LABEL.
+        env(PATH="/app/bin:$PATH", MODE="${MODE}2", LABEL="$MODE-$TOOL-$UNSET-$$5"),
+        run(["sh", "-c", "echo $PATH $MODE $LABEL > expanded.txt"]),
+    ],
+)
+layer(
+    name="app",
+    base="base",
+    steps=[
+        run(["sh", "-c", "echo $GREETING $MODE ${TOOL:-unset} $(pwd) > /inherited.txt"]),
+        workdir("/data"),
+    ],
+)
+`,
+		"app.conf": "from the project\n",
+	})
+	out := filepath.Join(t.TempDir(), "app.tar")
+
+	vamos(t, fsys, "write", out, "-C", projectDir).succeeds(t)
+
+	img, err := tarball.ImageFromPath(out, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]string{
+		"/etc/app/app.conf":   "generated\n",
+		"/srv/app/during.txt": "hello build cc\n",
+		"/srv/app/after.txt":  "final cc\n",
+		"/srv/app/expanded.txt": "/app/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin " +
+			"final2 final-cc--$5\n",
+		"/inherited.txt": "hello final2 unset /srv/app\n",
+	} {
+		if got := imageFile(t, img, path); got != want {
+			t.Errorf("%s = %q, want %q", path, got, want)
+		}
+	}
+	config, err := img.ConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"GREETING=hello", "MODE=final2", "LABEL=final-cc--$5"} {
+		if !slices.Contains(config.Config.Env, want) {
+			t.Errorf("env = %q, want it to include %s", config.Config.Env, want)
+		}
+	}
+	if slices.ContainsFunc(config.Config.Env, func(v string) bool { return strings.HasPrefix(v, "TOOL=") }) {
+		t.Errorf("env = %q, want build_env()'s TOOL left out", config.Config.Env)
+	}
+	if got := config.Config.WorkingDir; got != "/data" {
+		t.Errorf("working directory = %q, want /data", got)
+	}
+	// Like a Dockerfile's WORKDIR, workdir() makes the directory even if nothing runs in it.
+	if !walkImage(t, img, func(hdr *tar.Header, _ io.Reader) bool {
+		return imagePath(hdr) == "/data" && hdr.Typeflag == tar.TypeDir
+	}) {
+		t.Errorf("/data not found in image, want workdir() to make it")
+	}
+}
+
+// TestWorkdirUser checks that, as in a Dockerfile, workdir() makes its directory for the image's user, so that
+// later runs, which run as that user, can write to it.
+func TestWorkdirUser(t *testing.T) {
+	requireBuildah(t)
+	server := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))
+	t.Cleanup(server.Close)
+	host := strings.TrimPrefix(server.URL, "http://")
+
+	// busybox runs as root, so push it to the registry with a user that isn't.
+	base := host + "/nonroot:v1"
+	fsys := project(t, map[string]string{"BUILD": pullBusybox + `layer(name="base", base="busybox")`})
+	vamos(t, fsys, "push", base, "--tls-verify=false", "-C", projectDir).succeeds(t)
+	ref, err := name.ParseReference(base, name.Insecure)
+	must(t, err)
+	img, err := remote.Image(ref)
+	must(t, err)
+	config, err := img.ConfigFile()
+	must(t, err)
+	config.Config.User = "1000:1000"
+	img, err = mutate.ConfigFile(img, config)
+	must(t, err)
+	must(t, remote.Write(ref, img))
+
+	fsys = project(t, map[string]string{
+		"BUILD": fmt.Sprintf(`
+pull(name="base", image="%s/nonroot", tag="v1")
+layer(name="app", base="base", steps=[workdir("/work/dir"), run(["sh", "-c", "echo %s > made.txt"])])
+`, host, newNonce()),
+	})
+	out := filepath.Join(t.TempDir(), "app.tar")
+	vamos(t, fsys, "write", out, "--tls-verify=false", "-C", projectDir).succeeds(t)
+
+	img, err = tarball.ImageFromPath(out, nil)
+	must(t, err)
+	if !walkImage(t, img, func(hdr *tar.Header, _ io.Reader) bool {
+		return imagePath(hdr) == "/work/dir/made.txt" && hdr.Uid == 1000
+	}) {
+		t.Errorf("/work/dir/made.txt not found in image, owned by 1000")
+	}
 }
 
 func TestTask(t *testing.T) {
@@ -480,15 +633,16 @@ glob(name="input", include=["input.txt"])
 task(
     name="shout",
     base="busybox",
-    sources=["input"],
-    destination="/work",
-    command=["sh", "-c", """
+    steps=[
+        add("input", "/work"),
+        run(["sh", "-c", """
         mkdir -p /work/out/sub
         tr a-z A-Z < /work/input.txt > /work/out/upper.txt
         echo nested > /work/out/sub/nested.txt
         echo left out > /work/out/skipped.txt
         echo shouting
-    """],
+    """]),
+    ],
     source="/work/out",
     include=["upper.txt", "sub"],
 )
@@ -497,14 +651,19 @@ task(
 task(
     name="count",
     base="busybox",
-    sources=["shout"],
-    destination="/count",
-    command=["sh", "-c", "wc -c < /count/upper.txt > /count/size.txt"],
+    steps=[
+        add("shout", "/count"),
+        run(["sh", "-c", "wc -c < /count/upper.txt > /count/size.txt"]),
+    ],
     source="/count",
     include=["size.txt"],
 )
 
-layer(name="app", base="busybox", sources=["shout", "count", "input"], destination="/app")
+layer(
+    name="app",
+    base="busybox",
+    steps=[add("shout", "/app"), add("count", "/app"), add("input", "/app")],
+)
 `,
 		"input.txt": "hello\n",
 	})
@@ -549,16 +708,16 @@ func TestTaskOutputModes(t *testing.T) {
 task(
     name="make",
     base="busybox",
-    command=["sh", "-c", """
+    steps=[run(["sh", "-c", """
         mkdir -p /out/shared
         echo tool > /out/tool
         chmod 4750 /out/tool
         chmod 1777 /out/shared
-    """],
+    """])],
     source="/out",
     include=["tool", "shared"],
 )
-layer(name="app", base="busybox", sources=["make"], destination="/app")
+layer(name="app", base="busybox", steps=[add("make", "/app")])
 `,
 	})
 	out := filepath.Join(t.TempDir(), "app.tar")
@@ -590,15 +749,15 @@ func TestTaskOutputLinks(t *testing.T) {
 task(
     name="make",
     base="busybox",
-    command=["sh", "-c", """
+    steps=[run(["sh", "-c", """
         mkdir -p ` + marker + `
         echo inside > ` + marker + `/file.txt
         ln -s ` + marker + ` /out
-    """],
+    """])],
     source="/out",
     include=["file.txt"],
 )
-layer(name="app", base="busybox", sources=["make"], destination="/app")
+layer(name="app", base="busybox", steps=[add("make", "/app")])
 `,
 	})
 	out := filepath.Join(t.TempDir(), "app.tar")
@@ -628,7 +787,7 @@ func TestTaskFailures(t *testing.T) {
 			command: `["false"]`,
 			source:  "/",
 			include: "bin",
-			want:    []string{`task "make": command ["false"] failed`, "exit status 1"},
+			want:    []string{`task "make": run(["false"]) failed`, "exit status 1"},
 		},
 		{
 			name:    "source not found",
@@ -671,9 +830,9 @@ func TestTaskFailures(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			fsys := project(t, map[string]string{
 				"BUILD": pullBusybox +
-					`task(name="make", base="busybox", command=` + tt.command +
-					`, source="` + tt.source + `", include=["` + tt.include + `"])` + "\n" +
-					`layer(name="app", base="busybox", sources=["make"], destination="/app")`,
+					`task(name="make", base="busybox", steps=[run(` + tt.command +
+					`)], source="` + tt.source + `", include=["` + tt.include + `"])` + "\n" +
+					`layer(name="app", base="busybox", steps=[add("make", "/app")])`,
 			})
 			out := t.TempDir()
 			before := unnamedImages(t)
@@ -818,7 +977,7 @@ func TestLoadWithoutDocker(t *testing.T) {
 	t.Setenv("DOCKER_HOST", "unix:///nonexistent/docker.sock")
 
 	fsys := project(t, map[string]string{
-		"BUILD": pullBusybox + `layer(name="app", base="busybox", run=["echo", "build completed"])`,
+		"BUILD": pullBusybox + `layer(name="app", base="busybox", steps=[run(["echo", "build completed"])])`,
 	})
 	r := vamos(t, fsys, "load", "app:dev", "-C", projectDir).
 		failsWith(t, false, "loading into Docker", "/nonexistent/docker.sock")
@@ -855,9 +1014,10 @@ glob(name="script", include=["build.sh"])
 layer(
     name="app",
     base="busybox",
-    sources=["script"],
-    destination="/src",
-    run=["sh", "/src/build.sh"],
+    steps=[
+        add("script", "/src"),
+        run(["sh", "/src/build.sh"]),
+    ],
 )
 `,
 		"build.sh": "echo compiling\necho 'built!' > /built.txt\necho 'a warning' >&2\n",
@@ -866,19 +1026,19 @@ layer(
 
 	r := vamos(t, fsys, "write", out, "-C", projectDir).succeeds(t)
 
-	// The run step's output reaches the user as it happens.
+	// The run() step's output reaches the user as it happens.
 	if !strings.Contains(r.stdout, "compiling") {
-		t.Errorf("stdout = %q, want the run step's output", r.stdout)
+		t.Errorf("stdout = %q, want the run() step's output", r.stdout)
 	}
 	if !strings.Contains(r.stderr, "a warning") {
-		t.Errorf("stderr = %q, want the run step's errors", r.stderr)
+		t.Errorf("stderr = %q, want the run() step's errors", r.stderr)
 	}
 	img, err := tarball.ImageFromPath(out, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := imageFile(t, img, "/built.txt"); got != "built!\n" {
-		t.Errorf("/built.txt = %q, want the run step's output file", got)
+		t.Errorf("/built.txt = %q, want the run() step's output file", got)
 	}
 }
 
@@ -887,7 +1047,7 @@ func TestRunStepSucceeds(t *testing.T) {
 	for _, run := range []string{`["true"]`, `["echo", "hi"]`, `["sh", "-c", "exit 0"]`} {
 		t.Run(run, func(t *testing.T) {
 			fsys := project(t, map[string]string{
-				"BUILD": pullBusybox + `layer(name="app", base="busybox", run=` + run + `)`,
+				"BUILD": pullBusybox + `layer(name="app", base="busybox", steps=[run(` + run + `)])`,
 			})
 			vamos(t, fsys, "write", filepath.Join(t.TempDir(), "app.tar"), "-C", projectDir).succeeds(t)
 		})
@@ -905,18 +1065,25 @@ func TestRunStepFailures(t *testing.T) {
 	}{
 		{
 			name:  "false",
-			build: pullBusybox + `layer(name="app", base="busybox", run=["false"])`,
-			want:  []string{`run ["false"] failed`, "exit status 1"},
+			build: pullBusybox + `layer(name="app", base="busybox", steps=[run(["false"])])`,
+			want:  []string{`run(["false"]) failed`, "exit status 1"},
 		},
 		{
 			name:  "exit code",
-			build: pullBusybox + `layer(name="app", base="busybox", run=["sh", "-c", "exit 3"])`,
-			want:  []string{`run ["sh" "-c" "exit 3"] failed`, "exit status 3"},
+			build: pullBusybox + `layer(name="app", base="busybox", steps=[run(["sh", "-c", "exit 3"])])`,
+			want:  []string{`run(["sh", "-c", "exit 3"]) failed`, "exit status 3"},
 		},
 		{
-			name:  "command not found",
-			build: pullBusybox + `layer(name="app", base="busybox", run=["no-such-compiler", "main.c"])`,
-			want:  []string{`run ["no-such-compiler" "main.c"] failed`, "no-such-compiler"},
+			name: "command not found",
+			build: pullBusybox +
+				`layer(name="app", base="busybox", steps=[run(["no-such-compiler", "main.c"])])`,
+			want: []string{`run(["no-such-compiler", "main.c"]) failed`, "no-such-compiler"},
+		},
+		{
+			// A file stands where a directory must be made.
+			name:  "workdir within a file",
+			build: pullBusybox + `layer(name="app", base="busybox", steps=[workdir("/bin/sh/app")])`,
+			want:  []string{`layer "app": workdir("/bin/sh/app") failed`},
 		},
 		{
 			name: "source doesn't compile",
@@ -925,13 +1092,14 @@ glob(name="script", include=["app.sh"])
 layer(
     name="app",
     base="busybox",
-    sources=["script"],
-    destination="/src",
-    run=["sh", "-n", "/src/app.sh"],
+    steps=[
+        add("script", "/src"),
+        run(["sh", "-n", "/src/app.sh"]),
+    ],
 )
 `,
 			files:      map[string]string{"app.sh": "if true; then\n  echo unfinished\n"},
-			want:       []string{`run ["sh" "-n" "/src/app.sh"] failed`, "exit status 2"},
+			want:       []string{`run(["sh", "-n", "/src/app.sh"]) failed`, "exit status 2"},
 			wantStderr: "syntax error",
 		},
 	}
@@ -945,7 +1113,7 @@ layer(
 			r := vamos(t, project(t, files), "write", filepath.Join(out, "app.tar"), "-C", projectDir).
 				failsWith(t, false, tt.want...)
 			if !strings.Contains(r.stderr, tt.wantStderr) {
-				t.Errorf("stderr = %q, want the run step's errors %q", r.stderr, tt.wantStderr)
+				t.Errorf("stderr = %q, want the run() step's errors %q", r.stderr, tt.wantStderr)
 			}
 			assertNoFiles(t, out)
 		})
@@ -955,12 +1123,13 @@ layer(
 func TestInterrupted(t *testing.T) {
 	requireBuildah(t)
 	fsys := project(t, map[string]string{
-		"BUILD": pullBusybox + `layer(name="app", base="busybox", run=["sh", "-c", "echo started; sleep 1"])`,
+		"BUILD": pullBusybox +
+			`layer(name="app", base="busybox", steps=[run(["sh", "-c", "echo started; sleep 1"])])`,
 	})
 	out := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	// Interrupt, as main does on Ctrl-C, once the run step has started.
+	// Interrupt, as main does on Ctrl-C, once the run() step has started.
 	watch := writerFunc(func(p []byte) (int, error) {
 		if strings.Contains(string(p), "started") {
 			cancel()

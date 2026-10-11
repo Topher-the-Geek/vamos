@@ -76,9 +76,9 @@ func TestCommandLineMistakes(t *testing.T) {
 			want: []string{`invalid argument "maybe"`, "--tls-verify"},
 		},
 		{
-			name: "build without steps",
+			name: "build without targets",
 			args: []string{"build"},
-			want: []string{"missing step name", "vamos build packages"},
+			want: []string{"missing target name", "vamos build packages"},
 		},
 		{
 			name: "rebuild on push",
@@ -108,38 +108,38 @@ func TestCommandLineMistakes(t *testing.T) {
 	}
 }
 
-// TestBuildStepMistakes checks that naming steps `vamos build` can't build is reported before
+// TestBuildTargetMistakes checks that naming targets `vamos build` can't build is reported before
 // anything is built.
-func TestBuildStepMistakes(t *testing.T) {
+func TestBuildTargetMistakes(t *testing.T) {
 	build := pullBusybox + `
 glob(name="code", include=["app.sh"])
-layer(name="packages", base="busybox", sources=["code"], destination="/app")
+layer(name="packages", base="busybox", steps=[add("code", "/app")])
 `
 	tests := []struct {
-		name  string
-		steps []string
-		want  []string
+		name    string
+		targets []string
+		want    []string
 	}{
 		{
-			name:  "misspelled step",
-			steps: []string{"pakcages"},
-			want:  []string{`/project/BUILD has no step "pakcages"; did you mean "packages"?`},
+			name:    "misspelled target",
+			targets: []string{"pakcages"},
+			want:    []string{`/project/BUILD has no target "pakcages"; did you mean "packages"?`},
 		},
 		{
-			name:  "unknown step",
-			steps: []string{"packages", "server"},
-			want:  []string{`/project/BUILD has no step "server"; its steps are "busybox", "code", "packages"`},
+			name:    "unknown target",
+			targets: []string{"packages", "server"},
+			want:    []string{`/project/BUILD has no target "server"; its targets are "busybox", "code", "packages"`},
 		},
 		{
-			name:  "glob",
-			steps: []string{"code"},
-			want:  []string{`"code" is a glob(), whose files are read by every build`},
+			name:    "glob",
+			targets: []string{"code"},
+			want:    []string{`"code" is a glob(), whose files are read by every build`},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fsys := project(t, map[string]string{"BUILD": build, "app.sh": ""})
-			args := append([]string{"build", "-C", projectDir}, tt.steps...)
+			args := append([]string{"build", "-C", projectDir}, tt.targets...)
 			vamos(t, fsys, args...).failsWith(t, false, tt.want...)
 		})
 	}
@@ -238,7 +238,7 @@ func TestProjectDirectoryMistakes(t *testing.T) {
 }
 
 func TestBuildFileMistakes(t *testing.T) {
-	// Steps follow pullBusybox, so they start on line 2, or line 3 after withGlob.
+	// Targets follow pullBusybox, so they start on line 2, or line 3 after withGlob.
 	const withGlob = `glob(name="code", include=["app.sh"])` + "\n"
 	tests := []struct {
 		name  string
@@ -281,11 +281,11 @@ func TestBuildFileMistakes(t *testing.T) {
 			build: pullBusybox + `layer(name="app", base="busybx")`,
 			want: []string{
 				"/project/BUILD:2:6:",
-				`layer: base "busybx" is not "scratch" or an earlier pull() or layer(); earlier steps are "busybox"`,
+				`layer: base "busybx" is not "scratch" or an earlier pull() or layer(); earlier targets are "busybox"`,
 			},
 		},
 		{
-			name:  "base names an image instead of a step",
+			name:  "base names an image instead of a target",
 			build: `layer(name="app", base="docker.io/library/busybox:1.36")`,
 			want: []string{
 				"/project/BUILD:1:6:",
@@ -304,7 +304,7 @@ func TestBuildFileMistakes(t *testing.T) {
 			want:  []string{"/project/BUILD:2:6:", `layer: name "busybox" is already used at /project/BUILD:1:5`},
 		},
 		{
-			name:  "step named scratch",
+			name:  "target named scratch",
 			build: `pull(name="scratch", image="busybox")`,
 			want:  []string{"/project/BUILD:1:5:", `pull: name "scratch" is reserved for the empty base image`},
 		},
@@ -357,33 +357,58 @@ func TestBuildFileMistakes(t *testing.T) {
 			},
 		},
 		{
-			name:  "sources not a list",
-			build: pullBusybox + withGlob + `layer(name="app", base="busybox", sources="code", destination="/app")`,
+			name:  "old arguments",
+			build: pullBusybox + withGlob + `layer(name="app", base="busybox", sources=["code"], destination="/app")`,
 			files: map[string]string{"app.sh": "echo hi"},
-			want:  []string{"/project/BUILD:3:6:", "sources", "got string, want list"},
+			want:  []string{"/project/BUILD:3:6:", `unexpected keyword argument "sources"`},
+		},
+		{
+			name:  "steps not a list",
+			build: pullBusybox + `layer(name="app", base="busybox", steps=run(["true"]))`,
+			want:  []string{"/project/BUILD:2:6:", "steps", "got step, want list"},
+		},
+		{
+			name:  "step not a step",
+			build: pullBusybox + `layer(name="app", base="busybox", steps=[run(["true"]), "make"])`,
+			want: []string{
+				"/project/BUILD:2:6:",
+				"layer: steps[1] is string, want a step, such as add() or run()",
+			},
+		},
+		{
+			name:  "add source not a name",
+			build: pullBusybox + `layer(name="app", base="busybox", steps=[add(1, "/app")])`,
+			want:  []string{"/project/BUILD:2:45:", "add: for parameter source: got int, want string"},
+		},
+		{
+			name: "add sources as a list",
+			build: pullBusybox + withGlob +
+				`layer(name="app", base="busybox", steps=[add(["code"], "/app")])`,
+			files: map[string]string{"app.sh": "echo hi"},
+			want:  []string{"/project/BUILD:3:45:", "add: for parameter source: got list, want string"},
 		},
 		{
 			name:  "source names a file",
-			build: pullBusybox + `layer(name="app", base="busybox", sources=["app.sh"], destination="/app")`,
+			build: pullBusybox + `layer(name="app", base="busybox", steps=[add("app.sh", "/app")])`,
 			files: map[string]string{"app.sh": "echo hi"},
 			want: []string{
-				"/project/BUILD:2:6:",
-				`layer: source "app.sh" is not an earlier glob() or task(); there are none before this`,
+				"/project/BUILD:2:45:",
+				`add: source "app.sh" is not an earlier glob() or task(); there are none before this`,
 			},
 		},
 		{
 			name:  "unknown source",
-			build: pullBusybox + withGlob + `layer(name="app", base="busybox", sources=["cod"], destination="/app")`,
+			build: pullBusybox + withGlob + `layer(name="app", base="busybox", steps=[add("cod", "/app")])`,
 			files: map[string]string{"app.sh": "echo hi"},
 			want: []string{
-				"/project/BUILD:3:6:",
-				`source "cod" is not an earlier glob() or task(); earlier globs and tasks are "code"`,
+				"/project/BUILD:3:45:",
+				`add: source "cod" is not an earlier glob() or task(); earlier globs and tasks are "code"`,
 			},
 		},
 		{
 			name:  "source names a pull",
-			build: pullBusybox + `layer(name="app", base="busybox", sources=["busybox"], destination="/app")`,
-			want:  []string{"/project/BUILD:2:6:", `layer: source "busybox" is a pull(), not a glob() or task()`},
+			build: pullBusybox + `layer(name="app", base="busybox", steps=[add("busybox", "/app")])`,
+			want:  []string{"/project/BUILD:2:45:", `add: source "busybox" is a pull(), not a glob() or task()`},
 		},
 		{
 			name:  "base names a glob",
@@ -392,10 +417,10 @@ func TestBuildFileMistakes(t *testing.T) {
 			want:  []string{"/project/BUILD:3:6:", `layer: base "code" is a glob(), not a pull() or layer()`},
 		},
 		{
-			name:  "destination not a string",
-			build: pullBusybox + withGlob + `layer(name="app", base="busybox", sources=["code"], destination=["/app"])`,
+			name:  "dest not a string",
+			build: pullBusybox + withGlob + `layer(name="app", base="busybox", steps=[add("code", ["/app"])])`,
 			files: map[string]string{"app.sh": "echo hi"},
-			want:  []string{"/project/BUILD:3:6:", "destination", "got list, want string"},
+			want:  []string{"/project/BUILD:3:45:", "dest", "got list, want string"},
 		},
 		{
 			name:  "command item not a string",
@@ -403,16 +428,117 @@ func TestBuildFileMistakes(t *testing.T) {
 			want:  []string{"/project/BUILD:2:6:", "command[1] is int, want string"},
 		},
 		{
-			name:  "sources without destination",
-			build: pullBusybox + withGlob + `layer(name="app", base="busybox", sources=["code"])`,
+			name:  "add without dest",
+			build: pullBusybox + withGlob + `layer(name="app", base="busybox", steps=[add("code")])`,
 			files: map[string]string{"app.sh": "echo hi"},
-			want:  []string{"destination is required when sources are given"},
+			want:  []string{"/project/BUILD:3:45:", "missing argument for dest"},
 		},
 		{
-			name:  "relative destination",
-			build: pullBusybox + withGlob + `layer(name="app", base="busybox", sources=["code"], destination="app")`,
+			name:  "relative dest",
+			build: pullBusybox + withGlob + `layer(name="app", base="busybox", steps=[add("code", "app")])`,
 			files: map[string]string{"app.sh": "echo hi"},
-			want:  []string{`destination "app" must be an absolute path`},
+			want:  []string{"/project/BUILD:3:45:", `add: dest "app" must be an absolute path`},
+		},
+		{
+			name:  "run not a list",
+			build: pullBusybox + `layer(name="app", base="busybox", steps=[run("make")])`,
+			want:  []string{"/project/BUILD:2:45:", "run: for parameter argv: got string, want list"},
+		},
+		{
+			name:  "run item not a string",
+			build: pullBusybox + `layer(name="app", base="busybox", steps=[run(["sleep", 5])])`,
+			want:  []string{"/project/BUILD:2:45:", "run: argv[1] is int, want string"},
+		},
+		{
+			name:  "empty run",
+			build: pullBusybox + `layer(name="app", base="busybox", steps=[run([])])`,
+			want:  []string{"/project/BUILD:2:45:", "run: argv must not be empty"},
+		},
+		{
+			name:  "env without names",
+			build: pullBusybox + `layer(name="app", base="busybox", steps=[env({"LANG": "C"})])`,
+			want: []string{
+				"/project/BUILD:2:45:",
+				`env: give variables by name, as NAME="value", or a dict of them as **vars`,
+			},
+		},
+		{
+			name:  "env without variables",
+			build: pullBusybox + `layer(name="app", base="busybox", steps=[env()])`,
+			want:  []string{"/project/BUILD:2:45:", "env: no variables given"},
+		},
+		{
+			name:  "env value not a string",
+			build: pullBusybox + `layer(name="app", base="busybox", steps=[env(PORT=8080)])`,
+			want:  []string{"/project/BUILD:2:45:", "env: PORT is int, want string"},
+		},
+		{
+			name:  "env empty name",
+			build: pullBusybox + `layer(name="app", base="busybox", steps=[env(**{"": "x"})])`,
+			want:  []string{"/project/BUILD:2:45:", "env: a variable's name is empty"},
+		},
+		{
+			name:  "build_env name with =",
+			build: pullBusybox + `layer(name="app", base="busybox", steps=[build_env(**{"A=B": "x"})])`,
+			want: []string{
+				"/project/BUILD:2:51:",
+				`build_env: variable name "A=B" must not contain "=" or a NUL byte`,
+			},
+		},
+		{
+			name:  "env name with NUL",
+			build: pullBusybox + `layer(name="app", base="busybox", steps=[env(**{"A\x00B": "x"})])`,
+			want: []string{
+				"/project/BUILD:2:45:",
+				`env: variable name "A\x00B" must not contain "=" or a NUL byte`,
+			},
+		},
+		{
+			name:  "env value with NUL",
+			build: pullBusybox + `layer(name="app", base="busybox", steps=[env(A="x\x00y")])`,
+			want:  []string{"/project/BUILD:2:45:", "env: A's value must not contain a NUL byte"},
+		},
+		{
+			name:  "env value with a lone $",
+			build: pullBusybox + `layer(name="app", base="busybox", steps=[env(PRICE="$5")])`,
+			want: []string{
+				"/project/BUILD:2:45:",
+				`env: PRICE="$5": "$" must be followed by a variable's name or "{"; write "$$" for "$"`,
+			},
+		},
+		{
+			name:  "build_env value with a default",
+			build: pullBusybox + `layer(name="app", base="busybox", steps=[build_env(A="${B:-c}")])`,
+			want: []string{
+				"/project/BUILD:2:51:",
+				`build_env: A="${B:-c}": "${" must be followed by a variable's name and "}"; write "$$" for "$"`,
+			},
+		},
+		{
+			name: "env name given twice",
+			build: pullBusybox +
+				`layer(name="app", base="busybox", steps=[env(LANG="C", **{"LANG": "C.UTF-8"})])`,
+			want: []string{"/project/BUILD:2:45:", `env: variable "LANG" is given twice`},
+		},
+		{
+			name:  "relative workdir",
+			build: pullBusybox + `layer(name="app", base="busybox", steps=[workdir("app")])`,
+			want:  []string{"/project/BUILD:2:49:", `workdir: path "app" must be an absolute path`},
+		},
+		{
+			name:  "workdir relative before a variable",
+			build: pullBusybox + `layer(name="app", base="busybox", steps=[workdir("app/$DIR")])`,
+			want:  []string{"/project/BUILD:2:49:", `workdir: path "app/$DIR" must be an absolute path`},
+		},
+		{
+			name: "dest with a default",
+			build: pullBusybox + withGlob +
+				`layer(name="app", base="busybox", steps=[add("code", "${D:-/app}")])`,
+			files: map[string]string{"app.sh": "echo hi"},
+			want: []string{
+				"/project/BUILD:3:45:",
+				`add: dest "${D:-/app}": "${" must be followed by a variable's name and "}"; write "$$" for "$"`,
+			},
 		},
 		{
 			name:  "glob without include",
@@ -480,7 +606,7 @@ func TestBuildFileMistakes(t *testing.T) {
 			name:  "unused glob",
 			build: pullBusybox + withGlob + `layer(name="app", base="busybox")`,
 			files: map[string]string{"app.sh": "echo hi"},
-			want:  []string{`/project/BUILD:2:5: glob: "code" is not in the sources of any later layer() or task()`},
+			want:  []string{`/project/BUILD:2:5: glob: "code" is not added by any later layer() or task()`},
 		},
 		{
 			name:  "task without source",
@@ -508,9 +634,9 @@ func TestBuildFileMistakes(t *testing.T) {
 			want:  []string{"/project/BUILD:2:5:", `task: include "*.js": patterns are not supported yet`},
 		},
 		{
-			name:  "task command not a list",
-			build: pullBusybox + `task(name="make", base="busybox", command="make", source="/out", include=["app"])`,
-			want:  []string{"/project/BUILD:2:5:", "command", "got string, want list"},
+			name:  "task command",
+			build: pullBusybox + `task(name="make", base="busybox", command=["make"], source="/out", include=["app"])`,
+			want:  []string{"/project/BUILD:2:5:", `unexpected keyword argument "command"`},
 		},
 		{
 			name: "base names a task",
@@ -522,37 +648,40 @@ func TestBuildFileMistakes(t *testing.T) {
 			name: "unused task",
 			build: pullBusybox + `task(name="make", base="busybox", source="/out", include=["app"])` + "\n" +
 				`layer(name="app", base="busybox")`,
-			want: []string{`/project/BUILD:2:5: task: "make" is not in the sources of any later layer() or task()`},
+			want: []string{`/project/BUILD:2:5: task: "make" is not added by any later layer() or task()`},
 		},
 		{
 			name: "task after the last layer",
 			build: pullBusybox + `glob(name="code", include=["app.sh"])` + "\n" +
-				`layer(name="app", base="busybox", sources=["code"], destination="/app")` + "\n" +
+				`layer(name="app", base="busybox", steps=[add("code", "/app")])` + "\n" +
 				`task(name="make", base="app", source="/app", include=["app.sh"])`,
 			files: map[string]string{"app.sh": "echo hi"},
-			want:  []string{`/project/BUILD:4:5: task: "make" is not in the sources of any later layer() or task()`},
+			want:  []string{`/project/BUILD:4:5: task: "make" is not added by any later layer() or task()`},
 		},
 		{
-			name: "glob and task include the same file",
-			build: pullBusybox + withGlob +
-				`task(name="make", base="busybox", source="/out", include=["app.sh"])` + "\n" +
-				`layer(name="app", base="busybox", sources=["code", "make"], destination="/app")`,
-			files: map[string]string{"app.sh": "echo hi"},
+			name: "run outside steps",
+			build: pullBusybox + `run(["true"])` + "\n" +
+				`layer(name="app", base="busybox")`,
 			want: []string{
-				"/project/BUILD:4:6:",
-				`layer: sources "code" and "make" both include "app.sh"`,
+				`/project/BUILD:2:4: run: run(["true"]) is not in the steps of any layer() or task()`,
 			},
 		},
 		{
-			name: "task output within a glob's directory",
-			build: pullBusybox + `glob(name="code", include=["."])` + "\n" +
-				`task(name="make", base="busybox", source="/out", include=["gen/app.sh"])` + "\n" +
-				`task(name="use", base="busybox", sources=["make", "code"], destination="/app", ` +
-				`source="/app", include=["."])` + "\n" +
-				`layer(name="app", base="busybox", sources=["use"], destination="/app")`,
+			name: "add outside steps",
+			build: pullBusybox + withGlob + `add("code", "/app")` + "\n" +
+				`layer(name="app", base="busybox")`,
+			files: map[string]string{"app.sh": "echo hi"},
 			want: []string{
-				"/project/BUILD:4:5:",
-				`task: sources "make" and "code" both include "gen/app.sh"`,
+				`/project/BUILD:3:4: add: add("code", "/app") is not in the steps of any layer() or task()`,
+			},
+		},
+		{
+			name: "env outside steps",
+			build: pullBusybox + `layer(name="app", base="busybox", steps=[run(["true"])])` + "\n" +
+				`setup = [env(**{"A": "1", "a.b": "2"})]`,
+			want: []string{
+				`/project/BUILD:3:13: env: env(A="1", **{"a.b": "2"}) is not in the steps of any ` +
+					`layer() or task()`,
 			},
 		},
 		{

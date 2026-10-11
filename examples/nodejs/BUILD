@@ -12,19 +12,25 @@ glob(
 layer(
     name="packages",
     base="node",
-    sources=["package-manifest"],
-    destination="/app",
-    # Keep npm's cache and logs out of the image.
-    run=["sh", "-c", "npm ci --omit=dev --prefix /app --cache /tmp/npm && rm -rf /tmp/npm"],
+    steps=[
+        add("package-manifest", "/app"),
+        workdir("/app"),
+        # Keep npm's cache out of the image.
+        build_env(npm_config_cache="/tmp/npm"),
+        run(["npm", "ci", "--omit=dev"]),
+        run(["rm", "-rf", "/tmp/npm"]),
+    ],
 )
 
 # The compiler is a dev dependency, so it's installed only for the build task.
 layer(
     name="dev-packages",
     base="node",
-    sources=["package-manifest"],
-    destination="/build",
-    run=["npm", "ci", "--prefix", "/build"],
+    steps=[
+        add("package-manifest", "/build"),
+        workdir("/build"),
+        run(["npm", "ci"]),
+    ],
 )
 
 glob(
@@ -32,12 +38,14 @@ glob(
     include=["server.ts", "tsconfig.json", "tsconfig.build.json"],
 )
 
+# Runs in /build, the working directory of its base.
 task(
     name="build",
     base="dev-packages",
-    sources=["server-source"],
-    destination="/build",
-    command=["npm", "run", "build", "--prefix", "/build"],
+    steps=[
+        add("server-source", "/build"),
+        run(["npm", "run", "build"]),
+    ],
     source="/build/dist",
     include=["server.js"],
 )
@@ -45,7 +53,9 @@ task(
 layer(
     name="server",
     base="packages",
-    sources=["build"],
-    destination="/app",
-    command=["node", "/app/server.js"],
+    steps=[
+        add("build", "/app"),
+        env(NODE_ENV="production"),
+    ],
+    command=["node", "server.js"],
 )

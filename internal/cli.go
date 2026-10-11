@@ -61,7 +61,7 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 	root.PersistentFlags().BoolVar(&tlsVerify, "tls-verify", true,
 		"require HTTPS and verify certificates when contacting registries")
 	root.PersistentFlags().Var(&timestamp, "timestamp",
-		"stamp the files of steps that run no earlier than this time, in Unix seconds or RFC 3339")
+		"stamp the files of targets that run no earlier than this time, in Unix seconds or RFC 3339")
 
 	// readBuild reads dir/BUILD, returning the options for building from it.
 	readBuild := func(cmd *cobra.Command) (buildOptions, error) {
@@ -217,21 +217,21 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 	write.Flags().StringVarP(&tag, "tag", "t", "", "image name to record in the tarball")
 
 	var rebuild bool
-	buildSteps := &cobra.Command{
-		Use:   "build <step>...",
-		Short: "Build steps into the build cache",
-		Long: "Build the named steps of the BUILD file, and the steps they use, into the build cache, where\n" +
-			"push, load and write find them. Steps already cached are reused, unless --rebuild is given:\n" +
-			"then the named steps run again, though the steps they use are still reused. A pull() named\n" +
+	buildTargets := &cobra.Command{
+		Use:   "build <target>...",
+		Short: "Build targets into the build cache",
+		Long: "Build the named targets of the BUILD file, and the targets they use, into the build cache, where\n" +
+			"push, load and write find them. Targets already cached are reused, unless --rebuild is given:\n" +
+			"then the named targets run again, though the targets they use are still reused. A pull() named\n" +
 			"with --rebuild is pulled again, in case its tag names a newer image.",
 		Example: "  vamos build packages\n  vamos build compile --rebuild",
-		Args:    atLeastOne("step name", "vamos build packages"),
+		Args:    atLeastOne("target name", "vamos build packages"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			options, err := readBuild(cmd)
 			if err != nil {
 				return err
 			}
-			if options.targets, err = options.file.targets(args); err != nil {
+			if options.targets, err = options.file.parseTargets(args); err != nil {
 				return err
 			}
 			options.rebuild = rebuild
@@ -239,12 +239,13 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 			return err
 		},
 	}
-	buildSteps.Flags().BoolVar(&rebuild, "rebuild", false, "run the named steps again rather than reuse cached results")
+	buildTargets.Flags().BoolVar(&rebuild, "rebuild", false,
+		"run the named targets again rather than reuse cached results")
 
 	prune := &cobra.Command{
 		Use:   "prune",
 		Short: "Remove everything from the build cache",
-		Long: "Remove the cached results of every step: the images of cached layers, from the container\n" +
+		Long: "Remove the cached results of every target: the images of cached layers, from the container\n" +
 			"store, and the build cache beside it. Pulled images are kept.",
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -252,7 +253,7 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 		},
 	}
 
-	root.AddCommand(buildSteps, push, load, write, prune)
+	root.AddCommand(buildTargets, push, load, write, prune)
 	return root
 }
 

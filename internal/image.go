@@ -39,18 +39,18 @@ type buildOptions struct {
 	dest   func() (types.ImageReference, error) // called once the image is ready to commit
 	action string                               // describes sending the image, e.g. "pushing to app:latest"
 
-	targets   []string  // steps to build when dest is nil, as `vamos build` does
+	targets   []string  // targets to build when dest is nil, as `vamos build` does
 	rebuild   bool      // run targets again, rather than reuse their cached results
-	timestamp time.Time // if set, the earliest time that steps which run stamp their files with
+	timestamp time.Time // if set, the earliest time that targets which run stamp their files with
 
 	systemContext  *types.SystemContext
-	stdout, stderr io.Writer // receive the output of run steps
+	stdout, stderr io.Writer // receive the output of run() steps
 }
 
-// buildImage runs o.file's steps with buildah and copies the image of the last layer to o.dest,
-// returning its image ID there. If o.dest is nil, it runs only o.targets and the steps they use,
-// and returns "". Each step's result is kept in the build cache, and reused instead of running
-// the step again whenever a later build gives it the same inputs, unless it is a target to rebuild.
+// buildImage runs o.file's targets with buildah and copies the image of the last layer to o.dest,
+// returning its image ID there. If o.dest is nil, it runs only o.targets and the targets they use,
+// and returns "". Each target's result is kept in the build cache, and reused instead of running
+// the target again whenever a later build gives it the same inputs, unless it is a target to rebuild.
 func buildImage(ctx context.Context, o buildOptions) (string, error) {
 	buildStoreOptions, err := storage.DefaultStoreOptions()
 	if err != nil {
@@ -66,7 +66,7 @@ func buildImage(ctx context.Context, o buildOptions) (string, error) {
 		return "", err
 	}
 
-	var needed map[string]bool // steps to run, if not all
+	var needed map[string]bool // targets to run, if not all
 	rebuild := map[string]bool{}
 	if o.dest == nil {
 		needed = o.file.needs(o.targets)
@@ -75,7 +75,7 @@ func buildImage(ctx context.Context, o buildOptions) (string, error) {
 		}
 	}
 
-	// Pull everything first, so a bad image name is reported before any slow step runs.
+	// Pull everything first, so a bad image name is reported before any slow target runs.
 	images := map[string]builtImage{
 		scratch: {id: scratch, epoch: time.Unix(0, 0)}, // buildah starts an empty image from this name
 	}
@@ -107,16 +107,16 @@ func buildImage(ctx context.Context, o buildOptions) (string, error) {
 		return "", err
 	}
 
-	r := stepRunner{
+	r := targetRunner{
 		buildOptions: o,
 		store:        buildStore,
 		cache:        buildCache,
 		capabilities: capabilities,
 		isolation:    isolation,
 		images:       images,
-		outputs:      map[*fileSet]taskOutput{},
+		trees:        map[*fileSet]setTree{},
 	}
-	for _, s := range o.file.steps {
+	for _, s := range o.file.targets {
 		if needed != nil && !needed[s.name] {
 			continue
 		}
@@ -127,8 +127,8 @@ func buildImage(ctx context.Context, o buildOptions) (string, error) {
 	if o.dest == nil {
 		return "", nil
 	}
-	// loadBuildFile makes sure every task is used by a later step, so the last step is the final layer.
-	return r.send(ctx, r.images[o.file.steps[len(o.file.steps)-1].name].id)
+	// loadBuildFile makes sure every task is used by a later target, so the last target is the final layer.
+	return r.send(ctx, r.images[o.file.targets[len(o.file.targets)-1].name].id)
 }
 
 // cacheDir returns where the build cache is kept: beside the container store, so that a volume
@@ -144,13 +144,13 @@ const cacheRepository = "localhost/vamos-cache"
 // builtImage is the image of a pull or a layer, once it is in the container store.
 type builtImage struct {
 	id    string    // its ID in the container store, or scratch
-	epoch time.Time // when it was made; files that steps add to it are stamped with this, or a later epoch
+	epoch time.Time // when it was made; files that targets add to it are stamped with this, or a later epoch
 }
 
-// taskOutput is the files a task made, once they are in the build cache.
-type taskOutput struct {
+// setTree is the files of a glob or task, once they are in the build cache.
+type setTree struct {
 	tree  blob      // the files, as a tree
-	epoch time.Time // as for builtImage
+	epoch time.Time // as for builtImage; zero for a glob
 }
 
 // pullImage fetches p's image into store, as policy says: unless it is already there, or always.
@@ -188,138 +188,128 @@ func pullImage(
 	return builtImage{id: id, epoch: epoch}, nil
 }
 
-// stepRunner runs the layers and tasks of a build.
-type stepRunner struct {
+// targetRunner runs the layers and tasks of a build.
+type targetRunner struct {
 	buildOptions
 	store        storage.Store
 	cache        *cache
-	capabilities []string // given to run steps, as root
+	capabilities []string // given to run() steps, as root
 	isolation    define.Isolation
-	images       map[string]builtImage   // the images of pulls and layers, by name, once they are ready
-	outputs      map[*fileSet]taskOutput // tasks' files, once they are ready
+	images       map[string]builtImage // the images of pulls and layers, by name, once they are ready
+	trees        map[*fileSet]setTree  // the files of globs and tasks, once they are ready
 }
 
-// describeStep names step s for messages, e.g. `layer "app"`.
-func describeStep(s *stepSpec) string {
+// describeTarget names target s for messages, e.g. `layer "app"`.
+func describeTarget(s *targetSpec) string {
 	if s.output != nil {
 		return fmt.Sprintf("task %q", s.name)
 	}
 	return fmt.Sprintf("layer %q", s.name)
 }
 
-// runCached makes the result of step s ready for later steps, reusing the result the cache
+// runCached makes the result of target s ready for later targets, reusing the result the cache
 // holds for its inputs or else running it and saving the result to the cache. It reports which
-// it did, and replays a reused step's output, so a build prints what the step printed. With
+// it did, and replays a reused target's output, so a build prints what the target printed. With
 // rebuild, it runs s even if its result is cached, and replaces that result.
-func (r *stepRunner) runCached(ctx context.Context, s *stepSpec, rebuild bool) error {
-	step := describeStep(s)
+func (r *targetRunner) runCached(ctx context.Context, s *targetSpec, rebuild bool) error {
+	target := describeTarget(s)
 	a, err := r.inputs(s)
 	if err != nil {
-		return fmt.Errorf("%s: %w", step, err)
+		return fmt.Errorf("%s: %w", target, err)
 	}
 	key := a.key()
 	if rebuild {
-		fmt.Fprintf(r.stdout, "%s: rebuilding\n", step)
+		fmt.Fprintf(r.stdout, "%s: rebuilding\n", target)
 	} else {
 		result, err := r.cache.result(key)
 		switch {
 		case err != nil:
-			return fmt.Errorf("%s: reading the build cache: %w", step, err)
+			return fmt.Errorf("%s: reading the build cache: %w", target, err)
 		case result == nil:
-			fmt.Fprintf(r.stdout, "%s: building\n", step)
+			fmt.Fprintf(r.stdout, "%s: building\n", target)
 		default:
 			problem := r.checkResult(s, result)
 			if problem == nil {
-				fmt.Fprintf(r.stdout, "%s: cached\n", step)
+				fmt.Fprintf(r.stdout, "%s: cached\n", target)
 				if err := r.replay(result); err != nil {
-					return fmt.Errorf("%s: replaying its output from the build cache: %w", step, err)
+					return fmt.Errorf("%s: replaying its output from the build cache: %w", target, err)
 				}
 				r.record(s, result)
 				return nil
 			}
-			fmt.Fprintf(r.stdout, "%s: building, since the cached result can't be used: %v\n", step, problem)
+			fmt.Fprintf(r.stdout, "%s: building, since the cached result can't be used: %v\n", target, problem)
 		}
 	}
 
 	var result *actionResult
 
 	if s.output != nil {
-		result, err = r.runStep(ctx, s, a.Sources, func(builder *buildah.Builder, result *actionResult) error {
-			output, err := collectOutput(builder, s, r.cache)
+		result, err = r.runTarget(ctx, s, a, func(st *targetState, result *actionResult) error {
+			output, err := collectOutput(st.mountPoint, s, r.cache)
 			result.Output = &output
 			return err
 		})
 	} else {
-		result, err = r.runStep(ctx, s, a.Sources, func(builder *buildah.Builder, result *actionResult) error {
-			return r.commitLayer(ctx, builder, result)
+		result, err = r.runTarget(ctx, s, a, func(st *targetState, result *actionResult) error {
+			return r.commitLayer(ctx, st.builder, result)
 		})
 	}
 	if err != nil {
 		return err
 	}
 	if err := r.cache.setResult(key, result); err != nil {
-		return fmt.Errorf("%s: saving to the build cache: %w", step, err)
+		return fmt.Errorf("%s: saving to the build cache: %w", target, err)
 	}
 	r.record(s, result)
 	return nil
 }
 
-// inputs returns the action of step s: its inputs, which must be ready. Its sources are stored
-// in the cache, so that the step is built from the files its key describes.
-func (r *stepRunner) inputs(s *stepSpec) (*action, error) {
+// inputs returns the action of target s: its inputs, which must be ready. The files it adds are stored
+// in the cache, so that the target is built from the files its key describes.
+func (r *targetRunner) inputs(s *targetSpec) (*action, error) {
 	a := &action{
-		Version:     actionVersion,
-		Kind:        "layer",
-		Base:        r.images[s.base].id,
-		Destination: s.destination,
-		Run:         s.run,
-		Command:     s.command,
+		Version: actionVersion,
+		Kind:    "layer",
+		Base:    r.images[s.base].id,
+		Command: s.command,
 	}
 	if s.output != nil {
 		a.Kind = "task"
 		a.Source = s.source
 		a.Include = sourcePaths([]*fileSet{s.output})
 	}
-	if len(s.sources) > 0 {
-		sources, err := r.sourceTree(s)
-		if err != nil {
-			return nil, err
+	for _, in := range s.steps {
+		entry := in.entry()
+		if set := in.source(); set != nil {
+			b, err := r.setTree(set)
+			if err != nil {
+				return nil, err
+			}
+			entry.Files = &b
 		}
-		b, err := r.cache.putBytes(sources.encode())
-		if err != nil {
-			return nil, fmt.Errorf("saving sources to the build cache: %w", err)
-		}
-		a.Sources = &b
+		a.Steps = append(a.Steps, entry)
 	}
 	return a, nil
 }
 
-// sourceTree describes s's sources as one tree, as they are placed beneath s.destination.
-// Project files are stored in the cache as they are read, so that a file changed later, even
-// during the build, can't make the step's files differ from what its key says.
-func (r *stepRunner) sourceTree(s *stepSpec) (*tree, error) {
-	sources := &tree{}
-	for _, group := range groupByOrigin(s.sources) {
-		var t *tree
-		var err error
-		if task := group[0].task; task != nil {
-			t, err = r.cache.readTree(r.outputs[task.output].tree)
-		} else {
-			t, err = r.cache.putFiles(r.fs, r.dir, sourcePaths(group))
-		}
-		if err != nil {
-			return nil, fmt.Errorf("reading %s: %w", group[0].name, err)
-		}
-		// checkOverlap makes sure sources from different places don't share paths.
-		sources.Entries = append(sources.Entries, t.Entries...)
+// setTree returns the tree of set's files, stored in the cache. A task's files are ready once it has run.
+// A glob's are stored as they are first read, so that a file changed later, even during the build,
+// can't make a target's files differ from what its key says, and each target that adds them gets the same.
+func (r *targetRunner) setTree(set *fileSet) (blob, error) {
+	if t, ok := r.trees[set]; ok {
+		return t.tree, nil
 	}
-	slices.SortFunc(sources.Entries, func(a, b treeEntry) int { return strings.Compare(a.Path, b.Path) })
-	return sources, nil
+	b, err := r.cache.putTree(r.fs, r.dir, sourcePaths([]*fileSet{set}))
+	if err != nil {
+		return blob{}, fmt.Errorf("reading %s: %w", set.name, err)
+	}
+	r.trees[set] = setTree{tree: b}
+	return b, nil
 }
 
 // checkResult reports why a cached result for s can't be used, if it can't: something it
 // names may have been removed since, from the cache or the container store.
-func (r *stepRunner) checkResult(s *stepSpec, result *actionResult) error {
+func (r *targetRunner) checkResult(s *targetSpec, result *actionResult) error {
 	if s.output != nil {
 		if result.Output == nil {
 			return errors.New("it has no files")
@@ -343,8 +333,8 @@ func (r *stepRunner) checkResult(s *stepSpec, result *actionResult) error {
 	return nil
 }
 
-// replay writes what a cached step printed to stdout and stderr.
-func (r *stepRunner) replay(result *actionResult) error {
+// replay writes what a cached target printed to stdout and stderr.
+func (r *targetRunner) replay(result *actionResult) error {
 	if result.Log == nil {
 		return nil
 	}
@@ -356,26 +346,26 @@ func (r *stepRunner) replay(result *actionResult) error {
 	return replayLog(log, r.stdout, r.stderr)
 }
 
-// record makes the result of step s available to later steps.
-func (r *stepRunner) record(s *stepSpec, result *actionResult) {
+// record makes the result of target s available to later targets.
+func (r *targetRunner) record(s *targetSpec, result *actionResult) {
 	epoch := time.Unix(result.Epoch, 0)
 	if s.output != nil {
-		r.outputs[s.output] = taskOutput{tree: *result.Output, epoch: epoch}
+		r.trees[s.output] = setTree{tree: *result.Output, epoch: epoch}
 	} else {
 		r.images[s.name] = builtImage{id: result.Image.Encoded(), epoch: epoch}
 	}
 }
 
 // epoch returns the time to stamp the files of s's result with when it runs: the latest of the
-// epochs of its base and of the tasks among its sources, and of r.timestamp.
-func (r *stepRunner) epoch(s *stepSpec) time.Time {
+// epochs of its base and of the tasks whose files it adds, and of r.timestamp.
+func (r *targetRunner) epoch(s *targetSpec) time.Time {
 	epoch := r.images[s.base].epoch
 	if r.timestamp.After(epoch) {
 		epoch = r.timestamp
 	}
-	for _, set := range s.sources {
+	for _, set := range s.sets() {
 		if set.task != nil {
-			if e := r.outputs[set].epoch; e.After(epoch) {
+			if e := r.trees[set].epoch; e.After(epoch) {
 				epoch = e
 			}
 		}
@@ -383,37 +373,37 @@ func (r *stepRunner) epoch(s *stepSpec) time.Time {
 	return epoch
 }
 
-// runStep runs step s with its sources, the tree stored as blob sources if it has any, and saves
-// what it printed to the cache. It then calls finish with the step's container to complete its
-// result: to commit a layer's image, or collect a task's files.
-func (r *stepRunner) runStep(
-	ctx context.Context, s *stepSpec, sources *blob, finish func(*buildah.Builder, *actionResult) error,
+// runTarget runs target s, whose action is a, and saves what it printed to the cache. It then calls
+// finish with the target's container, still mounted, to complete its result: to commit a layer's
+// image, or collect a task's files.
+func (r *targetRunner) runTarget(
+	ctx context.Context, s *targetSpec, a *action, finish func(*targetState, *actionResult) error,
 ) (*actionResult, error) {
-	step := describeStep(s)
+	target := describeTarget(s)
 	log, err := r.cache.newLog()
 	if err != nil {
-		return nil, fmt.Errorf("%s: saving to the build cache: %w", step, err)
+		return nil, fmt.Errorf("%s: saving to the build cache: %w", target, err)
 	}
 	defer log.discard()
-	builder, err := r.start(ctx, s, sources, log)
+	st, err := r.start(ctx, s, a, log)
 	if err != nil {
 		return nil, err
 	}
-	defer builder.Delete()
+	defer st.delete()
 
 	result := &actionResult{Epoch: r.epoch(s).Unix()}
 	// Save the log first, so that a failure saving it can't leave an image no result names.
 	if result.Log, err = log.save(r.cache); err != nil {
-		return nil, fmt.Errorf("%s: saving to the build cache: %w", step, err)
+		return nil, fmt.Errorf("%s: saving to the build cache: %w", target, err)
 	}
-	if err := finish(builder, result); err != nil {
-		return nil, fmt.Errorf("%s: %w", step, err)
+	if err := finish(st, result); err != nil {
+		return nil, fmt.Errorf("%s: %w", target, err)
 	}
 	return result, nil
 }
 
 // commitLayer commits the image of a layer from builder to the container store.
-func (r *stepRunner) commitLayer(ctx context.Context, builder *buildah.Builder, result *actionResult) error {
+func (r *targetRunner) commitLayer(ctx context.Context, builder *buildah.Builder, result *actionResult) error {
 	epoch := time.Unix(result.Epoch, 0)
 	// A nil reference commits to the store under a temporary name, which buildah then removes.
 	id, _, _, err := builder.Commit(ctx, nil, buildah.CommitOptions{
@@ -443,7 +433,7 @@ func (r *stepRunner) commitLayer(ctx context.Context, builder *buildah.Builder, 
 // send copies the image with ID id from the container store to r.dest, returning the ID it has
 // there: the digest of its config, as written there, which may differ from the store's if its
 // manifest is converted, as docker-archive does.
-func (r *stepRunner) send(ctx context.Context, id string) (string, error) {
+func (r *targetRunner) send(ctx context.Context, id string) (string, error) {
 	dest, err := r.dest()
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", r.action, err)
@@ -478,13 +468,13 @@ func (r *stepRunner) send(ctx context.Context, id string) (string, error) {
 	return m.ConfigInfo().Digest.Encoded(), nil
 }
 
-// start makes a container for step s from its base image, adds its sources, the tree stored as
-// blob sources, and runs its run step or command, recording what it prints in log. A layer's
-// default command is set too. The caller must delete the returned builder.
-func (r *stepRunner) start(
-	ctx context.Context, s *stepSpec, sources *blob, log *logRecorder,
-) (_ *buildah.Builder, err error) {
-	step := describeStep(s)
+// start makes a container for target s from its base image, mounts it, and applies its steps,
+// whose files are stored as a says, recording what they print in log. A layer's default command is
+// set too. The caller must delete the returned target's container.
+func (r *targetRunner) start(
+	ctx context.Context, s *targetSpec, a *action, log *logRecorder,
+) (_ *targetState, err error) {
+	target := describeTarget(s)
 	builder, err := buildah.NewBuilder(ctx, r.store, buildah.BuilderOptions{
 		FromImage:     r.images[s.base].id,
 		PullPolicy:    buildah.PullNever, // only pull() reaches registries
@@ -492,37 +482,27 @@ func (r *stepRunner) start(
 		SystemContext: r.systemContext,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", step, err)
+		return nil, fmt.Errorf("%s: %w", target, err)
 	}
+	st := &targetState{targetRunner: r, builder: builder, log: log, buildEnv: map[string]string{}}
 	defer func() {
 		if err != nil {
-			builder.Delete()
+			st.delete()
 		}
 	}()
+	// Mount the container once for the whole target, rather than for each step that needs its
+	// files. buildah's own Run and Add then only count another use of the mount.
+	if st.mountPoint, err = builder.Mount(""); err != nil {
+		return nil, fmt.Errorf("%s: %w", target, err)
+	}
 
-	if sources != nil {
-		if err := r.addSources(builder, s, *sources); err != nil {
-			return nil, fmt.Errorf("%s: %w", step, err)
+	for i, in := range s.steps {
+		// builder.Run can't be cancelled, so check for an interrupt between steps.
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-	}
-
-	// builder.Run can't be cancelled, so check for an interrupt before and after it.
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if len(s.run) > 0 {
-		err = builder.Run(s.run, buildah.RunOptions{
-			Isolation: r.isolation,
-			Terminal:  buildah.WithoutTerminal,
-			Stdout:    log.writer(streamStdout, r.stdout),
-			Stderr:    log.writer(streamStderr, r.stderr),
-		})
-		if err != nil {
-			what := "run"
-			if s.output != nil {
-				what = "command"
-			}
-			return nil, fmt.Errorf("%s: %s %q failed: %w", step, what, s.run, err)
+		if err := in.apply(st, a.Steps[i].Files); err != nil {
+			return nil, fmt.Errorf("%s: %s failed: %w", target, in, err)
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -532,7 +512,15 @@ func (r *stepRunner) start(
 	if s.output == nil && len(s.command) > 0 {
 		builder.SetCmd(s.command)
 	}
-	return builder, nil
+	return st, nil
+}
+
+// delete unmounts and removes the target's container.
+func (st *targetState) delete() {
+	if st.mountPoint != "" {
+		st.builder.Unmount()
+	}
+	st.builder.Delete()
 }
 
 // pruneCache removes every cached result: the images of cached layers from the container store,
@@ -588,9 +576,9 @@ func pruneCache(w io.Writer) error {
 	return errors.Join(errs...)
 }
 
-// addSources copies s's sources, the tree stored as blob sources, into builder's container,
-// beneath s.destination.
-func (r *stepRunner) addSources(builder *buildah.Builder, s *stepSpec, sources blob) error {
+// addSource copies the files of set, the tree stored as blob files, into the target's container,
+// beneath dest.
+func (st *targetState) addSource(set *fileSet, files blob, dest string) error {
 	// buildah reads sources from disk, so check them out into a temporary folder: from the cache,
 	// even the project's, since the project's files may have changed since they were stored.
 	contextDir, err := os.MkdirTemp("", "vamos-context-")
@@ -598,14 +586,12 @@ func (r *stepRunner) addSources(builder *buildah.Builder, s *stepSpec, sources b
 		return err
 	}
 	defer os.RemoveAll(contextDir)
-	if err := r.cache.checkout(sources, contextDir); err != nil {
+	if err := st.cache.checkout(files, contextDir); err != nil {
 		return fmt.Errorf("copying sources from the build cache: %w", err)
 	}
-	for _, group := range groupByOrigin(s.sources) {
-		for _, src := range sourcePaths(group) {
-			if err := addPath(builder, contextDir, src, s.destination); err != nil {
-				return fmt.Errorf("adding %q from %s: %w", src, group[0].name, err)
-			}
+	for _, src := range sourcePaths([]*fileSet{set}) {
+		if err := addPath(st.builder, contextDir, src, dest); err != nil {
+			return fmt.Errorf("adding %q from %s: %w", src, set.name, err)
 		}
 	}
 	return nil
@@ -629,14 +615,9 @@ func addPath(builder *buildah.Builder, dir, src, destination string) error {
 	return builder.Add(parent, false, options, filepath.Join(dir, src))
 }
 
-// collectOutput saves the files of task s from builder's container to c, returning their tree.
-func collectOutput(builder *buildah.Builder, s *stepSpec, c *cache) (blob, error) {
-	mountPoint, err := builder.Mount("")
-	if err != nil {
-		return blob{}, err
-	}
-	defer builder.Unmount()
-
+// collectOutput saves the files of task s from its container, mounted at mountPoint, to c,
+// returning their tree.
+func collectOutput(mountPoint string, s *targetSpec, c *cache) (blob, error) {
 	// Resolve links in source as the container would, so they can't lead outside it.
 	resolved, err := securejoin.SecureJoin(mountPoint, s.source)
 	if err != nil {
@@ -669,20 +650,6 @@ func collectOutput(builder *buildah.Builder, s *stepSpec, c *cache) (blob, error
 		return blob{}, fmt.Errorf("collecting output: %w", err)
 	}
 	return output, nil
-}
-
-// groupByOrigin groups sets by where their files are: the project, for globs, or a task's output.
-func groupByOrigin(sets []*fileSet) [][]*fileSet {
-	var groups [][]*fileSet
-	for _, set := range sets {
-		i := slices.IndexFunc(groups, func(g []*fileSet) bool { return g[0].task == set.task })
-		if i < 0 {
-			groups = append(groups, []*fileSet{set})
-		} else {
-			groups[i] = append(groups[i], set)
-		}
-	}
-	return groups
 }
 
 // sourcePaths returns the paths in sets, sorted, leaving out any within another, since

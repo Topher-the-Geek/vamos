@@ -15,11 +15,14 @@ Guidance for coding agents working on vamos. [README.md](README.md) covers what 
 - `internal/cli.go` — Cobra commands, argument checks, destinations (`docker://`, `docker-daemon:`,
   `docker-archive:`).
 - `internal/buildfile.go` — runs `BUILD` with starlark-go and validates its `glob()`, `pull()`,
-  `layer()` and `task()` steps.
+  `layer()` and `task()` targets, and the `add()` steps that name earlier targets.
+- `internal/step.go` — the other steps a layer or task applies in order (`run()`, `env()`,
+  `build_env()`, `workdir()`): each is a Starlark value that knows its part of the cache key and how to apply
+  itself with buildah. Add new kinds here.
 - `internal/image.go` — pulls, then runs each layer and task with buildah, or reuses its cached result, and
   copies the last layer's image to the destination.
 - `internal/cache.go` — the build cache: a content-addressed store of files, trees and logs, and an action
-  cache from each step's key to its latest result. Layers' images stay in the container store.
+  cache from each target's key to its latest result. Layers' images stay in the container store.
 - `examples/` — sample `BUILD` projects, each an MCP server with an echo tool: `nodejs/` (TypeScript) and
   `fastmcp/` (Python). Each has its own lint and tests; see its README.
 
@@ -61,9 +64,9 @@ The first run pulls `busybox:1.36` from Docker Hub; later runs use the local con
   available), and every result is inspected (command, files, tags).
 - Use `.succeeds(t)` and `.failsWith(t, usage, wants...)`. `usage` is true only for command-line
   mistakes; runtime errors must not print usage.
-- Failing builds must leave no output behind; check with `assertNoFiles`. The cached results of steps that
+- Failing builds must leave no output behind; check with `assertNoFiles`. The cached results of targets that
   succeeded before the failure are kept, so the next build resumes from there.
-- Test BUILD files start with `pullBusybox`, which declares the step `busybox`.
+- Test BUILD files start with `pullBusybox`, which declares the target `busybox`.
 - Tests that build call `requireBuildah(t)` so `-short` and non-root runs skip them.
 - Write table cases as keyed struct literals, one field per line.
 - `TestMain` must call `buildah.InitReexec()` first, because buildah re-executes the test binary to
@@ -113,11 +116,11 @@ Errors are a feature here, and every user mistake should have a test for its mes
   (see `describeEvalError`); destinations are named, e.g. `pushing to app:latest: ...`.
 - Catch mistakes before building when it's cheap to (bad names, missing sources, unwritable output).
   Don't add extra passes over the project just to report rarer problems, such as unreadable files, sooner:
-  they are reported when the step that reads them runs, and the steps before it are cached by then.
+  they are reported when the target that reads them runs, and the targets before it are cached by then.
 - `main` prints `vamos: <error>`; Cobra's own error printing is silenced, so the root command
   reports unknown commands itself.
 - Known noise: buildah's chroot helper writes lines such as `subprocess exited with status 1`
-  directly to stderr when a build step fails. vamos can't suppress them.
+  directly to stderr when a `run()` step fails. vamos can't suppress them.
 
 ## Code style
 
@@ -125,7 +128,7 @@ Errors are a feature here, and every user mistake should have a test for its mes
   even when they fit.
 - Match the surrounding comment density: a doc comment on each function, and short "why"
   comments.
-- Build-step output goes to the command's stdout and stderr (`cmd.OutOrStdout()` and
+- Output of `run()` steps goes to the command's stdout and stderr (`cmd.OutOrStdout()` and
   `cmd.ErrOrStderr()`), never directly to `os.Stdout`.
 - Read `BUILD` files and sources through the `afero.Fs`, never `os`. Output tarballs and buildah's
   storage use the real filesystem.
@@ -141,26 +144,26 @@ Errors are a feature here, and every user mistake should have a test for its mes
   using the Docker connection settings from the environment.
 - containers/image caches `registries.conf` regardless of `CONTAINERS_REGISTRIES_CONF`; tests that
   set it must call `sysregistriesv2.InvalidateCache`.
-- A step's project sources are stored in the build cache as its key is worked out, and the step is built
-  from that copy, never from the project, so a file edited mid-build can't be cached under the wrong key
+- The files each `add()` copies are stored in the build cache as its target's key is worked out, and the target
+  is built from that copy, never from the project, so a file edited mid-build can't be cached under the wrong key
   (`TestCacheSourceEditedDuringBuild`). Keep it that way: it is also what a remote builder will need.
-- buildah reads sources from disk, so `addSources` checks them out of the build cache into a temporary
-  build folder first, at their paths relative to the `BUILD` file, then adds that whole folder to the
-  destination. `TestDestinationModes` checks the folder's own mode doesn't leak.
+- buildah reads sources from disk, so `addSources` checks an `add()`'s files out of the build cache into a
+  temporary build folder first, at their paths relative to the `BUILD` file, then adds them to its `dest`.
+  `TestDestinationModes` checks the folder's own mode doesn't leak.
 - `collectOutput` reads a task's files from its mounted container on the host, where an absolute link
   would point at the host's own files. So it resolves `source` with `securejoin` and refuses links
   along included paths; `TestTaskOutputLinks` and `TestTaskFailures` cover this.
 - Only `pull()` reaches registries: layers use `PullNever` on image IDs (or `scratch`). Every layer is
   cached: committed to local storage and named `localhost/vamos-cache:<image ID>`, so that tools removing
   unnamed images leave it alone. The last one's is then sent with `copy.Image`, under the system's signature
-  policy, not `buildah.Push`, which re-parses the destination as a string. A step that fails leaves no
+  policy, not `buildah.Push`, which re-parses the destination as a string. A target that fails leaves no
   unnamed image; tests check this with `assertNoNewImages`.
 - The build cache (`internal/cache.go`) sits beside the container store, in `/var/lib/containers/vamos`. Tests
-  share it, and a reused step prints `cached` rather than `building`, so tests about caching put a value unique
-  to the run (`newNonce`) in their steps. `TestPrune` empties the cache, so the run after a full test run
-  builds every step again.
-- Layers are committed with `HistoryTimestamp`, which sets every file a layer adds to the step's epoch: the
-  latest of its base's and its task sources' epochs (a pulled image's is its creation time) and `--timestamp`.
+  share it, and a reused target prints `cached` rather than `building`, so tests about caching put a value unique
+  to the run (`newNonce`) in their targets. `TestPrune` empties the cache, so the run after a full test run
+  builds every target again.
+- Layers are committed with `HistoryTimestamp`, which sets every file a layer adds to the target's epoch: the
+  latest of its base's and its added tasks' epochs (a pulled image's is its creation time) and `--timestamp`.
   `RewriteTimestamp` only moves times earlier, which would leave build times and source files' own times in
   layers, so the same inputs could make different layers.
 - `--tls-verify=false` lets a registry use plain HTTP, both for pushing and for pulling the base image.

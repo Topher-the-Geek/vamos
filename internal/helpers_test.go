@@ -22,7 +22,7 @@ import (
 	"go.podman.io/storage"
 )
 
-// pullBusybox declares the base image for tests, as the step "busybox", in one line.
+// pullBusybox declares the base image for tests, as the target "busybox", in one line.
 // Tests that build pull it once, and later runs find it in the local container store.
 const pullBusybox = `pull(name="busybox", image="docker.io/library/busybox", tag="1.36")` + "\n"
 
@@ -96,7 +96,7 @@ func diskProject(t *testing.T, files, links map[string]string) (fsys afero.Fs, r
 }
 
 // unnamedImages returns the IDs of the images in the local container store that have no
-// name, such as an image a failed step might leave behind. Cached layers' images are named.
+// name, such as an image a failed target might leave behind. Cached layers' images are named.
 func unnamedImages(t *testing.T) map[string]bool {
 	t.Helper()
 	return imageIDs(t, func(img storage.Image) bool { return len(img.Names) == 0 })

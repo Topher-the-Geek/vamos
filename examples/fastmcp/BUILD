@@ -12,13 +12,12 @@ glob(
 layer(
     name="packages",
     base="python",
-    sources=["package-manifest"],
-    destination="/tmp",
-    # The lock file is needed only to install, so leave it out of the image.
-    run=[
-        "sh", "-c",
-        "pip install --no-cache-dir --root-user-action=ignore --require-hashes -r /tmp/requirements_lock.txt"
-        + " && rm /tmp/requirements_lock.txt",
+    steps=[
+        add("package-manifest", "/tmp"),
+        build_env(PIP_NO_CACHE_DIR="1", PIP_ROOT_USER_ACTION="ignore"),
+        run(["pip", "install", "--require-hashes", "-r", "/tmp/requirements_lock.txt"]),
+        # The lock file is needed only to install, so leave it out of the image.
+        run(["rm", "/tmp/requirements_lock.txt"]),
     ],
 )
 
@@ -30,7 +29,9 @@ glob(
 layer(
     name="server",
     base="packages",
-    sources=["server-source"],
-    destination="/app",
-    command=["python", "/app/server.py"],
+    steps=[
+        add("server-source", "/app"),
+        workdir("/app"),
+    ],
+    command=["python", "server.py"],
 )
