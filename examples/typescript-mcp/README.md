@@ -1,4 +1,4 @@
-# nodejs example
+# typescript-mcp example
 
 An [MCP](https://modelcontextprotocol.io) server with one tool, `echo`, built with the official
 [TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk). It speaks MCP over stdio. In
@@ -25,6 +25,6 @@ fix sooner, add `--min-release-age=0` to `npm install`.
 The image installs only the runtime dependencies. From the repository root:
 
 ```
-./vamos load server vamos-example -C examples/nodejs
-docker run -i --rm vamos-example < examples/nodejs/echo-request.jsonl
+./vamos load server vamos-example -C examples/typescript-mcp
+docker run -i --rm vamos-example < examples/typescript-mcp/echo-request.jsonl
 ```

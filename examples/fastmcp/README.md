@@ -30,7 +30,7 @@ The image installs only `requirements_lock.txt`. From the repository root:
 
 ```
 ./vamos load server vamos-fastmcp -C examples/fastmcp
-(cat examples/nodejs/echo-request.jsonl; sleep 2) | docker run -i --rm vamos-fastmcp
+(cat examples/typescript-mcp/echo-request.jsonl; sleep 2) | docker run -i --rm vamos-fastmcp
 ```
 
 When stdin closes, the MCP Python SDK cancels requests still in progress and answers them with

@@ -27,7 +27,7 @@ file) holds a `BUILD` file per package, which name each other's targets by label
   its cached result, and copies the named target's image to the destination.
 - `internal/cache.go` — the build cache: a content-addressed store of files, trees and logs, and an action
   cache from each target's key to its latest result. Layers' images stay in the container store.
-- `examples/` — sample `BUILD` projects: `nodejs/` (TypeScript) and `fastmcp/` (Python), each an MCP server
+- `examples/` — sample `BUILD` projects: `typescript-mcp/` (TypeScript) and `fastmcp/` (Python), each an MCP server
   with an echo tool, and `strawberry-react/`, a workspace whose UI package uses the backend's GraphQL
   schema. Each has its own lint and tests; see its README.
 
@@ -50,7 +50,7 @@ go test ./...                 # everything, including image builds (~90s, needs 
 After changing an example, run its own checks (setup is in its README):
 
 ```
-(cd examples/nodejs && npm run check)
+(cd examples/typescript-mcp && npm run check)
 (cd examples/fastmcp && . .venv/bin/activate && ruff check . && ruff format --check . && pyright && pytest)
 ```
 
@@ -87,7 +87,7 @@ The first run pulls `busybox:1.36` from Docker Hub; later runs use the local con
 
 The tests never run the built binary, the examples, or the `Dockerfile`. Before finishing a change to
 building, destinations, the examples, or the `Dockerfile`, run these by hand. Each sends
-`examples/nodejs/echo-request.jsonl` over stdin and should end with its reply:
+`examples/typescript-mcp/echo-request.jsonl` over stdin and should end with its reply:
 `{"result":{"content":[{"type":"text","text":"hola"}]},"jsonrpc":"2.0","id":2}`.
 
 ```
@@ -95,25 +95,25 @@ building, destinations, the examples, or the `Dockerfile`, run these by hand. Ea
 go build -o vamos . && ./vamos --help && ./vamos nope; ./vamos load
 
 # 2. load into Docker, then run
-./vamos load server vamos-example -C examples/nodejs \
-  && docker run -i --rm vamos-example < examples/nodejs/echo-request.jsonl
+./vamos load server vamos-example -C examples/typescript-mcp \
+  && docker run -i --rm vamos-example < examples/typescript-mcp/echo-request.jsonl
 
 # 3. write a tarball, then load and run it (use a temp dir, not the repo)
-./vamos write server "$TMP/example.tar" -t vamos-example:tar -C examples/nodejs \
+./vamos write server "$TMP/example.tar" -t vamos-example:tar -C examples/typescript-mcp \
   && docker load -i "$TMP/example.tar" && docker run -i --rm vamos-example:tar \
-  < examples/nodejs/echo-request.jsonl
+  < examples/typescript-mcp/echo-request.jsonl
 
 # 4. The release image (README's "Run"). Paths in the devcontainer aren't host paths, so pipe
 #    the example in instead of bind-mounting it.
 docker build -q . -t vamos \
-  && tar -C examples/nodejs --exclude=node_modules -c . | docker run -i --rm --privileged \
+  && tar -C examples/typescript-mcp --exclude=node_modules -c . | docker run -i --rm --privileged \
   -v /var/run/docker.sock:/var/run/docker.sock --entrypoint sh vamos \
   -c 'mkdir /example && tar -x -C /example && vamos load server vamos-example:image -C /example' \
-  && docker run -i --rm vamos-example:image < examples/nodejs/echo-request.jsonl
+  && docker run -i --rm vamos-example:image < examples/typescript-mcp/echo-request.jsonl
 
 # 5. The fastmcp example. Its SDK cancels pending requests when stdin closes, so hold stdin open.
 ./vamos load server vamos-fastmcp -C examples/fastmcp \
-  && (cat examples/nodejs/echo-request.jsonl; sleep 2) | docker run -i --rm vamos-fastmcp
+  && (cat examples/typescript-mcp/echo-request.jsonl; sleep 2) | docker run -i --rm vamos-fastmcp
 
 # 6. The strawberry-react workspace, behind its compose file's ingress. The devcontainer can't reach the
 #    host's port 8080, so curl from the compose network. Expect the page's <title>, then the reply below.

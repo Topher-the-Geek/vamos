@@ -218,7 +218,7 @@ Whether a glob's leading folders exist is checked before anything is built, but 
 being built add, so a missing file doesn't stop building targets that don't need it. Whether its patterns match
 any file, and its limits, are checked as its files are read.
 
-See [examples/nodejs/](examples/nodejs/) and [examples/fastmcp/](examples/fastmcp/).
+See [examples/typescript-mcp/](examples/typescript-mcp/) and [examples/fastmcp/](examples/fastmcp/).
 
 ## Workspaces
 
@@ -283,7 +283,7 @@ Run with full privileges, loading the image straight into the host's Docker:
 ```
 docker run --rm -it --privileged \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -v "$PWD/examples/nodejs:/example" \
+  -v "$PWD/examples/typescript-mcp:/example" \
   vamos load server vamos-example -C /example
 ```
 
@@ -295,7 +295,7 @@ docker run --rm -it \
   --security-opt seccomp=unconfined \
   --security-opt apparmor=unconfined \
   --security-opt label=disable \
-  -v "$PWD/examples/nodejs:/example" -v "$PWD/output:/output" \
+  -v "$PWD/examples/typescript-mcp:/example" -v "$PWD/output:/output" \
   vamos write server /output/example.tar -t vamos-example -C /example
 ```
 
@@ -313,4 +313,4 @@ docker run -i --rm vamos-example
 If you wrote a tarball, `docker load -i output/example.tar` first.
 
 The example is an [MCP](https://modelcontextprotocol.io) server with an `echo` tool, speaking MCP over stdin and
-stdout. Send it a request with `docker run -i --rm vamos-example < examples/nodejs/echo-request.jsonl`.
+stdout. Send it a request with `docker run -i --rm vamos-example < examples/typescript-mcp/echo-request.jsonl`.

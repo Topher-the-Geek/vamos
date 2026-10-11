@@ -5,16 +5,16 @@
 			"path": "."
 		},
 		{
-			"name": "examples/nodejs",
-			"path": "examples/nodejs"
-		},
-		{
 			"name": "examples/fastmcp",
 			"path": "examples/fastmcp"
 		},
 		{
 			"name": "examples/strawberry-react",
 			"path": "examples/strawberry-react"
+		},
+		{
+			"name": "examples/typescript-mcp",
+			"path": "examples/typescript-mcp"
 		}
 	],
 	"settings": {
