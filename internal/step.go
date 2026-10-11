@@ -50,17 +50,42 @@ func (stepBase) source() *fileSet      { return nil }
 // addStep copies files from a package or a task's output into the container.
 type addStep struct {
 	stepBase
-	ref  string   // names set, as given
-	set  *fileSet // placed beneath dest at their relative paths
-	dest string   // as given: absolute once its variables are expanded
+	ref   string   // names set, as given
+	set   *fileSet // placed beneath dest at their relative paths
+	dest  string   // as given: absolute once its variables are expanded
+	owner string   // user or ID that owns the files, as named in the image; root if empty
+	group string   // group or ID; the owner's group if empty, or root's if owner is too
 }
 
 func (s *addStep) String() string {
-	return fmt.Sprintf("add(%s, %s)", starlark.String(s.ref), starlark.String(s.dest))
+	var b strings.Builder
+	fmt.Fprintf(&b, "add(%s, %s", starlark.String(s.ref), starlark.String(s.dest))
+	if s.owner != "" {
+		fmt.Fprintf(&b, ", owner=%s", starlark.String(s.owner))
+	}
+	if s.group != "" {
+		fmt.Fprintf(&b, ", group=%s", starlark.String(s.group))
+	}
+	b.WriteString(")")
+	return b.String()
 }
 
-func (s *addStep) source() *fileSet  { return s.set }
-func (s *addStep) entry() actionStep { return actionStep{Op: "add", Dest: s.dest} }
+func (s *addStep) source() *fileSet { return s.set }
+
+func (s *addStep) entry() actionStep {
+	return actionStep{Op: "add", Dest: s.dest, Owner: s.owner, Group: s.group}
+}
+
+// chown returns the owner of the files, as buildah's Chown option takes it, or "" for root.
+func (s *addStep) chown() string {
+	switch {
+	case s.group == "":
+		return s.owner
+	case s.owner == "":
+		return "0:" + s.group
+	}
+	return s.owner + ":" + s.group
+}
 
 func (s *addStep) apply(st *targetState, files *blob) error {
 	if files == nil {
@@ -70,7 +95,7 @@ func (s *addStep) apply(st *targetState, files *blob) error {
 	if err != nil {
 		return err
 	}
-	return st.addSource(s.set, *files, dest)
+	return st.addSource(s.set, *files, dest, s.chown())
 }
 
 // runStep runs a command in the container.

@@ -2,6 +2,7 @@ package internal
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,8 +30,8 @@ func TestCacheTreeRoundTrip(t *testing.T) {
 	must(t, fsys.Chmod(filepath.Join(dir, "app/lib"), 0o750))
 
 	c := newTestCache(t)
-	paths := []string{"app", "top.txt"}
-	stored, err := c.putTree(fsys, dir, paths)
+	sel := testSelection(t, []string{"app", "top.txt"}, nil, func(sel *selection) { sel.ModeMask = 0o7777 })
+	stored, err := c.putTree(fsys, dir, sel)
 	must(t, err)
 	// One blob for each distinct file, and one for the tree.
 	if got, want := countBlobs(t, c), 5; got != want {
@@ -38,8 +39,9 @@ func TestCacheTreeRoundTrip(t *testing.T) {
 	}
 
 	out := t.TempDir()
-	must(t, c.checkout(stored, out))
-	again, err := c.putFiles(afero.NewOsFs(), out, paths)
+	_, err = c.checkout(stored, out)
+	must(t, err)
+	again, err := c.putFiles(afero.NewOsFs(), out, sel)
 	must(t, err)
 	if again.digest() != stored {
 		want, err := c.readTree(stored)
@@ -105,10 +107,10 @@ func TestTreeDigest(t *testing.T) {
 			fsys, _ := diskProject(t, map[string]string{"a.txt": "a", "sub/b.txt": "b"},
 				map[string]string{"sub/link": "b.txt"})
 			c := newTestCache(t)
-			before, err := c.putFiles(fsys, projectDir, []string{"."})
+			before, err := c.putFiles(fsys, projectDir, testSelection(t, []string{"."}, nil, nil))
 			must(t, err)
 			must(t, tc.change(fsys, projectDir))
-			after, err := c.putFiles(fsys, projectDir, []string{"."})
+			after, err := c.putFiles(fsys, projectDir, testSelection(t, []string{"."}, nil, nil))
 			must(t, err)
 			if same := before.digest() == after.digest(); same != tc.same {
 				t.Errorf("digest unchanged = %v, want %v", same, tc.same)
@@ -123,7 +125,7 @@ func TestPutFileChanged(t *testing.T) {
 	fsys := &editedFs{Fs: afero.NewMemMapFs(), name: "/a.txt", edit: "new"}
 	must(t, afero.WriteFile(fsys.Fs, "/a.txt", []byte("old"), 0o644))
 	c := newTestCache(t)
-	b, err := c.putFile(fsys, "/a.txt")
+	b, err := c.putFile(fsys, "/a.txt", defaultMaxFileSize)
 	must(t, err)
 	data, err := c.readBytes(b)
 	must(t, err)
@@ -152,6 +154,47 @@ func (f *editedFs) Open(name string) (afero.File, error) {
 		}
 	}
 	return f.Fs.Open(name)
+}
+
+// TestPutFileEndless checks that putFile reads no more of a file than its limit allows, so that a file that
+// keeps growing, such as a log, can't fill the cache.
+func TestPutFileEndless(t *testing.T) {
+	fsys := &endlessFs{Fs: afero.NewMemMapFs()}
+	must(t, afero.WriteFile(fsys.Fs, "/log", nil, 0o644))
+	c := newTestCache(t)
+	if _, err := c.putFile(fsys, "/log", 10); !errors.Is(err, errOverLimit) {
+		t.Errorf("putFile = %v, want %v", err, errOverLimit)
+	}
+	if n := countBlobs(t, c); n != 0 {
+		t.Errorf("the cache holds %d blobs, want none", n)
+	}
+}
+
+// endlessFs is a filesystem whose files never end. Reading more than a mebibyte of one fails, rather than
+// running until the disk is full.
+type endlessFs struct {
+	afero.Fs
+}
+
+// Open opens the file name, which never ends.
+func (f *endlessFs) Open(name string) (afero.File, error) {
+	file, err := f.Fs.Open(name)
+	return &endlessFile{File: file}, err
+}
+
+// endlessFile is a file of endless zeros.
+type endlessFile struct {
+	afero.File
+	read int
+}
+
+// Read fills p with zeros, or fails once a mebibyte has been read.
+func (f *endlessFile) Read(p []byte) (int, error) {
+	if f.read += len(p); f.read > 1<<20 {
+		return 0, errors.New("read more than a mebibyte of an endless file")
+	}
+	clear(p)
+	return len(p), nil
 }
 
 // TestActionResults checks that the latest result for a key is kept, and that a key with
@@ -276,7 +319,7 @@ func TestCheckoutRefusesEscapes(t *testing.T) {
 			c := newTestCache(t)
 			b, err := c.putBytes((&tree{Entries: tt.entries}).encode())
 			must(t, err)
-			err = c.checkout(b, t.TempDir())
+			_, err = c.checkout(b, t.TempDir())
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Errorf("checkout error = %v, want it to contain %q", err, tt.want)
 			}

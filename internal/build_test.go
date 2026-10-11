@@ -300,6 +300,164 @@ layer(name="app", base="busybox", steps=[add("code", "/app"), add("docs", "/app"
 	}
 }
 
+// TestGlobPatterns checks that a glob's patterns select files, at their paths relative to the BUILD file, with
+// the folders between their patterns' prefixes and them, and their modes masked.
+func TestGlobPatterns(t *testing.T) {
+	requireBuildah(t)
+	fsys := project(t, map[string]string{
+		"BUILD": pullBusybox + `
+glob(name="code", include=["src/**/*.ts", "*.json"], exclude=["**/*.test.ts"])
+layer(name="app", base="busybox", steps=[add("code", "/app")])
+`,
+		"package.json":            "{}",
+		"README.md":               "# app",
+		"src/main.ts":             "main",
+		"src/main.test.ts":        "test",
+		"src/lib/util.ts":         "util",
+		"src/lib/util.js":         "compiled",
+		"node_modules/dep/dep.ts": "dep",
+	})
+	must(t, fsys.Chmod(filepath.Join(projectDir, "src/lib"), 0o777))
+	must(t, fsys.Chmod(filepath.Join(projectDir, "src/main.ts"), 0o666))
+	out := filepath.Join(t.TempDir(), "app.tar")
+
+	vamos(t, fsys, "write", "app", out, "-C", projectDir).succeeds(t)
+
+	img, err := tarball.ImageFromPath(out, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"/app/package.json", "/app/src", "/app/src/lib", "/app/src/lib/util.ts", "/app/src/main.ts"}
+	if got := imagePaths(t, img, "/app"); !slices.Equal(got, want) {
+		t.Errorf("files in /app = %q, want %q", got, want)
+	}
+	modes := map[string]int64{}
+	walkImage(t, img, func(hdr *tar.Header, r io.Reader) bool {
+		modes[imagePath(hdr)] = hdr.Mode & 0o7777
+		return false
+	})
+	for path, want := range map[string]int64{"/app/src/lib": 0o755, "/app/src/main.ts": 0o644} {
+		if got := modes[path]; got != want {
+			t.Errorf("mode of %s = %#o, want %#o", path, got, want)
+		}
+	}
+}
+
+// TestAddOwner checks that add() gives its files the owner and group asked for, named as the image names them.
+func TestAddOwner(t *testing.T) {
+	requireBuildah(t)
+	fsys := project(t, map[string]string{
+		"BUILD": pullBusybox + `
+glob(name="code", include=["src"])
+layer(
+    name="app",
+    base="busybox",
+    steps=[
+        add("code", "/root"),
+        add("code", "/user", owner="nobody"),
+        add("code", "/group", group="2000"),
+        add("code", "/both", owner="1000", group="nobody"),
+    ],
+)
+`,
+		"src/sub/app.sh": "echo hi",
+	})
+	out := filepath.Join(t.TempDir(), "app.tar")
+
+	vamos(t, fsys, "write", "app", out, "-C", projectDir).succeeds(t)
+
+	img, err := tarball.ImageFromPath(out, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owners := map[string]string{}
+	walkImage(t, img, func(hdr *tar.Header, r io.Reader) bool {
+		owners[imagePath(hdr)] = fmt.Sprintf("%d:%d", hdr.Uid, hdr.Gid)
+		return false
+	})
+	for dest, want := range map[string]string{
+		"/root":  "0:0",
+		"/user":  "65534:65534",
+		"/group": "0:2000",
+		"/both":  "1000:65534",
+	} {
+		for _, path := range []string{dest + "/src/sub", dest + "/src/sub/app.sh"} {
+			if got := owners[path]; got != want {
+				t.Errorf("owner of %s = %s, want %s", path, got, want)
+			}
+		}
+	}
+}
+
+// TestAddUnknownOwner checks that an owner the image doesn't name stops the build, leaving no output.
+func TestAddUnknownOwner(t *testing.T) {
+	requireBuildah(t)
+	fsys := project(t, map[string]string{
+		"BUILD": pullBusybox + `glob(name="code", include=["app.sh"])` + "\n" +
+			`layer(name="app", base="busybox", steps=[add("code", "/app", owner="no-such-user")])`,
+		"app.sh": "echo hi",
+	})
+	out := t.TempDir()
+	before := unnamedImages(t)
+
+	vamos(t, fsys, "write", "app", filepath.Join(out, "app.tar"), "-C", projectDir).failsWith(t, false,
+		`layer "app": add("code", "/app", owner="no-such-user") failed`,
+		`looking up UID/GID for "no-such-user"`)
+	assertNoFiles(t, out)
+	assertNoNewImages(t, before)
+}
+
+// TestSelectionFailures checks the mistakes in a glob's or task's selection that are found as its files are
+// read, which stop the build, leaving no output.
+func TestSelectionFailures(t *testing.T) {
+	requireBuildah(t)
+	tests := []struct {
+		name  string
+		build string
+		want  []string
+	}{
+		{
+			name: "glob matches nothing",
+			build: `glob(name="code", include=["*.go"])` + "\n" +
+				`layer(name="app", base="busybox", steps=[add("code", "/app")])`,
+			want: []string{
+				`layer "app": reading code: no files in /project match include "*.go"; pass allow_no_files=True`,
+			},
+		},
+		{
+			name: "glob over a limit",
+			build: `glob(name="code", include=["*.sh"], max_file_size=3)` + "\n" +
+				`layer(name="app", base="busybox", steps=[add("code", "/app")])`,
+			want: []string{`layer "app": reading code: /project/app.sh is 7 bytes, more than max_file_size=3`},
+		},
+		{
+			name: "task output matches nothing",
+			build: `task(name="make", base="busybox", steps=[run(["mkdir", "/out"])], source="/out", include=["*"])` +
+				"\n" + `layer(name="app", base="busybox", steps=[add("make", "/app")])`,
+			want: []string{`task "make": no files in /out match include "*"; pass allow_no_files=True`},
+		},
+		{
+			name: "task output over a limit",
+			build: `task(name="make", base="busybox", steps=[run(["sh", "-c", "mkdir /out && touch /out/a /out/b"])],` +
+				` source="/out", include=["."], max_file_count=1)` + "\n" +
+				`layer(name="app", base="busybox", steps=[add("make", "/app")])`,
+			want: []string{`task "make": more than max_file_count=1 files in /out match`},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fsys := project(t, map[string]string{"BUILD": pullBusybox + tt.build, "app.sh": "echo hi"})
+			out := t.TempDir()
+			before := unnamedImages(t)
+
+			vamos(t, fsys, "write", "app", filepath.Join(out, "app.tar"), "-C", projectDir).
+				failsWith(t, false, tt.want...)
+			assertNoFiles(t, out)
+			assertNoNewImages(t, before)
+		})
+	}
+}
+
 // TestIncludeProject includes the whole project, through a link to it, as a linked $PWD gives.
 func TestIncludeProject(t *testing.T) {
 	requireBuildah(t)
@@ -726,7 +884,8 @@ task(name="broken", base="app", steps=[run(["false"])])
 	assertNoNewImages(t, before)
 }
 
-// TestTaskOutputModes checks that files a task makes keep their modes, special bits included.
+// TestTaskOutputModes checks that a task's output is selected by patterns, and that its files keep their
+// modes, less those its mode mask leaves out.
 func TestTaskOutputModes(t *testing.T) {
 	requireBuildah(t)
 	fsys := project(t, map[string]string{
@@ -737,13 +896,24 @@ task(
     steps=[run(["sh", "-c", """
         mkdir -p /out/shared
         echo tool > /out/tool
+        echo map > /out/tool.map
+        echo data > /out/shared/data
         chmod 4750 /out/tool
         chmod 1777 /out/shared
     """])],
     source="/out",
-    include=["tool", "shared"],
+    include=["**"],
+    exclude=["*.map"],
+    mode_mask=0o7777,
 )
-layer(name="app", base="busybox", steps=[add("make", "/app")])
+task(
+    name="masked",
+    base="busybox",
+    steps=[run(["sh", "-c", "mkdir /out && echo lib > /out/lib.so && chmod 4775 /out/lib.so"])],
+    source="/out",
+    include=["*.so"],
+)
+layer(name="app", base="busybox", steps=[add("make", "/app"), add("masked", "/app/lib")])
 `,
 	})
 	out := filepath.Join(t.TempDir(), "app.tar")
@@ -759,10 +929,18 @@ layer(name="app", base="busybox", steps=[add("make", "/app")])
 		modes[imagePath(hdr)] = hdr.Mode & 0o7777
 		return false
 	})
-	for path, want := range map[string]int64{"/app/tool": 0o4750, "/app/shared": 0o1777} {
+	for path, want := range map[string]int64{
+		"/app/tool":        0o4750,
+		"/app/shared":      0o1777,
+		"/app/shared/data": 0o644,
+		"/app/lib/lib.so":  0o755, // the default mask
+	} {
 		if got := modes[path]; got != want {
 			t.Errorf("mode of %s = %#o, want %#o", path, got, want)
 		}
+	}
+	if _, ok := modes["/app/tool.map"]; ok {
+		t.Error("/app/tool.map is in the image, though excluded")
 	}
 }
 

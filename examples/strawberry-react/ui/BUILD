@@ -50,7 +50,7 @@ glob(
     name = "graphql-codegen-files",
     include = [
         "codegen.ts",
-        "src/queries.ts",
+        "src/**/*queries.ts",  # codegen.ts's documents
     ],
 )
 
@@ -77,18 +77,11 @@ glob(
         "eslint.config.js",
         "index.html",
         "public",
-        "src/App.css",
-        "src/App.tsx",
-        "src/assets",
-        "src/index.css",
-        "src/main.tsx",
-        "src/queries.ts",
-        "src/vite-env.d.ts",
-        "tsconfig.app.json",
-        "tsconfig.json",
-        "tsconfig.node.json",
+        "src",
+        "tsconfig*.json",
         "vite.config.ts",
     ],
+    exclude = ["src/gql"],
 )
 
 task(

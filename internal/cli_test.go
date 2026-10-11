@@ -569,12 +569,70 @@ func TestBuildFileMistakes(t *testing.T) {
 			want:  []string{"/project/BUILD:1:5:", "glob: include[0] is int, want string"},
 		},
 		{
-			name:  "include pattern",
-			build: `glob(name="code", include=["*.sh"])`,
-			files: map[string]string{"app.sh": "echo hi"},
+			name:  "bad include pattern",
+			build: `glob(name="code", include=["src/[a"])`,
+			want:  []string{"/project/BUILD:1:5:", `glob: include "src/[a": syntax error in pattern`},
+		},
+		{
+			name:  "double star within a name",
+			build: `glob(name="code", include=["src/**.ts"])`,
 			want: []string{
 				"/project/BUILD:1:5:",
-				`glob: include "*.sh": patterns are not supported yet; list each file`,
+				`glob: include "src/**.ts": "**" must be a whole part of the path, as in "src/**/*.ts"`,
+			},
+		},
+		{
+			name:  "exclude outside project",
+			build: `glob(name="code", include=["."], exclude=["../secret"])`,
+			want:  []string{"/project/BUILD:1:5:", `glob: exclude "../secret" is outside /project`},
+		},
+		{
+			name:  "empty exclude path",
+			build: `glob(name="code", include=["."], exclude=[""])`,
+			want:  []string{"/project/BUILD:1:5:", `glob: exclude[0] is empty`},
+		},
+		{
+			name:  "mode mask out of range",
+			build: `glob(name="code", include=["."], mode_mask=0o10000)`,
+			want:  []string{"/project/BUILD:1:5:", "glob: mode_mask 0o10000 must be between 0 and 0o7777"},
+		},
+		{
+			name:  "mode mask negative",
+			build: `glob(name="code", include=["."], mode_mask=-1)`,
+			want:  []string{"/project/BUILD:1:5:", "glob: mode_mask -0o1 must be between 0 and 0o7777"},
+		},
+		{
+			name:  "mode mask not an int",
+			build: `glob(name="code", include=["."], mode_mask="755")`,
+			want:  []string{"/project/BUILD:1:5:", `glob: for parameter "mode_mask": got string, want int`},
+		},
+		{
+			name:  "limit not positive",
+			build: `glob(name="code", include=["."], max_file_count=0)`,
+			want:  []string{"/project/BUILD:1:5:", "glob: max_file_count must be positive, not 0"},
+		},
+		{
+			name:  "file size limit not positive",
+			build: `glob(name="code", include=["."], max_file_size=-1)`,
+			want:  []string{"/project/BUILD:1:5:", "glob: max_file_size must be positive, not -1"},
+		},
+		{
+			name:  "total size limit not positive",
+			build: pullBusybox + `task(name="make", base="busybox", source="/out", include=["."], max_total_size=0)`,
+			want:  []string{"/project/BUILD:2:5:", "task: max_total_size must be positive, not 0"},
+		},
+		{
+			name:  "missing pattern prefix",
+			build: `glob(name="code", include=["scr/**"])` + "\n" + pullBusybox + addCode,
+			want:  []string{"/project/BUILD:1:5:", `glob: include "scr/**": "scr" not found in /project`},
+		},
+		{
+			name: "owner with a group",
+			build: pullBusybox + withGlob +
+				`layer(name="app", base="busybox", steps=[add("code", "/app", owner="app:app")])`,
+			want: []string{
+				"/project/BUILD:3:45:",
+				`add: owner "app:app" must not contain ":"; give owner and group apart`,
 			},
 		},
 		{
@@ -640,9 +698,19 @@ func TestBuildFileMistakes(t *testing.T) {
 			want:  []string{"/project/BUILD:2:5:", `task: include "../etc" is outside /out`},
 		},
 		{
-			name:  "task include pattern",
-			build: pullBusybox + `task(name="make", base="busybox", source="/out", include=["*.js"])`,
-			want:  []string{"/project/BUILD:2:5:", `task: include "*.js": patterns are not supported yet`},
+			name:  "task exclude without source",
+			build: pullBusybox + `task(name="make", base="busybox", exclude=["*.map"])`,
+			want:  []string{"/project/BUILD:2:5:", "task: exclude needs source and include, the files to collect"},
+		},
+		{
+			name:  "task limit without source",
+			build: pullBusybox + `task(name="make", base="busybox", max_file_size=1)`,
+			want:  []string{"/project/BUILD:2:5:", "task: max_file_size needs source and include"},
+		},
+		{
+			name:  "bad task exclude pattern",
+			build: pullBusybox + `task(name="make", base="busybox", source="/out", include=["."], exclude=["[x"])`,
+			want:  []string{"/project/BUILD:2:5:", `task: exclude "[x": syntax error in pattern`},
 		},
 		{
 			name:  "task command",

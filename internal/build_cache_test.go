@@ -145,6 +145,30 @@ func TestCacheMisses(t *testing.T) {
 			want: map[string]string{`layer "deps"`: "building", `task "size"`: "cached"},
 		},
 		{
+			name: "add owner",
+			change: func(t *testing.T, fsys afero.Fs, build string) string {
+				return strings.Replace(build, `add("input", "/deps")`, `add("input", "/deps", owner="nobody")`, 1)
+			},
+			want: map[string]string{`layer "deps"`: "building", `task "size"`: "cached"},
+		},
+		{
+			name: "task's selection limit",
+			change: func(t *testing.T, fsys afero.Fs, build string) string {
+				return strings.Replace(build, `include=["size.txt", "nonce.txt"],`,
+					`include=["size.txt", "nonce.txt"], max_file_count=2,`, 1)
+			},
+			want: map[string]string{`layer "deps"`: "cached", `task "size"`: "building"},
+		},
+		{
+			// Neither changes which files the task collects.
+			name: "task's patterns reordered and repeated",
+			change: func(t *testing.T, fsys afero.Fs, build string) string {
+				return strings.Replace(build, `include=["size.txt", "nonce.txt"]`,
+					`include=["./nonce.txt", "size.txt", "nonce.txt"]`, 1)
+			},
+			want: map[string]string{`layer "deps"`: "cached", `task "size"`: "cached"},
+		},
+		{
 			// Variables have different names, so their order makes no difference. TestEnvOrder checks
 			// that it makes no difference to the image either.
 			name: "variables reordered",
@@ -218,6 +242,35 @@ layer(name="app", base="sized")
 	must(t, afero.WriteFile(fsys, filepath.Join(projectDir, "input.txt"), []byte("HELLO\n"), 0o644))
 	r := vamos(t, fsys, "write", "app", filepath.Join(dir, "2.tar"), "-C", projectDir).succeeds(t)
 	assertTargets(t, r, map[string]string{`task "size"`: "building", `layer "sized"`: "cached"})
+}
+
+// TestCacheEmptyOutput checks that a glob and a task that select no files, as allow_no_files allows, build
+// and are reused.
+func TestCacheEmptyOutput(t *testing.T) {
+	requireBuildah(t)
+	nonce := newNonce()
+	fsys := project(t, map[string]string{
+		"BUILD": pullBusybox + fmt.Sprintf(`
+glob(name="none", include=["*.go"], allow_no_files=True)
+task(
+    name="empty",
+    base="busybox",
+    steps=[run(["sh", "-c", "echo %[1]s; mkdir /out"])],
+    source="/out",
+    include=["*"],
+    allow_no_files=True,
+)
+layer(name="app", base="busybox", steps=[add("none", "/app"), add("empty", "/app")])
+`, nonce),
+	})
+	dir := t.TempDir()
+	first := vamos(t, fsys, "write", "app", filepath.Join(dir, "1.tar"), "-C", projectDir).succeeds(t)
+	assertTargets(t, first, map[string]string{`task "empty"`: "building", `layer "app"`: "building"})
+	second := vamos(t, fsys, "write", "app", filepath.Join(dir, "2.tar"), "-C", projectDir).succeeds(t)
+	assertTargets(t, second, map[string]string{`task "empty"`: "cached", `layer "app"`: "cached"})
+	if a, b := builtID(t, first), builtID(t, second); a != b {
+		t.Errorf("second build made image %s, want the first's %s", b, a)
+	}
 }
 
 // TestCacheSourceEditedDuringBuild checks that a source file edited while a build reads it is

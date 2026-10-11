@@ -1,0 +1,515 @@
+package internal
+
+import (
+	"cmp"
+	"errors"
+	"fmt"
+	"io/fs"
+	"path"
+	"path/filepath"
+	"slices"
+	"strings"
+
+	"github.com/spf13/afero"
+	"go.starlark.net/starlark"
+)
+
+// Defaults of a selection. The limits catch a pattern that reaches much further than meant, such as into
+// node_modules, before all of its files are read.
+const (
+	defaultModeMask     = 0o755
+	defaultMaxFileCount = 10_000
+	defaultMaxFileSize  = 100 << 20 // 100 MiB
+	defaultMaxTotalSize = 1 << 30   // 1 GiB
+)
+
+// selection says which files a glob() or a task's output holds: those within a directory that its include
+// patterns match, less those its exclude patterns match. It is part of a task's action, so its fields are
+// encoded as the action is.
+type selection struct {
+	Include      []string `json:"include"`           // cleaned patterns
+	Exclude      []string `json:"exclude,omitempty"` // cleaned patterns
+	ModeMask     int      `json:"mode_mask"`         // chmod bits kept of each file's and directory's mode
+	AllowNoFiles bool     `json:"allow_no_files,omitempty"`
+	MaxFileCount int      `json:"max_file_count"` // files and links
+	MaxFileSize  int64    `json:"max_file_size"`  // bytes
+	MaxTotalSize int64    `json:"max_total_size"` // bytes
+
+	include, exclude []pattern // parsed by compile
+}
+
+// pattern is an include or exclude pattern, relative to its selection's directory. Its parts are matched
+// against a path's parts with path.Match, but for "**", which matches any number of parts, even none.
+type pattern struct {
+	text   string   // cleaned, for messages
+	parts  []string // a path without wildcards ends in "**", so that it also matches everything beneath it
+	prefix string   // its leading parts without wildcards, or "." for none: the directory its files are beneath
+}
+
+// defaultSelection returns a selection with the default mode mask and limits, which has no patterns yet.
+func defaultSelection() *selection {
+	return &selection{
+		ModeMask:     defaultModeMask,
+		MaxFileCount: defaultMaxFileCount,
+		MaxFileSize:  defaultMaxFileSize,
+		MaxTotalSize: defaultMaxTotalSize,
+	}
+}
+
+// params returns the parameters of glob() and task() that make a selection, for starlark.UnpackArgs. Its
+// include and exclude lists are unpacked into include and exclude, which selectFiles then checks, and the
+// rest into sel. include is optional unless required.
+func (sel *selection) params(include, exclude **starlark.List, required bool) []any {
+	includeParam := "include?"
+	if required {
+		includeParam = "include"
+	}
+	return []any{
+		includeParam, include,
+		"exclude?", exclude,
+		"mode_mask?", &sel.ModeMask,
+		"allow_no_files?", &sel.AllowNoFiles,
+		"max_file_count?", &sel.MaxFileCount,
+		"max_file_size?", &sel.MaxFileSize,
+		"max_total_size?", &sel.MaxTotalSize,
+	}
+}
+
+// isSelectionParam reports whether name is one of the parameters that params returns, so that task() can
+// tell those given without source from its own.
+func isSelectionParam(name string) bool {
+	params := defaultSelection().params(new(*starlark.List), new(*starlark.List), false)
+	for i := 0; i < len(params); i += 2 {
+		if strings.TrimSuffix(params[i].(string), "?") == name {
+			return true
+		}
+	}
+	return false
+}
+
+// selectFiles sets sel's patterns from the include and exclude arguments of a call to fnName, and checks
+// them, relative to dir.
+func (sel *selection) selectFiles(fnName string, include, exclude *starlark.List, dir string) error {
+	var err error
+	if sel.Include, err = stringList(fnName, "include", include); err != nil {
+		return err
+	}
+	if len(sel.Include) == 0 {
+		return fmt.Errorf("%s: include must not be empty", fnName)
+	}
+	if sel.Exclude, err = stringList(fnName, "exclude", exclude); err != nil {
+		return err
+	}
+	if err := sel.compile(dir); err != nil {
+		return fmt.Errorf("%s: %w", fnName, err)
+	}
+	return nil
+}
+
+// compile checks sel's patterns, relative to dir, mode mask and limits, cleans its patterns and parses them.
+func (sel *selection) compile(dir string) error {
+	switch {
+	case sel.ModeMask < 0 || sel.ModeMask > 0o7777:
+		return fmt.Errorf("mode_mask %O must be between 0 and 0o7777", sel.ModeMask)
+	case sel.MaxFileCount < 1:
+		return fmt.Errorf("max_file_count must be positive, not %d", sel.MaxFileCount)
+	case sel.MaxFileSize < 1:
+		return fmt.Errorf("max_file_size must be positive, not %d", sel.MaxFileSize)
+	case sel.MaxTotalSize < 1:
+		return fmt.Errorf("max_total_size must be positive, not %d", sel.MaxTotalSize)
+	}
+	var err error
+	if sel.include, err = parsePatterns("include", sel.Include, dir); err != nil {
+		return err
+	}
+	if sel.exclude, err = parsePatterns("exclude", sel.Exclude, dir); err != nil {
+		return err
+	}
+	// Keep the cleaned patterns, sorted and once each, so that a task's key is the same however they were
+	// written and in whatever order: neither changes which files they select.
+	sel.Include, sel.Exclude = patternTexts(sel.include), patternTexts(sel.exclude)
+	return nil
+}
+
+// parsePatterns parses the patterns of the parameter param.
+func parsePatterns(param string, texts []string, dir string) ([]pattern, error) {
+	patterns := make([]pattern, len(texts))
+	for i, text := range texts {
+		if text == "" {
+			return nil, fmt.Errorf(`%s[%d] is empty; use "." for the whole directory`, param, i)
+		}
+		p, err := parsePattern(param, text, dir)
+		if err != nil {
+			return nil, err
+		}
+		patterns[i] = p
+	}
+	return patterns, nil
+}
+
+// patternTexts returns the cleaned texts of patterns, sorted and once each, or nil if there are none.
+func patternTexts(patterns []pattern) []string {
+	var texts []string
+	for _, p := range patterns {
+		texts = append(texts, p.text)
+	}
+	slices.Sort(texts)
+	return slices.Compact(texts)
+}
+
+// parsePattern parses text, a pattern of the parameter param, relative to dir.
+func parsePattern(param, text, dir string) (pattern, error) {
+	if err := checkRelative(param, text, dir); err != nil {
+		return pattern{}, err
+	}
+	p := pattern{text: path.Clean(text)}
+	if p.text != "." {
+		p.parts = strings.Split(p.text, "/")
+	}
+	literal, wild := 0, false
+	for _, part := range p.parts {
+		if part != "**" && strings.Contains(part, "**") {
+			return pattern{}, fmt.Errorf(`%s %q: "**" must be a whole part of the path, as in "src/**/*.ts"`,
+				param, text)
+		}
+		// Match checks the whole pattern, even when the name doesn't match.
+		if _, err := path.Match(part, ""); err != nil {
+			return pattern{}, fmt.Errorf("%s %q: %w", param, text, err)
+		}
+		if wild = wild || strings.ContainsAny(part, `*?[\`); !wild {
+			literal++
+		}
+	}
+	p.prefix = path.Join(append([]string{"."}, p.parts[:literal]...)...)
+	if literal == len(p.parts) {
+		p.parts = append(p.parts, "**")
+	}
+	return p, nil
+}
+
+// matchParts reports whether the parts of a path match the parts of a pattern.
+func matchParts(pattern, name []string) bool {
+	for len(pattern) > 0 {
+		if pattern[0] == "**" {
+			for i := range len(name) + 1 {
+				if matchParts(pattern[1:], name[i:]) {
+					return true
+				}
+			}
+			return false
+		}
+		if len(name) == 0 {
+			return false
+		}
+		if ok, _ := path.Match(pattern[0], name[0]); !ok {
+			return false
+		}
+		pattern, name = pattern[1:], name[1:]
+	}
+	return len(name) == 0
+}
+
+// mayMatchBeneath reports whether the parts of a pattern could match a path beneath the directory with the
+// given parts, so that the walk needs to read it.
+func mayMatchBeneath(pattern, dir []string) bool {
+	for ; len(dir) > 0; pattern, dir = pattern[1:], dir[1:] {
+		if len(pattern) == 0 {
+			return false
+		}
+		if pattern[0] == "**" {
+			return true
+		}
+		if ok, _ := path.Match(pattern[0], dir[0]); !ok {
+			return false
+		}
+	}
+	return len(pattern) > 0
+}
+
+// pathParts splits a cleaned relative path into its parts, none for ".".
+func pathParts(rel string) []string {
+	if rel == "." {
+		return nil
+	}
+	return strings.Split(rel, "/")
+}
+
+// excluded reports whether an exclude pattern matches the path with the given parts.
+func (sel *selection) excluded(parts []string) bool {
+	return slices.ContainsFunc(sel.exclude, func(p pattern) bool { return matchParts(p.parts, parts) })
+}
+
+// excludedWithin reports whether an exclude pattern matches the path with the given parts or a directory
+// that holds it. The walk skips an excluded directory and all it holds, so a walk that starts beneath one
+// must skip it too.
+func (sel *selection) excludedWithin(parts []string) bool {
+	for i := range parts {
+		if sel.excluded(parts[:i+1]) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchPrefix returns the outermost prefix of the include patterns that match the path with the given parts,
+// or false if none does. The prefixes of patterns that match one path all hold it, so each holds the others or
+// is within them.
+func (sel *selection) matchPrefix(parts []string) (string, bool) {
+	prefix, matched := "", false
+	for _, p := range sel.include {
+		if matchParts(p.parts, parts) && (!matched || within(prefix, p.prefix)) {
+			prefix, matched = p.prefix, true
+		}
+	}
+	return prefix, matched
+}
+
+// treeWalk is a walk of the files a selection selects within a directory, which walkTree describes.
+type treeWalk struct {
+	fsys     afero.Fs
+	dir      string
+	sel      *selection
+	file     func(name string, limit int64) (blob, error)
+	dirModes map[string]uint32 // of the directories read but not yet recorded, by path relative to dir
+	entries  []treeEntry
+	files    int   // files and links selected
+	total    int64 // size of the files selected
+}
+
+// walkTree describes the files that sel selects within dir in fsys as a tree, passing each file's name to file
+// for its blob, with the most bytes the limits leave for it. file fails with errOverLimit if the file holds
+// more. It starts at each include pattern's prefix, and reads only directories that some include
+// pattern could match within and no exclude pattern matches. Directories beneath a prefix that hold selected
+// files are recorded too, with their modes, but not those at or above it, which the image keeps as they are.
+//
+// The walk doesn't follow links within dir: they are recorded as links, as Docker's COPY does, so they can't
+// bring in files from outside it. checkInclude refuses links on the way to each prefix. dir itself may be a
+// link, as a project reached through a linked $PWD is.
+func walkTree(
+	fsys afero.Fs, dir string, sel *selection, file func(name string, limit int64) (blob, error),
+) (*tree, error) {
+	w := &treeWalk{
+		fsys:     fsys,
+		dir:      dir,
+		sel:      sel,
+		file:     file,
+		dirModes: map[string]uint32{},
+	}
+	var prefixes []string
+	for _, p := range sel.include {
+		if err := checkInclude(fsys, dir, p); err != nil {
+			return nil, err
+		}
+		prefixes = append(prefixes, p.prefix)
+	}
+	// Walk from the outermost prefixes, since the walk from each reaches any prefix beneath it. Shorter
+	// paths come first, as "." must, though names such as "-x" sort before it.
+	slices.SortFunc(prefixes, func(a, b string) int {
+		return cmp.Or(cmp.Compare(len(a), len(b)), strings.Compare(a, b))
+	})
+	var roots []string
+	for _, prefix := range slices.Compact(prefixes) {
+		if !slices.ContainsFunc(roots, func(root string) bool { return within(prefix, root) }) {
+			roots = append(roots, prefix)
+		}
+	}
+	for _, root := range roots {
+		if sel.excludedWithin(pathParts(root)) {
+			continue
+		}
+		var info fs.FileInfo
+		var err error
+		if root == "." {
+			info, err = fsys.Stat(dir)
+		} else {
+			info, _, err = lstat(fsys, filepath.Join(dir, root))
+		}
+		if err != nil {
+			return nil, err
+		}
+		if err := w.visit(root, info); err != nil {
+			return nil, err
+		}
+	}
+	if w.files == 0 && !sel.AllowNoFiles {
+		subject := "include " + quoteNames(sel.Include)
+		if len(sel.Exclude) > 0 {
+			subject += " but not exclude " + quoteNames(sel.Exclude)
+		}
+		return nil, fmt.Errorf("no files in %s match %s; pass allow_no_files=True if that's expected", dir, subject)
+	}
+	w.recordBetween()
+	slices.SortFunc(w.entries, func(a, b treeEntry) int { return strings.Compare(a.Path, b.Path) })
+	return &tree{Entries: w.entries}, nil
+}
+
+// visit walks the file at rel, relative to the walk's directory, which info describes.
+func (w *treeWalk) visit(rel string, info fs.FileInfo) error {
+	parts := pathParts(rel)
+	if w.sel.excluded(parts) {
+		return nil
+	}
+	src := filepath.Join(w.dir, rel)
+	if info.IsDir() {
+		if !slices.ContainsFunc(w.sel.include, func(p pattern) bool { return mayMatchBeneath(p.parts, parts) }) {
+			return nil
+		}
+		w.dirModes[rel] = w.mode(info)
+		names, err := readDirNames(w.fsys, src)
+		if err != nil {
+			return err
+		}
+		slices.Sort(names) // so that a limit is reported at the same file every time
+		for _, name := range names {
+			info, _, err := lstat(w.fsys, filepath.Join(src, name))
+			if err != nil {
+				return err
+			}
+			if err := w.visit(path.Join(rel, name), info); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	prefix, ok := w.sel.matchPrefix(parts)
+	if !ok {
+		return nil
+	}
+	w.files++
+	if w.files > w.sel.MaxFileCount {
+		return fmt.Errorf("more than max_file_count=%d files in %s match; exclude some, or raise the limit",
+			w.sel.MaxFileCount, w.dir)
+	}
+	entry := treeEntry{Path: rel}
+	switch {
+	case info.Mode()&fs.ModeSymlink != 0:
+		reader, ok := w.fsys.(afero.LinkReader)
+		if !ok {
+			return fmt.Errorf("%s: cannot read symbolic links", src)
+		}
+		target, err := reader.ReadlinkIfPossible(src)
+		if err != nil {
+			return err
+		}
+		entry.Type, entry.Target = entryLink, target
+	case !info.Mode().IsRegular():
+		return fmt.Errorf("%s is not a regular file, directory or symbolic link", src)
+	default:
+		// Check the size before reading the file, and read no more than the limits allow, in case it grew
+		// meanwhile.
+		if info.Size() > w.sel.MaxFileSize {
+			return fmt.Errorf("%s is %d bytes, more than max_file_size=%d", src, info.Size(), w.sel.MaxFileSize)
+		}
+		left := w.sel.MaxTotalSize - w.total
+		if info.Size() > left {
+			return w.overTotal()
+		}
+		b, err := w.file(src, min(w.sel.MaxFileSize, left))
+		if errors.Is(err, errOverLimit) {
+			if w.sel.MaxFileSize < left {
+				return fmt.Errorf("%s grew to more than max_file_size=%d bytes as it was read", src, w.sel.MaxFileSize)
+			}
+			return w.overTotal()
+		} else if err != nil {
+			return err
+		}
+		w.total += b.Size
+		entry.Type, entry.Mode, entry.Blob = entryFile, w.mode(info), &b
+	}
+	w.entries = append(w.entries, entry)
+	// Record the directories that hold the file beneath the prefix, which were read on the way to it. Go on past
+	// those already recorded: a file matched by a pattern with a deeper prefix recorded only those beneath it.
+	for d := path.Dir(rel); d != prefix && within(d, prefix); d = path.Dir(d) {
+		if mode, ok := w.dirModes[d]; ok {
+			delete(w.dirModes, d)
+			w.entries = append(w.entries, treeEntry{Path: d, Type: entryDir, Mode: mode})
+		}
+	}
+	return nil
+}
+
+// recordBetween records the directories between each recorded directory and the entries within it. A recorded
+// directory is copied with all it holds, so those between must be recorded too, with their modes, even when
+// they are at or above the prefix of the pattern that selected the entries: otherwise they would be copied as
+// the temporary directories that hold the entries when they are checked out.
+func (w *treeWalk) recordBetween() {
+	recorded := map[string]bool{}
+	for _, e := range w.entries {
+		if e.Type == entryDir {
+			recorded[e.Path] = true
+		}
+	}
+	// Each recorded directory is an entry too, so it records those between it and the next one out.
+	for _, e := range slices.Clone(w.entries) {
+		var between []string
+		for d := path.Dir(e.Path); d != "."; d = path.Dir(d) {
+			if recorded[d] {
+				for _, b := range between {
+					recorded[b] = true
+					w.entries = append(w.entries, treeEntry{Path: b, Type: entryDir, Mode: w.dirModes[b]})
+				}
+				break
+			}
+			between = append(between, d)
+		}
+	}
+}
+
+// overTotal returns the error for files that total more than the selection's max_total_size.
+func (w *treeWalk) overTotal() error {
+	return fmt.Errorf("the files in %s that match total more than max_total_size=%d bytes", w.dir, w.sel.MaxTotalSize)
+}
+
+// mode returns the chmod bits of info's mode that the selection keeps.
+func (w *treeWalk) mode(info fs.FileInfo) uint32 {
+	return chmodBits(info) & uint32(w.sel.ModeMask)
+}
+
+// checkInclude reports whether the prefix of the include pattern p, the path its files are beneath, is
+// within dir, reached without following symbolic links. The prefix must exist, which catches a misspelled
+// path, but the pattern needn't match anything.
+func checkInclude(fsys afero.Fs, dir string, p pattern) error {
+	if p.prefix == "." {
+		// dir itself was already found, and may be reached through a link, as from a linked $PWD.
+		return nil
+	}
+	subject := fmt.Sprintf("include %q", p.text)
+	if p.prefix != p.text {
+		subject += fmt.Sprintf(": %q", p.prefix)
+	}
+	// Check each part: lstat on the final path still follows parent links.
+	current := dir
+	for _, part := range strings.Split(p.prefix, "/") {
+		current = filepath.Join(current, part)
+		info, _, err := lstat(fsys, current)
+		if errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("%s not found in %s", subject, dir)
+		} else if err != nil {
+			return err
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			if current == filepath.Join(dir, p.prefix) {
+				return fmt.Errorf("%s is a symbolic link; include what it links to instead", subject)
+			}
+			return fmt.Errorf("%s has symbolic link parent %q", subject, current)
+		}
+	}
+	return nil
+}
+
+// checkRelative reports whether p, a path or pattern of the parameter param, is relative and stays within dir.
+func checkRelative(param, p, dir string) error {
+	if path.IsAbs(p) {
+		return fmt.Errorf("%s %q must be a path relative to %s", param, p, dir)
+	}
+	if clean := path.Clean(p); clean == ".." || strings.HasPrefix(clean, "../") {
+		return fmt.Errorf("%s %q is outside %s", param, p, dir)
+	}
+	return nil
+}
+
+// within reports whether the cleaned relative path p is dir or inside it.
+func within(p, dir string) bool {
+	return dir == "." || p == dir || strings.HasPrefix(p, dir+"/")
+}

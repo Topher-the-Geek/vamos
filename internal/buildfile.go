@@ -60,7 +60,7 @@ type fileSet struct {
 	label string      // of the glob or task
 	task  *targetSpec // the task that makes the files, or nil for a glob
 	dir   string      // a glob's package directory
-	paths []string    // cleaned, relative to dir or the task's source; directories include their contents
+	sel   *selection  // the files, within dir or the task's source
 }
 
 // targetSpec runs on another target's image, declared by a call to layer() or task(). A layer's
@@ -322,23 +322,16 @@ func (w *workspace) exec(f *buildFile, src []byte) error {
 		thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple,
 	) (starlark.Value, error) {
 		var name string
-		var include *starlark.List
-		if err := starlark.UnpackArgs(fn.Name(), args, kwargs,
-			"name", &name,
-			"include", &include,
-		); err != nil {
+		var include, exclude *starlark.List
+		sel := defaultSelection()
+		params := append([]any{"name", &name}, sel.params(&include, &exclude, true)...)
+		if err := starlark.UnpackArgs(fn.Name(), args, kwargs, params...); err != nil {
 			return nil, err
 		}
-		paths, err := includeList(fn.Name(), include)
-		if err != nil {
+		if err := sel.selectFiles(fn.Name(), include, exclude, f.dir); err != nil {
 			return nil, err
 		}
-		for _, p := range paths {
-			if err := checkRelative(p, f.dir); err != nil {
-				return nil, fmt.Errorf("%s: %w", fn.Name(), err)
-			}
-		}
-		set := &fileSet{label: label(f.pkg, name), dir: f.dir, paths: paths}
+		set := &fileSet{label: label(f.pkg, name), dir: f.dir, sel: sel}
 		if err := declare(thread, name, set); err != nil {
 			return nil, fmt.Errorf("%s: %w", fn.Name(), err)
 		}
@@ -400,14 +393,16 @@ func (w *workspace) exec(f *buildFile, src []byte) error {
 		return label(from.pkg, name), d, nil
 	}
 
-	// add implements add(source, dest), checking the target it names as it is called.
+	// add implements add(source, dest, owner, group), checking the target it names as it is called.
 	add := starlark.NewBuiltin("add", func(
 		_ *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple,
 	) (starlark.Value, error) {
-		var ref, dest string
+		var ref, dest, owner, group string
 		if err := starlark.UnpackArgs(fn.Name(), args, kwargs,
 			"source", &ref,
 			"dest", &dest,
+			"owner?", &owner,
+			"group?", &group,
 		); err != nil {
 			return nil, err
 		}
@@ -419,7 +414,13 @@ func (w *workspace) exec(f *buildFile, src []byte) error {
 		if err := checkPath("dest", dest); err != nil {
 			return nil, fmt.Errorf("%s: %w", fn.Name(), err)
 		}
-		return &addStep{ref: ref, set: d.set, dest: dest}, nil
+		for _, id := range [][2]string{{"owner", owner}, {"group", group}} {
+			if strings.Contains(id[1], ":") {
+				return nil, fmt.Errorf(`%s: %s %q must not contain ":"; give owner and group apart`,
+					fn.Name(), id[0], id[1])
+			}
+		}
+		return &addStep{ref: ref, set: d.set, dest: dest, owner: owner, group: group}, nil
 	})
 
 	// addTarget checks and declares s, named name, made by a call to fn. Its base is resolved to a label.
@@ -473,14 +474,15 @@ func (w *workspace) exec(f *buildFile, src []byte) error {
 		thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple,
 	) (starlark.Value, error) {
 		var name, base, source string
-		var steps, include *starlark.List
-		if err := starlark.UnpackArgs(fn.Name(), args, kwargs,
+		var steps, include, exclude *starlark.List
+		sel := defaultSelection()
+		params := append([]any{
 			"name", &name,
 			"base", &base,
 			"steps?", &steps,
 			"source?", &source,
-			"include?", &include,
-		); err != nil {
+		}, sel.params(&include, &exclude, false)...)
+		if err := starlark.UnpackArgs(fn.Name(), args, kwargs, params...); err != nil {
 			return nil, err
 		}
 
@@ -499,16 +501,16 @@ func (w *workspace) exec(f *buildFile, src []byte) error {
 			if !path.IsAbs(source) {
 				return nil, fmt.Errorf("%s: source %q must be an absolute path", fn.Name(), source)
 			}
-			paths, err := includeList(fn.Name(), include)
-			if err != nil {
+			if err := sel.selectFiles(fn.Name(), include, exclude, source); err != nil {
 				return nil, err
 			}
-			for _, p := range paths {
-				if err := checkRelative(p, source); err != nil {
-					return nil, fmt.Errorf("%s: %w", fn.Name(), err)
+			s.output = &fileSet{label: s.label, task: s, sel: sel}
+		default:
+			for _, kv := range kwargs {
+				if param := string(kv[0].(starlark.String)); isSelectionParam(param) {
+					return nil, fmt.Errorf("%s: %s needs source and include, the files to collect", fn.Name(), param)
 				}
 			}
-			s.output = &fileSet{label: s.label, task: s, paths: paths}
 		}
 		if err := addTarget(thread, fn, name, s); err != nil {
 			return nil, err
@@ -640,8 +642,8 @@ func (w *workspace) needs(targets []string) map[string]bool {
 	return needed
 }
 
-// checkSources reports a glob added by a target in needed whose files aren't in its package,
-// before anything is built.
+// checkSources reports a glob added by a target in needed whose patterns' prefixes aren't in its package,
+// before anything is built. Whether its patterns match files is found as they are read.
 func (w *workspace) checkSources(needed map[string]bool) error {
 	checked := map[*fileSet]bool{}
 	for _, s := range w.targets {
@@ -653,7 +655,7 @@ func (w *workspace) checkSources(needed map[string]bool) error {
 				continue
 			}
 			checked[set] = true
-			for _, p := range set.paths {
+			for _, p := range set.sel.include {
 				if err := checkInclude(w.fs, set.dir, p); err != nil {
 					return fmt.Errorf("%s: glob: %w", w.declaration(set.label).pos, err)
 				}
@@ -745,73 +747,6 @@ func describeEvalError(e *starlark.EvalError) string {
 		}
 	}
 	return e.Msg
-}
-
-// includeList converts an include argument into a non-empty list of cleaned paths.
-func includeList(fnName string, include *starlark.List) ([]string, error) {
-	paths, err := stringList(fnName, "include", include)
-	if err != nil {
-		return nil, err
-	}
-	if len(paths) == 0 {
-		return nil, fmt.Errorf("%s: include must not be empty", fnName)
-	}
-	for i, p := range paths {
-		if p == "" {
-			return nil, fmt.Errorf("%s: include[%d] is empty; use \".\" for the whole directory", fnName, i)
-		}
-		if strings.ContainsAny(p, "*?[") {
-			return nil, fmt.Errorf("%s: include %q: patterns are not supported yet; list each file", fnName, p)
-		}
-		paths[i] = filepath.Clean(p)
-	}
-	return paths, nil
-}
-
-// checkRelative reports whether src is a relative path that stays within dir.
-func checkRelative(src, dir string) error {
-	if filepath.IsAbs(src) {
-		return fmt.Errorf("include %q must be a path relative to %s", src, dir)
-	}
-	if clean := filepath.Clean(src); clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("include %q is outside %s", src, dir)
-	}
-	return nil
-}
-
-// checkInclude reports whether src is a relative path to a file or directory within dir,
-// reached without following symbolic links.
-func checkInclude(fsys afero.Fs, dir, src string) error {
-	if err := checkRelative(src, dir); err != nil {
-		return err
-	}
-	if filepath.Clean(src) == "." {
-		// dir itself was already found, and may be reached through a link, as from a linked $PWD.
-		return nil
-	}
-	// Check each component: lstat on the final path still follows parent links.
-	current := dir
-	for _, component := range strings.Split(filepath.Clean(src), string(filepath.Separator)) {
-		current = filepath.Join(current, component)
-		info, _, err := lstat(fsys, current)
-		if errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("include %q not found in %s", src, dir)
-		} else if err != nil {
-			return err
-		}
-		if info.Mode()&fs.ModeSymlink != 0 {
-			if current == filepath.Join(dir, src) {
-				return fmt.Errorf("include %q is a symbolic link; list the file it links to instead", src)
-			}
-			return fmt.Errorf("include %q has symbolic link parent %q", src, current)
-		}
-	}
-	return nil
-}
-
-// within reports whether the cleaned relative path p is dir or inside it.
-func within(p, dir string) bool {
-	return dir == "." || p == dir || strings.HasPrefix(p, dir+string(filepath.Separator))
 }
 
 // lstat describes the file at path in fsys without following a final symbolic link,

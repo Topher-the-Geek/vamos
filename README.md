@@ -103,7 +103,8 @@ layer(
 
 glob(
     name="server-source",
-    include=["server.ts", "tsconfig.json", "tsconfig.build.json"],
+    include=["*.ts", "tsconfig*.json"],            # patterns: see "Selecting files" below
+    exclude=["*.test.ts"],
 )
 
 task(
@@ -114,7 +115,7 @@ task(
         run(["npm", "run", "build"]),
     ],
     source="/build/dist",                          # directory the files are made in
-    include=["server.js"],                         # files or directories relative to source
+    include=["*.js"],                              # patterns relative to source, as for glob()
 )
 
 layer(
@@ -149,7 +150,12 @@ A target applies its steps in order, and each of them sees what those before it 
 
 - `add(source, dest)` copies the files of an earlier `glob()` or `task()`, or one of another package, into the
   absolute directory `dest`.
-  Files added later replace those added before.
+  Files added later replace those added before. They are owned by root, unless `owner` or `group` say otherwise:
+  `add("build", "/app", owner="node")` gives them to the image's user `node` and that user's group, and
+  `group="staff"` alone keeps root as the owner. Each is a name in the image, or a numeric ID. Folders that
+  `dest` and the files' paths need, but the image lacks, are made and given to the files' owner too, as
+  Docker's `COPY --chown` does: add to a `dest` the image already has, such as one made by `workdir()`, to keep
+  folders such as `/opt` owned by root.
 - `run(argv)` runs a command, which must succeed, in the target's container. It isn't run through a shell, so
   use `["sh", "-c", "..."]` for one.
 - `env(NAME="value", ...)` sets variables for later commands and in the image, as a Dockerfile's `ENV` does.
@@ -165,18 +171,52 @@ A target applies its steps in order, and each of them sees what those before it 
 and must be absolute once they are expanded. As in a Dockerfile, variables are expanded while the image is
 built, so the image holds their values.
 
+### Selecting files
+
+`glob()` selects files beside its `BUILD` file, and a task's output selects files within its `source`, with the
+same arguments:
+
+```python
+glob(
+    name="code",
+    include=["src/**/*.ts", "package.json"],  # required: patterns of the files, relative to the BUILD file
+    exclude=["**/*.test.ts"],                 # patterns of files and folders to leave out
+    mode_mask=0o755,                          # the mode bits kept of each file and folder; the default
+    allow_no_files=False,                     # the default: it is an error if no file matches
+    max_file_count=10000,                     # defaults: a build stops at a glob over a limit
+    max_file_size=100 * 1024 * 1024,          # bytes, of any one file
+    max_total_size=1024 * 1024 * 1024,        # bytes, of all the files together
+)
+```
+
+- A pattern's `*` matches any part of a name, but never `/`, and `?` and `[a-z]` match one character, as in Go's
+  `path.Match`. `*` matches names that start with `.`, too. `**` matches any number of folders, even none, and
+  must be a whole part of the path: `src/**/*.ts`, not `src/**.ts`.
+- Patterns are relative to the `BUILD` file, or to `source`, so `*.ts` matches only files beside it, and
+  `**/*.ts` matches them at any depth.
+- A path without wildcards also brings everything beneath it, so `include=["src"]` is `src/**`, and `"."` is the
+  whole directory.
+- Patterns select files and links. Folders between a pattern's leading folders and the files it selects come
+  along, with their modes, but empty folders are left out.
+- An exclude pattern that matches a folder leaves out everything in it.
+- The limits catch a pattern that reaches further than meant, before all of its files are read.
+
+Only the folders a pattern could match within are read. Its leading folders, `src` for `src/**/*.ts`, say where
+to start, so other folders, such as a large `node_modules`, are never read. An exclude pattern that matches a
+folder, such as `**/node_modules`, keeps a pattern such as `**/*.ts` out of it.
+
 Files keep their paths relative to the `BUILD` file, or to a task's `source`, beneath `dest`: with
-`include=["src/main.ts"]` and `add("code", "/app")`, the file lands at `/app/src/main.ts`. A directory brings
-everything in it, and `"."` the whole project. Patterns such as `*.ts` aren't supported yet.
-Folders above an included path that the image already has, such as `/tmp` for `include=["tmp/x"]` and
-`dest="/"`, keep their own mode and owner.
+`include=["src/main.ts"]` and `add("code", "/app")`, the file lands at `/app/src/main.ts`. A pattern's leading
+folders aren't part of what it selects, so ones the image already has, such as `/tmp` for `include=["tmp/x"]`
+and `dest="/"`, keep their own mode and owner.
 
-Included paths and their parent directories, within the project or a task's `source`, must not be symbolic
-links. Links in `source` itself are resolved within the task's container.
-Links inside an included directory are copied as links, as Docker's `COPY` does.
+A pattern's leading folders, within the project or a task's `source`, must exist, and must not be symbolic
+links. Links in `source` itself are resolved within the task's container. Links that patterns select are copied
+as links, as Docker's `COPY` does, and are never followed.
 
-A glob's files are checked only when a target that adds them is built, so a missing file doesn't stop building
-targets that don't need it.
+Whether a glob's leading folders exist is checked before anything is built, but only for globs that the targets
+being built add, so a missing file doesn't stop building targets that don't need it. Whether its patterns match
+any file, and its limits, are checked as its files are read.
 
 See [examples/nodejs/](examples/nodejs/) and [examples/fastmcp/](examples/fastmcp/).
 

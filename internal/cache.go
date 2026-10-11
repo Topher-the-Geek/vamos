@@ -13,7 +13,6 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
-	"strings"
 	"sync"
 
 	"github.com/opencontainers/go-digest"
@@ -49,17 +48,24 @@ func (c *cache) blobPath(d digest.Digest) string {
 	return filepath.Join(c.dir, "cas", d.Algorithm().String(), d.Encoded())
 }
 
-// put stores what r holds as a blob.
-func (c *cache) put(r io.Reader) (blob, error) {
+// errOverLimit means that what was to be stored holds more bytes than allowed.
+var errOverLimit = errors.New("more bytes than allowed")
+
+// put stores what r holds as a blob, or fails with errOverLimit, storing nothing, if it holds more than limit
+// bytes. It reads at most one byte past the limit.
+func (c *cache) put(r io.Reader, limit int64) (blob, error) {
 	f, err := c.create()
 	if err != nil {
 		return blob{}, err
 	}
 	defer f.discard()
-	if _, err := io.Copy(f, r); err != nil {
+	if _, err := io.Copy(f, io.LimitReader(r, limit+1)); err != nil {
 		return blob{}, err
 	}
 	b := f.blob()
+	if b.Size > limit {
+		return blob{}, errOverLimit
+	}
 	// The same digest means the same content, so replacing an existing blob changes nothing.
 	return b, f.commit(c.blobPath(b.Digest))
 }
@@ -111,7 +117,7 @@ func (p *pendingFile) discard() {
 
 // putBytes stores data as a blob.
 func (c *cache) putBytes(data []byte) (blob, error) {
-	return c.put(bytes.NewReader(data))
+	return c.put(bytes.NewReader(data), int64(len(data)))
 }
 
 // open opens blob b for reading. An error wrapping fs.ErrNotExist means the cache lacks it.
@@ -165,16 +171,21 @@ func (t *tree) digest() blob {
 // putFile stores the file name in fsys as a blob. It hashes the file first, and copies it only if
 // the cache lacks that content, so a file the cache already holds is read once and not written.
 // The blob returned is always the content the cache holds, even if the file changes as it is read.
-func (c *cache) putFile(fsys afero.Fs, name string) (blob, error) {
+// It fails with errOverLimit, storing nothing, if the file holds more than limit bytes, and reads at most
+// one byte past the limit, so a file that grows as it is read can't fill the cache.
+func (c *cache) putFile(fsys afero.Fs, name string, limit int64) (blob, error) {
 	f, err := fsys.Open(name)
 	if err != nil {
 		return blob{}, err
 	}
 	digester := digest.Canonical.Digester()
-	size, err := io.Copy(digester.Hash(), f)
+	size, err := io.Copy(digester.Hash(), io.LimitReader(f, limit+1))
 	f.Close()
 	if err != nil {
 		return blob{}, err
+	}
+	if size > limit {
+		return blob{}, errOverLimit
 	}
 	b := blob{Digest: digester.Digest(), Size: size}
 	if _, err := os.Stat(c.blobPath(b.Digest)); err == nil {
@@ -185,18 +196,20 @@ func (c *cache) putFile(fsys afero.Fs, name string) (blob, error) {
 		return blob{}, err
 	}
 	defer f.Close()
-	return c.put(f)
+	return c.put(f, limit)
 }
 
-// putFiles stores the files at paths within dir in fsys, and returns the tree that describes
-// them, without storing it. Paths are cleaned and relative, as sourcePaths returns them.
-func (c *cache) putFiles(fsys afero.Fs, dir string, paths []string) (*tree, error) {
-	return walkTree(fsys, dir, paths, func(name string) (blob, error) { return c.putFile(fsys, name) })
+// putFiles stores the files that sel selects within dir in fsys, and returns the tree that
+// describes them, without storing it.
+func (c *cache) putFiles(fsys afero.Fs, dir string, sel *selection) (*tree, error) {
+	return walkTree(fsys, dir, sel, func(name string, limit int64) (blob, error) {
+		return c.putFile(fsys, name, limit)
+	})
 }
 
-// putTree stores the files at paths within dir in fsys, and then the tree that describes them.
-func (c *cache) putTree(fsys afero.Fs, dir string, paths []string) (blob, error) {
-	t, err := c.putFiles(fsys, dir, paths)
+// putTree stores the files that sel selects within dir in fsys, and then the tree that describes them.
+func (c *cache) putTree(fsys afero.Fs, dir string, sel *selection) (blob, error) {
+	t, err := c.putFiles(fsys, dir, sel)
 	if err != nil {
 		return blob{}, err
 	}
@@ -232,125 +245,61 @@ func (c *cache) checkTree(b blob) error {
 	return nil
 }
 
-// walkTree describes the files at paths within dir in fsys as a tree, passing each file's
-// name to file for its blob. It follows a link at a path itself, as at a project directory
-// reached through a linked $PWD, but records links within directories as links, as Docker's
-// COPY does, so they can't bring in files from outside the project. checkInclude refuses links
-// anywhere else on the way to a path.
-func walkTree(fsys afero.Fs, dir string, paths []string, file func(name string) (blob, error)) (*tree, error) {
-	t := &tree{}
-	var add func(src, rel string, info fs.FileInfo) error
-	add = func(src, rel string, info fs.FileInfo) error {
-		entry := treeEntry{Path: filepath.ToSlash(rel), Mode: chmodBits(info)}
-		switch {
-		case info.IsDir():
-			entry.Type = entryDir
-			names, err := readDirNames(fsys, src)
-			if err != nil {
-				return err
-			}
-			for _, name := range names {
-				info, _, err := lstat(fsys, filepath.Join(src, name))
-				if err != nil {
-					return err
-				}
-				if err := add(filepath.Join(src, name), filepath.Join(rel, name), info); err != nil {
-					return err
-				}
-			}
-		case info.Mode()&fs.ModeSymlink != 0:
-			reader, ok := fsys.(afero.LinkReader)
-			if !ok {
-				return fmt.Errorf("%s: cannot read symbolic links", src)
-			}
-			target, err := reader.ReadlinkIfPossible(src)
-			if err != nil {
-				return err
-			}
-			entry.Type, entry.Mode, entry.Target = entryLink, 0, target
-		case !info.Mode().IsRegular():
-			return fmt.Errorf("%s is not a regular file, directory or symbolic link", src)
-		default:
-			b, err := file(src)
-			if err != nil {
-				return err
-			}
-			entry.Type, entry.Blob = entryFile, &b
-		}
-		// The root of the tree is where its files go, not one of them, so it has no entry.
-		if rel != "." {
-			t.Entries = append(t.Entries, entry)
-		}
-		return nil
-	}
-	for _, p := range paths {
-		src := filepath.Join(dir, p)
-		info, err := fsys.Stat(src)
-		if err != nil {
-			return nil, err
-		}
-		if err := add(src, p, info); err != nil {
-			return nil, err
-		}
-	}
-	slices.SortFunc(t.Entries, func(a, b treeEntry) int { return strings.Compare(a.Path, b.Path) })
-	return t, nil
-}
-
-// checkout writes the files of the tree stored as blob b into dir on disk, which must exist.
+// checkout writes the files of the tree stored as blob b into dir on disk, which must exist, and
+// returns the tree.
 // Folders above an entry that the tree doesn't list are made with the usual mode. Entries that
 // would be written outside dir are refused: walkTree never makes them, but the cache is a folder
 // on disk that anything running as root could change.
-func (c *cache) checkout(b blob, dir string) error {
+func (c *cache) checkout(b blob, dir string) (*tree, error) {
 	t, err := c.readTree(b)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	links := map[string]bool{}
 	var dirs []treeEntry
 	for _, e := range t.Entries {
 		if !filepath.IsLocal(filepath.FromSlash(e.Path)) {
-			return fmt.Errorf("tree %s: %q is outside it", b.Digest, e.Path)
+			return nil, fmt.Errorf("tree %s: %q is outside it", b.Digest, e.Path)
 		}
 		// Links are tracked by path, so a path such as a/../out would hide that out is a link.
 		if path.Clean(e.Path) != e.Path {
-			return fmt.Errorf("tree %s: %q isn't a clean path", b.Digest, e.Path)
+			return nil, fmt.Errorf("tree %s: %q isn't a clean path", b.Digest, e.Path)
 		}
 		for parent := path.Dir(e.Path); parent != "."; parent = path.Dir(parent) {
 			if links[parent] {
-				return fmt.Errorf("tree %s: %q is beneath the symbolic link %q", b.Digest, e.Path, parent)
+				return nil, fmt.Errorf("tree %s: %q is beneath the symbolic link %q", b.Digest, e.Path, parent)
 			}
 		}
 		dst := filepath.Join(dir, filepath.FromSlash(e.Path))
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			return err
+			return nil, err
 		}
 		switch {
 		case e.Type == entryDir:
 			if err := os.Mkdir(dst, 0o700); err != nil {
-				return err
+				return nil, err
 			}
 			dirs = append(dirs, e)
 		case e.Type == entryLink:
 			if err := os.Symlink(e.Target, dst); err != nil {
-				return err
+				return nil, err
 			}
 			links[e.Path] = true
 		case e.Type == entryFile && e.Blob != nil:
 			if err := c.checkoutFile(*e.Blob, dst, e.Mode); err != nil {
-				return fmt.Errorf("%s: %w", e.Path, err)
+				return nil, fmt.Errorf("%s: %w", e.Path, err)
 			}
 		default:
-			return fmt.Errorf("tree %s: %q has unknown type %q or no content", b.Digest, e.Path, e.Type)
+			return nil, fmt.Errorf("tree %s: %q has unknown type %q or no content", b.Digest, e.Path, e.Type)
 		}
 	}
 	// Set directories' modes once they hold everything, deepest first, in case one is read-only.
 	for _, e := range slices.Backward(dirs) {
 		if err := os.Chmod(filepath.Join(dir, filepath.FromSlash(e.Path)), fileModeOf(e.Mode)); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	return t, nil
 }
 
 // checkoutFile copies blob b to a new file at dst with the given chmod bits.
@@ -408,7 +357,7 @@ func fileModeOf(bits uint32) fs.FileMode {
 
 // actionVersion changes whenever what a key covers, or how a target is built, changes, so that
 // results built the old way aren't reused.
-const actionVersion = 3
+const actionVersion = 4
 
 // action is everything a target's result depends on. Its digest is the target's key in the
 // action cache. Target names are left out, so renaming a target keeps its results.
@@ -419,7 +368,7 @@ type action struct {
 	Steps   []actionStep `json:"steps,omitempty"`   // in the order applied
 	Command []string     `json:"command,omitempty"` // a layer's default command
 	Source  string       `json:"source,omitempty"`  // a task's directory of output
-	Include []string     `json:"include,omitempty"` // a task's output, within source
+	Output  *selection   `json:"output,omitempty"`  // a task's output, within source
 }
 
 // actionStep is one step of an action. Op says which step, and which other
@@ -428,6 +377,8 @@ type actionStep struct {
 	Op    string   `json:"op"`              // "add", "run", "env", "build_env" or "workdir"
 	Files *blob    `json:"files,omitempty"` // add: tree of the files, as placed beneath dest
 	Dest  string   `json:"dest,omitempty"`  // add
+	Owner string   `json:"owner,omitempty"` // add
+	Group string   `json:"group,omitempty"` // add
 	Argv  []string `json:"argv,omitempty"`  // run
 	Vars  []string `json:"vars,omitempty"`  // env and build_env: NAME=value, sorted
 	Dir   string   `json:"dir,omitempty"`   // workdir

@@ -60,7 +60,12 @@ func project(t *testing.T, files map[string]string) afero.Fs {
 		t.Fatal(err)
 	}
 	for name, content := range files {
-		if err := afero.WriteFile(fsys, filepath.Join(projectDir, name), []byte(content), 0o644); err != nil {
+		path := filepath.Join(projectDir, name)
+		// MemMapFs would make missing folders with no permissions.
+		if err := fsys.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := afero.WriteFile(fsys, path, []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}

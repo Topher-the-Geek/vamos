@@ -18,6 +18,8 @@ file) holds a `BUILD` file per package, which name each other's targets by label
 - `internal/buildfile.go` — finds the workspace, runs each package's `BUILD` with starlark-go as labels
   name it, and validates its `glob()`, `pull()`, `layer()` and `task()` targets, and the `add()` steps
   that name other targets.
+- `internal/glob.go` — the selection of a glob's or task's files: include and exclude patterns, mode mask and
+  limits, and the walk that reads only the folders they could match into a tree for the cache.
 - `internal/step.go` — the other steps a layer or task applies in order (`run()`, `env()`,
   `build_env()`, `workdir()`): each is a Starlark value that knows its part of the cache key and how to apply
   itself with buildah. Add new kinds here.
@@ -59,9 +61,12 @@ The first run pulls `busybox:1.36` from Docker Hub; later runs use the local con
 
 - Tests are sociable: they drive the real command line through `vamos(t, fsys, args...)` in
   `internal/helpers_test.go` and use real buildah. Don't mock the core.
+- Complex units with many cases, such as pattern matching and the walk in `glob_test.go`, or the cache's trees,
+  may also be tested on their own, on an `afero.MemMapFs`, or `diskProject` for symbolic links. That isn't
+  mocking: it is the real code on a filesystem. A build test still checks that their results reach the image.
 - Projects live in memory: `project(t, map[string]string{...})` returns an `afero.MemMapFs` rooted
-  at `/project`. Tests that need symbolic links or write into the project use `diskProject`, which
-  keeps them under a temporary directory. Don't add `testdata/` directories.
+  at `/project`. Tests that need symbolic links (`MemMapFs` has none) or write into the project use
+  `diskProject`, which keeps them under a temporary directory. Don't add `testdata/` directories.
 - Boundaries are verified, not assumed: `push` goes to an in-process registry
   (go-containerregistry), `load` to a fake Docker daemon on a Unix socket (and a real one when
   available), and every result is inspected (command, files, tags).
@@ -157,8 +162,12 @@ Errors are a feature here, and every user mistake should have a test for its mes
   another `BUILD` file, so every target is declared after the targets it uses, and `workspace.targets` is
   already in build order. An error inside the loaded file is a `loadError`, reported as it is rather than as
   an error of the call that named its target.
-- Checks that touch the filesystem, such as that a glob's files exist, run only for the targets a command
-  needs (`checkSources`). There are no workspace-wide checks.
+- Checks that touch the filesystem, such as that a glob's patterns' leading folders exist, run only for the
+  targets a command needs (`checkSources`). There are no workspace-wide checks. Whether patterns match any file,
+  and the limits, are checked by the walk, as the files are read.
+- `addSource` adds only a tree's outermost entries, grouped by folder, so folders above them keep the image's
+  own mode and owner, and with `FollowSymlink` off, since buildah would otherwise copy what a top-level link
+  points to.
 - `docker-archive` refuses to overwrite a non-empty file. `write` builds to a temp file beside the
   target, created only just before copying, and renames it into place.
 - `docker-archive` rejects paths containing `:`, so `archiveReference` reaches such a file through
@@ -171,7 +180,7 @@ Errors are a feature here, and every user mistake should have a test for its mes
 - The files each `add()` copies are stored in the build cache as its target's key is worked out, and the target
   is built from that copy, never from the project, so a file edited mid-build can't be cached under the wrong key
   (`TestCacheSourceEditedDuringBuild`). Keep it that way: it is also what a remote builder will need.
-- buildah reads sources from disk, so `addSources` checks an `add()`'s files out of the build cache into a
+- buildah reads sources from disk, so `addSource` checks an `add()`'s files out of the build cache into a
   temporary build folder first, at their paths relative to the `BUILD` file, then adds them to its `dest`.
   `TestDestinationModes` checks the folder's own mode doesn't leak.
 - `collectOutput` reads a task's files from its mounted container on the host, where an absolute link

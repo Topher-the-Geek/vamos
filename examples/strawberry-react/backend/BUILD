@@ -31,10 +31,8 @@ layer(
 
 glob(
     name = "server-files",
-    include = [
-        "schema.py",
-        "server.py",
-    ],
+    include = ["*.py"],
+    exclude = ["*_test.py"],
 )
 
 layer(
@@ -94,7 +92,7 @@ layer(
 glob(
     name = "test-files",
     include = [
-        "schema_test.py",
+        "*_test.py",
         "pyrightconfig.json",
         "pytest.ini",
     ],

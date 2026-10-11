@@ -35,7 +35,8 @@ layer(
 
 glob(
     name="server-source",
-    include=["server.ts", "tsconfig.json", "tsconfig.build.json"],
+    include=["*.ts", "tsconfig*.json"],
+    exclude=["*.test.ts"],
 )
 
 # Runs in /build, the working directory of its base.
@@ -47,7 +48,7 @@ task(
         run(["npm", "run", "build"]),
     ],
     source="/build/dist",
-    include=["server.js"],
+    include=["*.js"],
 )
 
 layer(

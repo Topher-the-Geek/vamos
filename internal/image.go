@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -279,7 +280,7 @@ func (r *targetRunner) inputs(s *targetSpec) (*action, error) {
 	}
 	if s.output != nil {
 		a.Source = s.source
-		a.Include = sourcePaths([]*fileSet{s.output})
+		a.Output = s.output.sel
 	}
 	for _, in := range s.steps {
 		entry := in.entry()
@@ -302,7 +303,7 @@ func (r *targetRunner) setTree(set *fileSet) (blob, error) {
 	if t, ok := r.trees[set]; ok {
 		return t.tree, nil
 	}
-	b, err := r.cache.putTree(r.workspace.fs, set.dir, sourcePaths([]*fileSet{set}))
+	b, err := r.cache.putTree(r.workspace.fs, set.dir, set.sel)
 	if err != nil {
 		return blob{}, fmt.Errorf("reading %s: %w", r.workspace.display(set.label), err)
 	}
@@ -582,8 +583,8 @@ func pruneCache(w io.Writer) error {
 }
 
 // addSource copies the files of set, the tree stored as blob files, into the target's container,
-// beneath dest.
-func (st *targetState) addSource(set *fileSet, files blob, dest string) error {
+// beneath dest, owned by chown as buildah's Chown option takes it.
+func (st *targetState) addSource(set *fileSet, files blob, dest, chown string) error {
 	// buildah reads sources from disk, so check them out into a temporary folder: from the cache,
 	// even the project's, since the project's files may have changed since they were stored.
 	contextDir, err := os.MkdirTemp("", "vamos-context-")
@@ -591,33 +592,47 @@ func (st *targetState) addSource(set *fileSet, files blob, dest string) error {
 		return err
 	}
 	defer os.RemoveAll(contextDir)
-	if err := st.cache.checkout(files, contextDir); err != nil {
+	t, err := st.cache.checkout(files, contextDir)
+	if err != nil {
 		return fmt.Errorf("copying sources from the build cache: %w", err)
 	}
-	for _, src := range sourcePaths([]*fileSet{set}) {
-		if err := addPath(st.builder, contextDir, src, dest); err != nil {
-			return fmt.Errorf("adding %q from %s: %w", src, st.workspace.display(set.label), err)
+	// Copy only the tree's entries, outermost first: folders above them that the image already has are
+	// left as they are, rather than replaced by the temporary ones that hold them.
+	dirs := map[string]bool{}
+	tops := map[string][]string{} // the outermost entries, by their folder
+	for _, e := range t.Entries {
+		if e.Type == entryDir {
+			dirs[e.Path] = true
+		}
+		if parent := path.Dir(e.Path); !dirs[parent] {
+			tops[parent] = append(tops[parent], e.Path)
+		}
+	}
+	for _, parent := range slices.Sorted(maps.Keys(tops)) {
+		if err := addPaths(st.builder, contextDir, parent, tops[parent], dest, chown); err != nil {
+			return fmt.Errorf("adding %s: %w", st.workspace.display(set.label), err)
 		}
 	}
 	return nil
 }
 
-// addPath copies dir/src into builder's container, at destination/src. Only src and what it
-// holds are copied: parent directories the image lacks are made, and those it has are left as
-// they are, rather than replaced by the folders that hold src on the host.
-func addPath(builder *buildah.Builder, dir, src, destination string) error {
-	options := buildah.AddAndCopyOptions{ContextDir: dir, AllowWildcard: types.OptionalBoolFalse}
-	if src != "." {
-		// Copy a directory itself, with its mode, rather than only what it holds. Only the
-		// whole of dir, which is a temporary folder, is copied by its contents.
-		options.DirCopyContents = types.OptionalBoolFalse
+// addPaths copies the files at srcs, relative to dir and all in its folder parent, into builder's
+// container at the same paths beneath destination, owned by chown. Directories are copied with what they
+// hold, and links as links. Folders above them that the image lacks are made.
+func addPaths(builder *buildah.Builder, dir, parent string, srcs []string, destination, chown string) error {
+	options := buildah.AddAndCopyOptions{
+		ContextDir:      dir,
+		AllowWildcard:   types.OptionalBoolFalse,
+		DirCopyContents: types.OptionalBoolFalse, // copy a directory itself, with its mode
+		FollowSymlink:   types.OptionalBoolFalse, // copy a link as a link, as within a directory
+		Chown:           chown,
 	}
-	// A trailing slash makes the parent a directory, keeping src's own name within it.
-	parent := path.Join(destination, filepath.ToSlash(filepath.Dir(src)))
-	if !strings.HasSuffix(parent, "/") {
-		parent += "/"
+	sources := make([]string, len(srcs))
+	for i, src := range srcs {
+		sources[i] = filepath.Join(dir, src)
 	}
-	return builder.Add(parent, false, options, filepath.Join(dir, src))
+	// A trailing slash makes the destination a directory, keeping each source's own name within it.
+	return builder.Add(path.Join(destination, parent)+"/", false, options, sources...)
 }
 
 // collectOutput saves the files of task s from its container, mounted at mountPoint, to c,
@@ -643,40 +658,12 @@ func collectOutput(mountPoint string, s *targetSpec, c *cache) (blob, error) {
 		return blob{}, fmt.Errorf("source %q is not a directory", s.source)
 	}
 
-	paths := sourcePaths([]*fileSet{s.output})
-	for _, p := range paths {
-		// checkInclude refuses links on the way, which the host would resolve outside the container.
-		if err := checkInclude(container, source, p); err != nil {
-			return blob{}, err
-		}
-	}
-	output, err := c.putTree(container, source, paths)
+	// The walk refuses links on the way to each include, which the host would resolve outside the container.
+	output, err := c.putTree(container, source, s.output.sel)
 	if err != nil {
-		return blob{}, fmt.Errorf("collecting output: %w", err)
+		return blob{}, err
 	}
 	return output, nil
-}
-
-// sourcePaths returns the paths in sets, sorted, leaving out any within another, since
-// copying a directory copies everything in it.
-func sourcePaths(sets []*fileSet) []string {
-	var all []string
-	for _, set := range sets {
-		all = append(all, set.paths...)
-	}
-	// "." holds everything, though names such as "-x" sort before it.
-	if slices.Contains(all, ".") {
-		return []string{"."}
-	}
-	slices.Sort(all)
-	var paths []string
-	for _, p := range slices.Compact(all) {
-		covered := slices.ContainsFunc(paths, func(dir string) bool { return within(p, dir) })
-		if !covered {
-			paths = append(paths, p)
-		}
-	}
-	return paths
 }
 
 // imageUnavailable reports whether err says that a registry has no such image, or won't
