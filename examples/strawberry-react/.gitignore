@@ -1,0 +1,7 @@
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.venv/
+node_modules/
+ui/schema.graphql
+ui/src/gql/

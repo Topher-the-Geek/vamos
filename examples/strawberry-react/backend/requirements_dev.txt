@@ -1,0 +1,4 @@
+-r requirements_lock.txt
+pyright
+pytest
+pytest-asyncio

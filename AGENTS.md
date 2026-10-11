@@ -4,9 +4,10 @@ Guidance for coding agents working on vamos. [README.md](README.md) covers what 
 
 ## What this is
 
-`vamos` is a Go CLI that builds container images from a Starlark `BUILD` file using the buildah library
-(no Dockerfile, no buildah or docker binary at build time). Subcommands send the image to a registry
-(`push`), the Docker daemon (`load`), or a tarball (`write`).
+`vamos` is a Go CLI that builds container images from Starlark `BUILD` files using the buildah library
+(no Dockerfile, no buildah or docker binary at build time). Subcommands send a target's image to a registry
+(`push`), the Docker daemon (`load`), or a tarball (`write`). A workspace (a directory with a `WORKSPACE`
+file) holds a `BUILD` file per package, which name each other's targets by label, `//dir:name`.
 
 ## Layout
 
@@ -14,17 +15,19 @@ Guidance for coding agents working on vamos. [README.md](README.md) covers what 
   Keep it that way; all other code goes in `internal/`.
 - `internal/cli.go` — Cobra commands, argument checks, destinations (`docker://`, `docker-daemon:`,
   `docker-archive:`).
-- `internal/buildfile.go` — runs `BUILD` with starlark-go and validates its `glob()`, `pull()`,
-  `layer()` and `task()` targets, and the `add()` steps that name earlier targets.
+- `internal/buildfile.go` — finds the workspace, runs each package's `BUILD` with starlark-go as labels
+  name it, and validates its `glob()`, `pull()`, `layer()` and `task()` targets, and the `add()` steps
+  that name other targets.
 - `internal/step.go` — the other steps a layer or task applies in order (`run()`, `env()`,
   `build_env()`, `workdir()`): each is a Starlark value that knows its part of the cache key and how to apply
   itself with buildah. Add new kinds here.
-- `internal/image.go` — pulls, then runs each layer and task with buildah, or reuses its cached result, and
-  copies the last layer's image to the destination.
+- `internal/image.go` — pulls, then runs each layer and task the named targets need with buildah, or reuses
+  its cached result, and copies the named target's image to the destination.
 - `internal/cache.go` — the build cache: a content-addressed store of files, trees and logs, and an action
   cache from each target's key to its latest result. Layers' images stay in the container store.
-- `examples/` — sample `BUILD` projects, each an MCP server with an echo tool: `nodejs/` (TypeScript) and
-  `fastmcp/` (Python). Each has its own lint and tests; see its README.
+- `examples/` — sample `BUILD` projects: `nodejs/` (TypeScript) and `fastmcp/` (Python), each an MCP server
+  with an echo tool, and `strawberry-react/`, a workspace whose UI package uses the backend's GraphQL
+  schema. Each has its own lint and tests; see its README.
 
 ## Environment
 
@@ -66,7 +69,9 @@ The first run pulls `busybox:1.36` from Docker Hub; later runs use the local con
   mistakes; runtime errors must not print usage.
 - Failing builds must leave no output behind; check with `assertNoFiles`. The cached results of targets that
   succeeded before the failure are kept, so the next build resumes from there.
-- Test BUILD files start with `pullBusybox`, which declares the target `busybox`.
+- Test BUILD files start with `pullBusybox`, which declares the target `busybox`. Commands that send an
+  image name the target to send, usually `app`.
+- Workspace tests put a `WORKSPACE` file in the project and a `BUILD` file in each package's directory.
 - Tests that build call `requireBuildah(t)` so `-short` and non-root runs skip them.
 - Write table cases as keyed struct literals, one field per line.
 - `TestMain` must call `buildah.InitReexec()` first, because buildah re-executes the test binary to
@@ -85,11 +90,11 @@ building, destinations, the examples, or the `Dockerfile`, run these by hand. Ea
 go build -o vamos . && ./vamos --help && ./vamos nope; ./vamos load
 
 # 2. load into Docker, then run
-./vamos load vamos-example -C examples/nodejs \
+./vamos load server vamos-example -C examples/nodejs \
   && docker run -i --rm vamos-example < examples/nodejs/echo-request.jsonl
 
 # 3. write a tarball, then load and run it (use a temp dir, not the repo)
-./vamos write "$TMP/example.tar" -t vamos-example:tar -C examples/nodejs \
+./vamos write server "$TMP/example.tar" -t vamos-example:tar -C examples/nodejs \
   && docker load -i "$TMP/example.tar" && docker run -i --rm vamos-example:tar \
   < examples/nodejs/echo-request.jsonl
 
@@ -98,13 +103,26 @@ go build -o vamos . && ./vamos --help && ./vamos nope; ./vamos load
 docker build -q . -t vamos \
   && tar -C examples/nodejs --exclude=node_modules -c . | docker run -i --rm --privileged \
   -v /var/run/docker.sock:/var/run/docker.sock --entrypoint sh vamos \
-  -c 'mkdir /example && tar -x -C /example && vamos load vamos-example:image -C /example' \
+  -c 'mkdir /example && tar -x -C /example && vamos load server vamos-example:image -C /example' \
   && docker run -i --rm vamos-example:image < examples/nodejs/echo-request.jsonl
 
 # 5. The fastmcp example. Its SDK cancels pending requests when stdin closes, so hold stdin open.
-./vamos load vamos-fastmcp -C examples/fastmcp \
+./vamos load server vamos-fastmcp -C examples/fastmcp \
   && (cat examples/nodejs/echo-request.jsonl; sleep 2) | docker run -i --rm vamos-fastmcp
+
+# 6. The strawberry-react workspace, behind its compose file's ingress. The devcontainer can't reach the
+#    host's port 8080, so curl from the compose network. Expect the page's <title>, then the reply below.
+S=examples/strawberry-react
+./vamos load //backend:layer strawberry-backend -C $S && ./vamos load //ui:layer strawberry-ui -C $S \
+  && docker compose -f $S/docker-compose.yaml up -d --wait \
+  && curl="docker run --rm --network strawberry-graphql_default curlimages/curl -s" \
+  && $curl http://ingress/ | grep '<title>' \
+  && $curl http://ingress/graphql -H 'content-type: application/json' \
+  -d '{"query":"mutation { increment { value } }"}'; \
+  docker compose -f $S/docker-compose.yaml down
 ```
+
+Check 6's reply is `{"data":{"increment":{"value":1}}}`.
 
 `push` has no manual check here: the tests already push to a real (in-process) registry.
 
@@ -135,6 +153,12 @@ Errors are a feature here, and every user mistake should have a test for its mes
 
 ## Gotchas
 
+- A package's `BUILD` file is loaded when a label first names one of its targets, even partway through running
+  another `BUILD` file, so every target is declared after the targets it uses, and `workspace.targets` is
+  already in build order. An error inside the loaded file is a `loadError`, reported as it is rather than as
+  an error of the call that named its target.
+- Checks that touch the filesystem, such as that a glob's files exist, run only for the targets a command
+  needs (`checkSources`). There are no workspace-wide checks.
 - `docker-archive` refuses to overwrite a non-empty file. `write` builds to a temp file beside the
   target, created only just before copying, and renames it into place.
 - `docker-archive` rejects paths containing `:`, so `archiveReference` reaches such a file through
@@ -155,7 +179,7 @@ Errors are a feature here, and every user mistake should have a test for its mes
   along included paths; `TestTaskOutputLinks` and `TestTaskFailures` cover this.
 - Only `pull()` reaches registries: layers use `PullNever` on image IDs (or `scratch`). Every layer is
   cached: committed to local storage and named `localhost/vamos-cache:<image ID>`, so that tools removing
-  unnamed images leave it alone. The last one's is then sent with `copy.Image`, under the system's signature
+  unnamed images leave it alone. The named target's is then sent with `copy.Image`, under the system's signature
   policy, not `buildah.Push`, which re-parses the destination as a string. A target that fails leaves no
   unnamed image; tests check this with `assertNoNewImages`.
 - The build cache (`internal/cache.go`) sits beside the container store, in `/var/lib/containers/vamos`. Tests

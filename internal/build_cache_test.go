@@ -62,10 +62,10 @@ func TestCacheReuse(t *testing.T) {
 	fsys := project(t, map[string]string{"BUILD": cachedBuild(nonce), "input.txt": "hello\n"})
 	dir := t.TempDir()
 
-	first := vamos(t, fsys, "write", filepath.Join(dir, "1.tar"), "-C", projectDir).succeeds(t)
+	first := vamos(t, fsys, "write", "app", filepath.Join(dir, "1.tar"), "-C", projectDir).succeeds(t)
 	assertTargets(t, first, map[string]string{`layer "deps"`: "building", `task "size"`: "building"})
 
-	second := vamos(t, fsys, "write", filepath.Join(dir, "2.tar"), "-C", projectDir).succeeds(t)
+	second := vamos(t, fsys, "write", "app", filepath.Join(dir, "2.tar"), "-C", projectDir).succeeds(t)
 	assertTargets(t, second, map[string]string{
 		`layer "deps"`: "cached",
 		`task "size"`:  "cached",
@@ -178,11 +178,11 @@ func TestCacheMisses(t *testing.T) {
 			build := cachedBuild(newNonce())
 			fsys := project(t, map[string]string{"BUILD": build, "input.txt": "hello\n"})
 			dir := t.TempDir()
-			vamos(t, fsys, "write", filepath.Join(dir, "1.tar"), "-C", projectDir).succeeds(t)
+			vamos(t, fsys, "write", "app", filepath.Join(dir, "1.tar"), "-C", projectDir).succeeds(t)
 
 			build = tt.change(t, fsys, build)
 			must(t, afero.WriteFile(fsys, filepath.Join(projectDir, "BUILD"), []byte(build), 0o644))
-			r := vamos(t, fsys, "write", filepath.Join(dir, "2.tar"), "-C", projectDir).succeeds(t)
+			r := vamos(t, fsys, "write", "app", filepath.Join(dir, "2.tar"), "-C", projectDir).succeeds(t)
 			assertTargets(t, r, tt.want)
 		})
 	}
@@ -212,11 +212,11 @@ layer(name="app", base="sized")
 		"input.txt": "hello\n",
 	})
 	dir := t.TempDir()
-	vamos(t, fsys, "write", filepath.Join(dir, "1.tar"), "-C", projectDir).succeeds(t)
+	vamos(t, fsys, "write", "app", filepath.Join(dir, "1.tar"), "-C", projectDir).succeeds(t)
 
 	// The same number of bytes, so the same size.txt.
 	must(t, afero.WriteFile(fsys, filepath.Join(projectDir, "input.txt"), []byte("HELLO\n"), 0o644))
-	r := vamos(t, fsys, "write", filepath.Join(dir, "2.tar"), "-C", projectDir).succeeds(t)
+	r := vamos(t, fsys, "write", "app", filepath.Join(dir, "2.tar"), "-C", projectDir).succeeds(t)
 	assertTargets(t, r, map[string]string{`task "size"`: "building", `layer "sized"`: "cached"})
 }
 
@@ -237,13 +237,13 @@ layer(name="app", base="busybox", steps=[add("input", "/app"), run(["cat", "/app
 	input := filepath.Join(projectDir, "input.txt")
 	dir := t.TempDir()
 	r := vamos(t, &editedFs{Fs: fsys, name: input, edit: edited},
-		"write", filepath.Join(dir, "1.tar"), "-C", projectDir).succeeds(t)
+		"write", "app", filepath.Join(dir, "1.tar"), "-C", projectDir).succeeds(t)
 	if !strings.Contains(r.stdout, edited) {
 		t.Errorf("stdout = %q, want the layer built with the edited file %q", r.stdout, edited)
 	}
 
 	must(t, afero.WriteFile(fsys, input, []byte(before), 0o644))
-	r = vamos(t, fsys, "write", filepath.Join(dir, "2.tar"), "-C", projectDir).succeeds(t)
+	r = vamos(t, fsys, "write", "app", filepath.Join(dir, "2.tar"), "-C", projectDir).succeeds(t)
 	assertTargets(t, r, map[string]string{`layer "app"`: "building"})
 	if !strings.Contains(r.stdout, before) {
 		t.Errorf("stdout = %q, want the layer built with the file as it was, %q", r.stdout, before)
@@ -266,7 +266,7 @@ layer(name="app", base="first", steps=[add("input", "/app"), run(["cat", "/app/i
 	})
 	// Storing a new file opens it twice, to hash it and then to copy it, so a third open is a second read.
 	r := vamos(t, &editedFs{Fs: fsys, name: filepath.Join(projectDir, "input.txt"), edit: edited, at: 3},
-		"write", filepath.Join(t.TempDir(), "app.tar"), "-C", projectDir).succeeds(t)
+		"write", "app", filepath.Join(t.TempDir(), "app.tar"), "-C", projectDir).succeeds(t)
 	if got := strings.Count(r.stdout, before); got != 2 || strings.Contains(r.stdout, edited) {
 		t.Errorf("stdout = %q, want both layers built with the file as first read, %q", r.stdout, before)
 	}
@@ -316,10 +316,10 @@ func TestCacheEntryRemoved(t *testing.T) {
 			fsys := project(t, map[string]string{"BUILD": cachedBuild(newNonce()), "input.txt": "hello\n"})
 			dir := t.TempDir()
 			images, blobs := cachedImages(t), cachedBlobs(t)
-			vamos(t, fsys, "write", filepath.Join(dir, "1.tar"), "-C", projectDir).succeeds(t)
+			vamos(t, fsys, "write", "app", filepath.Join(dir, "1.tar"), "-C", projectDir).succeeds(t)
 			tt.remove(t, newKeys(cachedImages(t), images), newKeys(cachedBlobs(t), blobs))
 
-			r := vamos(t, fsys, "write", filepath.Join(dir, "2.tar"), "-C", projectDir).succeeds(t)
+			r := vamos(t, fsys, "write", "app", filepath.Join(dir, "2.tar"), "-C", projectDir).succeeds(t)
 			for _, want := range tt.want {
 				if !strings.Contains(r.stdout, want) {
 					t.Errorf("stdout = %q, want it to contain %q", r.stdout, want)
@@ -343,12 +343,14 @@ layer(name="app", base="broken")
 	})
 	out := filepath.Join(t.TempDir(), "app.tar")
 	for range 2 {
-		r := vamos(t, fsys, "write", out, "-C", projectDir).failsWith(t, false, `layer "broken": run(["false"]) failed`)
+		r := vamos(t, fsys, "write", "app", out, "-C", projectDir).
+			failsWith(t, false, `layer "broken": run(["false"]) failed`)
 		if !strings.Contains(r.stdout, `layer "broken": building`) {
 			t.Errorf("stdout = %q, want the failed target built again", r.stdout)
 		}
 	}
-	r := vamos(t, fsys, "write", out, "-C", projectDir).failsWith(t, false, `layer "broken": run(["false"]) failed`)
+	r := vamos(t, fsys, "write", "app", out, "-C", projectDir).
+		failsWith(t, false, `layer "broken": run(["false"]) failed`)
 	if !strings.Contains(r.stdout, `layer "deps": cached`) {
 		t.Errorf("stdout = %q, want the target before the failure reused", r.stdout)
 	}
@@ -438,7 +440,7 @@ func TestBuildTargets(t *testing.T) {
 	r = vamos(t, fsys, "build", "app", "-C", projectDir).ran(t)
 	assertTargets(t, r, map[string]string{`layer "app"`: "cached"})
 
-	r = vamos(t, fsys, "write", filepath.Join(t.TempDir(), "app.tar"), "-C", projectDir).succeeds(t)
+	r = vamos(t, fsys, "write", "app", filepath.Join(t.TempDir(), "app.tar"), "-C", projectDir).succeeds(t)
 	assertTargets(t, r, map[string]string{`layer "deps"`: "cached", `task "size"`: "cached"})
 }
 
@@ -454,7 +456,7 @@ layer(name="app", base="deps")
 `, newNonce()),
 	})
 	dir := t.TempDir()
-	vamos(t, fsys, "write", filepath.Join(dir, "1.tar"), "-C", projectDir).succeeds(t)
+	vamos(t, fsys, "write", "app", filepath.Join(dir, "1.tar"), "-C", projectDir).succeeds(t)
 
 	r := vamos(t, fsys, "build", "deps", "--rebuild", "-C", projectDir).ran(t)
 	assertTargets(t, r, map[string]string{`layer "base"`: "cached", `layer "deps"`: "rebuilding"})
@@ -462,7 +464,7 @@ layer(name="app", base="deps")
 		t.Errorf("stdout = %q, want the targets the named target uses reused", r.stdout)
 	}
 
-	r = vamos(t, fsys, "write", filepath.Join(dir, "2.tar"), "-C", projectDir).succeeds(t)
+	r = vamos(t, fsys, "write", "app", filepath.Join(dir, "2.tar"), "-C", projectDir).succeeds(t)
 	assertTargets(t, r, map[string]string{`layer "deps"`: "cached"})
 	first, second := readImage(t, filepath.Join(dir, "1.tar")), readImage(t, filepath.Join(dir, "2.tar"))
 	if a, b := imageFile(t, first, "/id"), imageFile(t, second, "/id"); a == b {
@@ -476,7 +478,7 @@ func TestRebuildReproducible(t *testing.T) {
 	requireBuildah(t)
 	fsys := project(t, map[string]string{"BUILD": cachedBuild(newNonce()), "input.txt": "hello\n"})
 	dir := t.TempDir()
-	first := vamos(t, fsys, "write", filepath.Join(dir, "1.tar"), "-C", projectDir).succeeds(t)
+	first := vamos(t, fsys, "write", "app", filepath.Join(dir, "1.tar"), "-C", projectDir).succeeds(t)
 
 	r := vamos(t, fsys, "build", "deps", "size", "app", "--rebuild", "-C", projectDir).ran(t)
 	assertTargets(t, r, map[string]string{
@@ -484,7 +486,7 @@ func TestRebuildReproducible(t *testing.T) {
 		`task "size"`:  "rebuilding",
 		`layer "app"`:  "rebuilding",
 	})
-	second := vamos(t, fsys, "write", filepath.Join(dir, "2.tar"), "-C", projectDir).succeeds(t)
+	second := vamos(t, fsys, "write", "app", filepath.Join(dir, "2.tar"), "-C", projectDir).succeeds(t)
 	if a, b := builtID(t, first), builtID(t, second); a != b {
 		t.Errorf("rebuilt image %s, want the first build's %s", b, a)
 	}
@@ -497,12 +499,12 @@ func TestEnvOrder(t *testing.T) {
 	build := cachedBuild(newNonce())
 	fsys := project(t, map[string]string{"BUILD": build, "input.txt": "hello\n"})
 	dir := t.TempDir()
-	first := vamos(t, fsys, "write", filepath.Join(dir, "1.tar"), "-C", projectDir).succeeds(t)
+	first := vamos(t, fsys, "write", "app", filepath.Join(dir, "1.tar"), "-C", projectDir).succeeds(t)
 
 	build = strings.Replace(build, `env(GREETING="hello", NAME="vamos")`, `env(NAME="vamos", GREETING="hello")`, 1)
 	must(t, afero.WriteFile(fsys, filepath.Join(projectDir, "BUILD"), []byte(build), 0o644))
 	vamos(t, fsys, "build", "deps", "app", "--rebuild", "-C", projectDir).ran(t)
-	second := vamos(t, fsys, "write", filepath.Join(dir, "2.tar"), "-C", projectDir).succeeds(t)
+	second := vamos(t, fsys, "write", "app", filepath.Join(dir, "2.tar"), "-C", projectDir).succeeds(t)
 	if a, b := builtID(t, first), builtID(t, second); a != b {
 		t.Errorf("image with variables reordered is %s, want the first build's %s", b, a)
 	}
@@ -526,9 +528,9 @@ func TestTimestamp(t *testing.T) {
 	dir := t.TempDir()
 	stamp := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
 
-	vamos(t, fsys, "write", filepath.Join(dir, "1.tar"), "--timestamp", stamp.Format(time.RFC3339),
+	vamos(t, fsys, "write", "app", filepath.Join(dir, "1.tar"), "--timestamp", stamp.Format(time.RFC3339),
 		"-C", projectDir).succeeds(t)
-	r := vamos(t, fsys, "write", filepath.Join(dir, "2.tar"), "--timestamp", "0", "-C", projectDir).succeeds(t)
+	r := vamos(t, fsys, "write", "app", filepath.Join(dir, "2.tar"), "--timestamp", "0", "-C", projectDir).succeeds(t)
 	assertTargets(t, r, map[string]string{`layer "deps"`: "cached", `task "size"`: "cached"})
 
 	for _, name := range []string{"1.tar", "2.tar"} {
@@ -547,7 +549,7 @@ func TestTimestamp(t *testing.T) {
 
 	// Without the flag, files are stamped with the base image's creation time.
 	fsys = project(t, map[string]string{"BUILD": cachedBuild(newNonce()), "input.txt": "hello\n"})
-	vamos(t, fsys, "write", filepath.Join(dir, "3.tar"), "-C", projectDir).succeeds(t)
+	vamos(t, fsys, "write", "app", filepath.Join(dir, "3.tar"), "-C", projectDir).succeeds(t)
 	img := readImage(t, filepath.Join(dir, "3.tar"))
 	config, err := img.ConfigFile()
 	must(t, err)

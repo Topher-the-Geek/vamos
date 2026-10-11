@@ -1,0 +1,37 @@
+name: strawberry-graphql
+
+services:
+
+  ui:
+    image: strawberry-ui
+
+  backend:
+    image: strawberry-backend
+
+  # This functions like an HTTP load balancer would in a production environment.
+  ingress:
+    image: nginx
+    ports:
+      - "8080:80"
+    depends_on:
+      - ui
+      - backend
+    configs:
+      - source: ingress-config
+        target: /etc/nginx/conf.d/default.conf
+
+configs:
+  ingress-config:
+    content: |
+      server {
+        listen       80;
+        server_name  localhost;
+
+        location /graphql {
+            proxy_pass http://backend:8000;
+        }
+
+        location / {
+            proxy_pass http://ui:80;
+        }
+      }

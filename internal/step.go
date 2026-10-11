@@ -47,15 +47,16 @@ func (stepBase) Truth() starlark.Bool  { return true }
 func (stepBase) Hash() (uint32, error) { return 0, errors.New("unhashable type: step") }
 func (stepBase) source() *fileSet      { return nil }
 
-// addStep copies files from the project or a task's output into the container.
+// addStep copies files from a package or a task's output into the container.
 type addStep struct {
 	stepBase
+	ref  string   // names set, as given
 	set  *fileSet // placed beneath dest at their relative paths
 	dest string   // as given: absolute once its variables are expanded
 }
 
 func (s *addStep) String() string {
-	return fmt.Sprintf("add(%s, %s)", starlark.String(s.set.name), starlark.String(s.dest))
+	return fmt.Sprintf("add(%s, %s)", starlark.String(s.ref), starlark.String(s.dest))
 }
 
 func (s *addStep) source() *fileSet  { return s.set }

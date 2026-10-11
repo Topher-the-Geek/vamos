@@ -1,0 +1,2 @@
+fastapi[standard-no-fastapi-cloud-cli]
+strawberry-graphql[cli,fastapi]

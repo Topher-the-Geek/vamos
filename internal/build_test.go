@@ -45,7 +45,7 @@ func TestWrite(t *testing.T) {
 	requireBuildah(t)
 	out := filepath.Join(t.TempDir(), "app.tar")
 
-	r := vamos(t, project(t, helloBuild), "write", out, "--tag", "app:test", "-C", projectDir).succeeds(t)
+	r := vamos(t, project(t, helloBuild), "write", "app", out, "--tag", "app:test", "-C", projectDir).succeeds(t)
 	if !strings.Contains(r.stdout, out) {
 		t.Errorf("stdout = %q, want it to name %s", r.stdout, out)
 	}
@@ -70,7 +70,7 @@ func TestWriteUntagged(t *testing.T) {
 	requireBuildah(t)
 	out := filepath.Join(t.TempDir(), "app.tar")
 
-	vamos(t, project(t, helloBuild), "write", out, "-C", projectDir).succeeds(t)
+	vamos(t, project(t, helloBuild), "write", "app", out, "-C", projectDir).succeeds(t)
 
 	img, err := tarball.ImageFromPath(out, nil)
 	if err != nil {
@@ -89,7 +89,7 @@ func TestWriteReplacesExistingFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	vamos(t, project(t, helloBuild), "write", out, "-C", projectDir).succeeds(t)
+	vamos(t, project(t, helloBuild), "write", "app", out, "-C", projectDir).succeeds(t)
 
 	if _, err := tarball.ImageFromPath(out, nil); err != nil {
 		t.Fatalf("reading written image: %v", err)
@@ -109,7 +109,7 @@ func TestWriteToPathWithColon(t *testing.T) {
 				t.Fatal(err)
 			}
 			out := filepath.Join(dir, "app:1.tar")
-			args := []string{"write", out, "-C", projectDir}
+			args := []string{"write", "app", out, "-C", projectDir}
 			if tag != "" {
 				args = append(args, "--tag", tag)
 			}
@@ -162,7 +162,7 @@ func TestWriteFileMode(t *testing.T) {
 				}
 			}
 
-			vamos(t, project(t, helloBuild), "write", out, "-C", projectDir).succeeds(t)
+			vamos(t, project(t, helloBuild), "write", "app", out, "-C", projectDir).succeeds(t)
 
 			info, err := os.Stat(out)
 			if err != nil {
@@ -184,7 +184,7 @@ func TestWriteInsideProject(t *testing.T) {
 	}, nil)
 	out := filepath.Join(root, projectDir, "app.tar")
 
-	vamos(t, fsys, "write", out, "-C", projectDir).succeeds(t)
+	vamos(t, fsys, "write", "app", out, "-C", projectDir).succeeds(t)
 
 	img, err := tarball.ImageFromPath(out, nil)
 	if err != nil {
@@ -207,7 +207,7 @@ func TestWriteKeepsExistingFileOnFailure(t *testing.T) {
 		"BUILD": pullBusybox + `layer(name="app", base="busybox", steps=[run(["false"])])`,
 	})
 
-	vamos(t, fsys, "write", out, "-C", projectDir).failsWith(t, false, `run(["false"]) failed`)
+	vamos(t, fsys, "write", "app", out, "-C", projectDir).failsWith(t, false, `run(["false"]) failed`)
 
 	if b, _ := os.ReadFile(out); string(b) != "an old image" {
 		t.Errorf("app.tar = %q, want the old file untouched", b)
@@ -228,7 +228,7 @@ func TestScratch(t *testing.T) {
 	})
 	out := filepath.Join(t.TempDir(), "app.tar")
 
-	vamos(t, fsys, "write", out, "-C", projectDir).succeeds(t)
+	vamos(t, fsys, "write", "app", out, "-C", projectDir).succeeds(t)
 
 	img, err := tarball.ImageFromPath(out, nil)
 	if err != nil {
@@ -249,7 +249,7 @@ func TestSourceDirectory(t *testing.T) {
 	})
 	out := filepath.Join(t.TempDir(), "app.tar")
 
-	vamos(t, fsys, "write", out, "-C", projectDir).succeeds(t)
+	vamos(t, fsys, "write", "app", out, "-C", projectDir).succeeds(t)
 
 	img, err := tarball.ImageFromPath(out, nil)
 	if err != nil {
@@ -280,7 +280,7 @@ layer(name="app", base="busybox", steps=[add("code", "/app"), add("docs", "/app"
 	})
 	out := filepath.Join(t.TempDir(), "app.tar")
 
-	vamos(t, fsys, "write", out, "-C", projectDir).succeeds(t)
+	vamos(t, fsys, "write", "app", out, "-C", projectDir).succeeds(t)
 
 	img, err := tarball.ImageFromPath(out, nil)
 	if err != nil {
@@ -323,7 +323,7 @@ func TestIncludeProject(t *testing.T) {
 	fsys := afero.NewBasePathFs(afero.NewOsFs(), root)
 	out := filepath.Join(t.TempDir(), "app.tar")
 
-	vamos(t, fsys, "write", out, "-C", projectDir).succeeds(t)
+	vamos(t, fsys, "write", "app", out, "-C", projectDir).succeeds(t)
 
 	img, err := tarball.ImageFromPath(out, nil)
 	if err != nil {
@@ -348,7 +348,7 @@ func TestDestinationModes(t *testing.T) {
 	})
 	out := filepath.Join(t.TempDir(), "app.tar")
 
-	vamos(t, fsys, "write", out, "-C", projectDir).succeeds(t)
+	vamos(t, fsys, "write", "app", out, "-C", projectDir).succeeds(t)
 
 	img, err := tarball.ImageFromPath(out, nil)
 	if err != nil {
@@ -384,7 +384,7 @@ func TestSourceSymlinks(t *testing.T) {
 	}
 	out := filepath.Join(root, "app.tar")
 
-	vamos(t, fsys, "write", out, "-C", projectDir).succeeds(t)
+	vamos(t, fsys, "write", "app", out, "-C", projectDir).succeeds(t)
 
 	img, err := tarball.ImageFromPath(out, nil)
 	if err != nil {
@@ -433,7 +433,7 @@ layer(
 	out := filepath.Join(t.TempDir(), "app.tar")
 	before := unnamedImages(t)
 
-	r := vamos(t, fsys, "write", out, "-C", projectDir).succeeds(t)
+	r := vamos(t, fsys, "write", "app", out, "-C", projectDir).succeeds(t)
 
 	// Each layer is added to the image of the one before.
 	if !strings.Contains(r.stdout, "installed") {
@@ -470,7 +470,7 @@ layer(name="app", base="deps", steps=[run(["false"])])
 	out := t.TempDir()
 	before := unnamedImages(t)
 
-	vamos(t, fsys, "write", filepath.Join(out, "app.tar"), "-C", projectDir).
+	vamos(t, fsys, "write", "app", filepath.Join(out, "app.tar"), "-C", projectDir).
 		failsWith(t, false, `layer "app": run(["false"]) failed`)
 	assertNoFiles(t, out)
 	assertNoNewImages(t, before)
@@ -488,7 +488,7 @@ layer(name="app", base="busybox", steps=[build_env(DIR="srv"), workdir("$DIR/app
 	out := t.TempDir()
 	before := unnamedImages(t)
 
-	vamos(t, fsys, "write", filepath.Join(out, "app.tar"), "-C", projectDir).failsWith(t, false,
+	vamos(t, fsys, "write", "app", filepath.Join(out, "app.tar"), "-C", projectDir).failsWith(t, false,
 		`layer "app": workdir("$DIR/app") failed: path "$DIR/app" is "srv/app", which must be an absolute path`)
 	assertNoFiles(t, out)
 	assertNoNewImages(t, before)
@@ -542,7 +542,7 @@ layer(
 	})
 	out := filepath.Join(t.TempDir(), "app.tar")
 
-	vamos(t, fsys, "write", out, "-C", projectDir).succeeds(t)
+	vamos(t, fsys, "write", "app", out, "-C", projectDir).succeeds(t)
 
 	img, err := tarball.ImageFromPath(out, nil)
 	if err != nil {
@@ -591,10 +591,10 @@ func TestWorkdirUser(t *testing.T) {
 	t.Cleanup(server.Close)
 	host := strings.TrimPrefix(server.URL, "http://")
 
-	// busybox runs as root, so push it to the registry with a user that isn't.
+	// busybox runs as root, so push it to the registry with a user that isn't. A pull() can be sent as it is.
 	base := host + "/nonroot:v1"
-	fsys := project(t, map[string]string{"BUILD": pullBusybox + `layer(name="base", base="busybox")`})
-	vamos(t, fsys, "push", base, "--tls-verify=false", "-C", projectDir).succeeds(t)
+	fsys := project(t, map[string]string{"BUILD": pullBusybox})
+	vamos(t, fsys, "push", "busybox", base, "--tls-verify=false", "-C", projectDir).succeeds(t)
 	ref, err := name.ParseReference(base, name.Insecure)
 	must(t, err)
 	img, err := remote.Image(ref)
@@ -613,7 +613,7 @@ layer(name="app", base="base", steps=[workdir("/work/dir"), run(["sh", "-c", "ec
 `, host, newNonce()),
 	})
 	out := filepath.Join(t.TempDir(), "app.tar")
-	vamos(t, fsys, "write", out, "--tls-verify=false", "-C", projectDir).succeeds(t)
+	vamos(t, fsys, "write", "app", out, "--tls-verify=false", "-C", projectDir).succeeds(t)
 
 	img, err = tarball.ImageFromPath(out, nil)
 	must(t, err)
@@ -670,7 +670,7 @@ layer(
 	out := filepath.Join(t.TempDir(), "app.tar")
 	before := unnamedImages(t)
 
-	r := vamos(t, fsys, "write", out, "-C", projectDir).succeeds(t)
+	r := vamos(t, fsys, "write", "app", out, "-C", projectDir).succeeds(t)
 
 	if !strings.Contains(r.stdout, "shouting") {
 		t.Errorf("stdout = %q, want the task's output", r.stdout)
@@ -700,6 +700,32 @@ layer(
 	assertNoNewImages(t, before)
 }
 
+// TestTaskWithoutOutput checks that a task without source and include, such as one that runs tests, runs
+// and is cached like any other, and fails the build if a step fails.
+func TestTaskWithoutOutput(t *testing.T) {
+	requireBuildah(t)
+	nonce := newNonce()
+	fsys := project(t, map[string]string{
+		"BUILD": pullBusybox + fmt.Sprintf(`
+layer(name="app", base="busybox")
+task(name="test", base="app", steps=[run(["echo", "tested %s"])])
+task(name="broken", base="app", steps=[run(["false"])])
+`, nonce),
+	})
+	before := unnamedImages(t)
+
+	r := vamos(t, fsys, "build", "test", "-C", projectDir).ran(t)
+	if !strings.Contains(r.stdout, `task "test": building`) || !strings.Contains(r.stdout, "tested "+nonce) {
+		t.Errorf("stdout = %q, want the task run", r.stdout)
+	}
+	r = vamos(t, fsys, "build", "test", "-C", projectDir).ran(t)
+	if !strings.Contains(r.stdout, `task "test": cached`) || !strings.Contains(r.stdout, "tested "+nonce) {
+		t.Errorf("stdout = %q, want the task reused, and its output replayed", r.stdout)
+	}
+	vamos(t, fsys, "build", "broken", "-C", projectDir).failsWith(t, false, `task "broken": run(["false"]) failed`)
+	assertNoNewImages(t, before)
+}
+
 // TestTaskOutputModes checks that files a task makes keep their modes, special bits included.
 func TestTaskOutputModes(t *testing.T) {
 	requireBuildah(t)
@@ -722,7 +748,7 @@ layer(name="app", base="busybox", steps=[add("make", "/app")])
 	})
 	out := filepath.Join(t.TempDir(), "app.tar")
 
-	vamos(t, fsys, "write", out, "-C", projectDir).succeeds(t)
+	vamos(t, fsys, "write", "app", out, "-C", projectDir).succeeds(t)
 
 	img, err := tarball.ImageFromPath(out, nil)
 	if err != nil {
@@ -762,7 +788,7 @@ layer(name="app", base="busybox", steps=[add("make", "/app")])
 	})
 	out := filepath.Join(t.TempDir(), "app.tar")
 
-	vamos(t, fsys, "write", out, "-C", projectDir).succeeds(t)
+	vamos(t, fsys, "write", "app", out, "-C", projectDir).succeeds(t)
 
 	img, err := tarball.ImageFromPath(out, nil)
 	if err != nil {
@@ -837,7 +863,7 @@ func TestTaskFailures(t *testing.T) {
 			out := t.TempDir()
 			before := unnamedImages(t)
 
-			vamos(t, fsys, "write", filepath.Join(out, "app.tar"), "-C", projectDir).
+			vamos(t, fsys, "write", "app", filepath.Join(out, "app.tar"), "-C", projectDir).
 				failsWith(t, false, tt.want...)
 			assertNoFiles(t, out)
 			assertNoNewImages(t, before)
@@ -852,7 +878,7 @@ func TestPush(t *testing.T) {
 	host := strings.TrimPrefix(server.URL, "http://")
 	image := host + "/team/app:v1"
 
-	r := vamos(t, project(t, helloBuild), "push", image, "--tls-verify=false", "-C", projectDir).succeeds(t)
+	r := vamos(t, project(t, helloBuild), "push", "app", image, "--tls-verify=false", "-C", projectDir).succeeds(t)
 	if !strings.Contains(r.stdout, image) {
 		t.Errorf("stdout = %q, want it to name %s", r.stdout, image)
 	}
@@ -889,7 +915,7 @@ func TestPushToRegistryMarkedInsecure(t *testing.T) {
 	t.Cleanup(sysregistriesv2.InvalidateCache)
 
 	// registries.conf, not --tls-verify, allows plain HTTP here.
-	vamos(t, project(t, helloBuild), "push", host+"/app", "-C", projectDir).succeeds(t)
+	vamos(t, project(t, helloBuild), "push", "app", host+"/app", "-C", projectDir).succeeds(t)
 }
 
 func TestPushWithAuthFile(t *testing.T) {
@@ -912,7 +938,7 @@ func TestPushWithAuthFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	vamos(t, project(t, helloBuild), "push", host+"/app", "--tls-verify=false", "-C", projectDir).succeeds(t)
+	vamos(t, project(t, helloBuild), "push", "app", host+"/app", "--tls-verify=false", "-C", projectDir).succeeds(t)
 }
 
 func TestPushFailures(t *testing.T) {
@@ -922,11 +948,11 @@ func TestPushFailures(t *testing.T) {
 	host := strings.TrimPrefix(server.URL, "http://")
 
 	t.Run("registry over HTTP without --tls-verify=false", func(t *testing.T) {
-		vamos(t, project(t, helloBuild), "push", host+"/app", "-C", projectDir).
+		vamos(t, project(t, helloBuild), "push", "app", host+"/app", "-C", projectDir).
 			failsWith(t, false, "pushing to "+host+"/app:latest", "HTTP response to HTTPS client")
 	})
 	t.Run("registry not running", func(t *testing.T) {
-		vamos(t, project(t, helloBuild), "push", "127.0.0.1:1/app", "--tls-verify=false", "-C", projectDir).
+		vamos(t, project(t, helloBuild), "push", "app", "127.0.0.1:1/app", "--tls-verify=false", "-C", projectDir).
 			failsWith(t, false, "pushing to 127.0.0.1:1/app:latest", "connection refused")
 	})
 }
@@ -938,7 +964,7 @@ func TestLoad(t *testing.T) {
 		t.Run(network, func(t *testing.T) {
 			loaded := fakeDocker(t, network, "")
 
-			r := vamos(t, project(t, helloBuild), "load", "app:dev", "-C", projectDir).succeeds(t)
+			r := vamos(t, project(t, helloBuild), "load", "app", "app:dev", "-C", projectDir).succeeds(t)
 			if !strings.Contains(r.stdout, "app:dev") {
 				t.Errorf("stdout = %q, want it to name app:dev", r.stdout)
 			}
@@ -968,7 +994,7 @@ func TestLoadRejected(t *testing.T) {
 	requireBuildah(t)
 	fakeDocker(t, "unix", `{"errorDetail":{"message":"no space left on device"},"error":"no space left on device"}`)
 
-	vamos(t, project(t, helloBuild), "load", "app:dev", "-C", projectDir).
+	vamos(t, project(t, helloBuild), "load", "app", "app:dev", "-C", projectDir).
 		failsWith(t, false, "loading into Docker: no space left on device")
 }
 
@@ -979,7 +1005,7 @@ func TestLoadWithoutDocker(t *testing.T) {
 	fsys := project(t, map[string]string{
 		"BUILD": pullBusybox + `layer(name="app", base="busybox", steps=[run(["echo", "build completed"])])`,
 	})
-	r := vamos(t, fsys, "load", "app:dev", "-C", projectDir).
+	r := vamos(t, fsys, "load", "app", "app:dev", "-C", projectDir).
 		failsWith(t, false, "loading into Docker", "/nonexistent/docker.sock")
 	if !strings.Contains(r.stdout, "build completed") {
 		t.Errorf("stdout = %q, want the build to run before connecting to Docker", r.stdout)
@@ -995,7 +1021,7 @@ func TestLoadIntoDocker(t *testing.T) {
 	image := "vamos-test-" + strings.ToLower(strings.ReplaceAll(t.Name(), "/", "-")) + ":latest"
 	t.Cleanup(func() { exec.Command("docker", "rmi", "--force", image).Run() })
 
-	vamos(t, project(t, helloBuild), "load", image, "-C", projectDir).succeeds(t)
+	vamos(t, project(t, helloBuild), "load", "app", image, "-C", projectDir).succeeds(t)
 
 	out, err := exec.Command("docker", "run", "--rm", image).CombinedOutput()
 	if err != nil {
@@ -1024,7 +1050,7 @@ layer(
 	})
 	out := filepath.Join(t.TempDir(), "app.tar")
 
-	r := vamos(t, fsys, "write", out, "-C", projectDir).succeeds(t)
+	r := vamos(t, fsys, "write", "app", out, "-C", projectDir).succeeds(t)
 
 	// The run() step's output reaches the user as it happens.
 	if !strings.Contains(r.stdout, "compiling") {
@@ -1049,7 +1075,7 @@ func TestRunStepSucceeds(t *testing.T) {
 			fsys := project(t, map[string]string{
 				"BUILD": pullBusybox + `layer(name="app", base="busybox", steps=[run(` + run + `)])`,
 			})
-			vamos(t, fsys, "write", filepath.Join(t.TempDir(), "app.tar"), "-C", projectDir).succeeds(t)
+			vamos(t, fsys, "write", "app", filepath.Join(t.TempDir(), "app.tar"), "-C", projectDir).succeeds(t)
 		})
 	}
 }
@@ -1110,7 +1136,7 @@ layer(
 				files[name] = content
 			}
 			out := t.TempDir()
-			r := vamos(t, project(t, files), "write", filepath.Join(out, "app.tar"), "-C", projectDir).
+			r := vamos(t, project(t, files), "write", "app", filepath.Join(out, "app.tar"), "-C", projectDir).
 				failsWith(t, false, tt.want...)
 			if !strings.Contains(r.stderr, tt.wantStderr) {
 				t.Errorf("stderr = %q, want the run() step's errors %q", r.stderr, tt.wantStderr)
@@ -1137,7 +1163,7 @@ func TestInterrupted(t *testing.T) {
 		return len(p), nil
 	})
 
-	vamosWithOutput(t, fsys, ctx, watch, "write", filepath.Join(out, "app.tar"), "-C", projectDir).
+	vamosWithOutput(t, fsys, ctx, watch, "write", "app", filepath.Join(out, "app.tar"), "-C", projectDir).
 		failsWith(t, false, "context canceled")
 	assertNoFiles(t, out)
 }
@@ -1154,7 +1180,7 @@ func TestPullImageNotFound(t *testing.T) {
 	})
 	out := t.TempDir()
 
-	vamos(t, fsys, "write", filepath.Join(out, "app.tar"), "-C", projectDir).
+	vamos(t, fsys, "write", "app", filepath.Join(out, "app.tar"), "-C", projectDir).
 		failsWith(t, false, `pull "base": image "docker.io/library/vamos-no-such-image:latest"`, "check the name")
 	assertNoFiles(t, out)
 }
@@ -1166,7 +1192,7 @@ func TestPullImageUnreachable(t *testing.T) {
 	})
 	out := t.TempDir()
 
-	r := vamos(t, fsys, "write", filepath.Join(out, "app.tar"), "--tls-verify=false", "-C", projectDir).
+	r := vamos(t, fsys, "write", "app", filepath.Join(out, "app.tar"), "--tls-verify=false", "-C", projectDir).
 		failsWith(t, false, `pull "base": image "127.0.0.1:1/app:latest"`, "connection refused")
 	// The name is fine, so don't suggest checking it.
 	if strings.Contains(r.err.Error(), "check the name") {

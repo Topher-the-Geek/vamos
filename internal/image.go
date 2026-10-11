@@ -31,15 +31,13 @@ import (
 	"go.podman.io/storage"
 )
 
-// buildOptions describes one build: of the image, sent to dest, or else of targets, kept in the cache.
+// buildOptions describes one build: of a target's image, sent to dest, or else of targets, kept in the cache.
 type buildOptions struct {
-	fs     afero.Fs // holds dir and the build file's sources
-	dir    string
-	file   *buildFile
-	dest   func() (types.ImageReference, error) // called once the image is ready to commit
-	action string                               // describes sending the image, e.g. "pushing to app:latest"
+	workspace *workspace
+	targets   []string                             // labels of the targets to build: if dest is set, the one to send
+	dest      func() (types.ImageReference, error) // called once the image is ready to commit
+	action    string                               // describes sending the image, e.g. "pushing to app:latest"
 
-	targets   []string  // targets to build when dest is nil, as `vamos build` does
 	rebuild   bool      // run targets again, rather than reuse their cached results
 	timestamp time.Time // if set, the earliest time that targets which run stamp their files with
 
@@ -47,11 +45,20 @@ type buildOptions struct {
 	stdout, stderr io.Writer // receive the output of run() steps
 }
 
-// buildImage runs o.file's targets with buildah and copies the image of the last layer to o.dest,
-// returning its image ID there. If o.dest is nil, it runs only o.targets and the targets they use,
-// and returns "". Each target's result is kept in the build cache, and reused instead of running
-// the target again whenever a later build gives it the same inputs, unless it is a target to rebuild.
+// buildImage runs o.targets, and the targets they use, with buildah. If o.dest is set, it then copies
+// the image of the one target to o.dest, returning its image ID there; otherwise it returns "". Each
+// target's result is kept in the build cache, and reused instead of running the target again whenever
+// a later build gives it the same inputs, unless it is a target to rebuild.
 func buildImage(ctx context.Context, o buildOptions) (string, error) {
+	needed := o.workspace.needs(o.targets)
+	if err := o.workspace.checkSources(needed); err != nil {
+		return "", err
+	}
+	rebuild := map[string]bool{}
+	for _, l := range o.targets {
+		rebuild[l] = o.rebuild
+	}
+
 	buildStoreOptions, err := storage.DefaultStoreOptions()
 	if err != nil {
 		return "", err
@@ -66,31 +73,23 @@ func buildImage(ctx context.Context, o buildOptions) (string, error) {
 		return "", err
 	}
 
-	var needed map[string]bool // targets to run, if not all
-	rebuild := map[string]bool{}
-	if o.dest == nil {
-		needed = o.file.needs(o.targets)
-		for _, name := range o.targets {
-			rebuild[name] = o.rebuild
-		}
-	}
-
 	// Pull everything first, so a bad image name is reported before any slow target runs.
 	images := map[string]builtImage{
 		scratch: {id: scratch, epoch: time.Unix(0, 0)}, // buildah starts an empty image from this name
 	}
-	for _, p := range o.file.pulls {
-		if needed != nil && !needed[p.name] {
+	for _, p := range o.workspace.pulls {
+		if !needed[p.label] {
 			continue
 		}
+		name := o.workspace.display(p.label)
 		policy := buildah.PullIfMissing
-		if rebuild[p.name] {
+		if rebuild[p.label] {
 			// The tag may name a newer image now.
-			fmt.Fprintf(o.stdout, "pull %q: pulling again\n", p.name)
+			fmt.Fprintf(o.stdout, "pull %q: pulling again\n", name)
 			policy = buildah.PullAlways
 		}
-		if images[p.name], err = pullImage(ctx, buildStore, p, policy, o.systemContext); err != nil {
-			return "", fmt.Errorf("pull %q: %w", p.name, err)
+		if images[p.label], err = pullImage(ctx, buildStore, p, policy, o.systemContext); err != nil {
+			return "", fmt.Errorf("pull %q: %w", name, err)
 		}
 	}
 
@@ -116,19 +115,18 @@ func buildImage(ctx context.Context, o buildOptions) (string, error) {
 		images:       images,
 		trees:        map[*fileSet]setTree{},
 	}
-	for _, s := range o.file.targets {
-		if needed != nil && !needed[s.name] {
+	for _, s := range o.workspace.targets {
+		if !needed[s.label] {
 			continue
 		}
-		if err := r.runCached(ctx, s, rebuild[s.name]); err != nil {
+		if err := r.runCached(ctx, s, rebuild[s.label]); err != nil {
 			return "", err
 		}
 	}
 	if o.dest == nil {
 		return "", nil
 	}
-	// loadBuildFile makes sure every task is used by a later target, so the last target is the final layer.
-	return r.send(ctx, r.images[o.file.targets[len(o.file.targets)-1].name].id)
+	return r.send(ctx, r.images[o.targets[0]].id)
 }
 
 // cacheDir returns where the build cache is kept: beside the container store, so that a volume
@@ -195,16 +193,16 @@ type targetRunner struct {
 	cache        *cache
 	capabilities []string // given to run() steps, as root
 	isolation    define.Isolation
-	images       map[string]builtImage // the images of pulls and layers, by name, once they are ready
+	images       map[string]builtImage // the images of pulls and layers, by label, once they are ready
 	trees        map[*fileSet]setTree  // the files of globs and tasks, once they are ready
 }
 
-// describeTarget names target s for messages, e.g. `layer "app"`.
-func describeTarget(s *targetSpec) string {
-	if s.output != nil {
-		return fmt.Sprintf("task %q", s.name)
+// describe names target s for messages, e.g. `layer "app"` or `task "//ui:build"`.
+func (r *targetRunner) describe(s *targetSpec) string {
+	if s.task {
+		return fmt.Sprintf("task %q", r.workspace.display(s.label))
 	}
-	return fmt.Sprintf("layer %q", s.name)
+	return fmt.Sprintf("layer %q", r.workspace.display(s.label))
 }
 
 // runCached makes the result of target s ready for later targets, reusing the result the cache
@@ -212,7 +210,7 @@ func describeTarget(s *targetSpec) string {
 // it did, and replays a reused target's output, so a build prints what the target printed. With
 // rebuild, it runs s even if its result is cached, and replaces that result.
 func (r *targetRunner) runCached(ctx context.Context, s *targetSpec, rebuild bool) error {
-	target := describeTarget(s)
+	target := r.describe(s)
 	a, err := r.inputs(s)
 	if err != nil {
 		return fmt.Errorf("%s: %w", target, err)
@@ -243,8 +241,11 @@ func (r *targetRunner) runCached(ctx context.Context, s *targetSpec, rebuild boo
 
 	var result *actionResult
 
-	if s.output != nil {
+	if s.task {
 		result, err = r.runTarget(ctx, s, a, func(st *targetState, result *actionResult) error {
+			if s.output == nil {
+				return nil
+			}
 			output, err := collectOutput(st.mountPoint, s, r.cache)
 			result.Output = &output
 			return err
@@ -273,8 +274,10 @@ func (r *targetRunner) inputs(s *targetSpec) (*action, error) {
 		Base:    r.images[s.base].id,
 		Command: s.command,
 	}
-	if s.output != nil {
+	if s.task {
 		a.Kind = "task"
+	}
+	if s.output != nil {
 		a.Source = s.source
 		a.Include = sourcePaths([]*fileSet{s.output})
 	}
@@ -299,9 +302,9 @@ func (r *targetRunner) setTree(set *fileSet) (blob, error) {
 	if t, ok := r.trees[set]; ok {
 		return t.tree, nil
 	}
-	b, err := r.cache.putTree(r.fs, r.dir, sourcePaths([]*fileSet{set}))
+	b, err := r.cache.putTree(r.workspace.fs, set.dir, sourcePaths([]*fileSet{set}))
 	if err != nil {
-		return blob{}, fmt.Errorf("reading %s: %w", set.name, err)
+		return blob{}, fmt.Errorf("reading %s: %w", r.workspace.display(set.label), err)
 	}
 	r.trees[set] = setTree{tree: b}
 	return b, nil
@@ -317,7 +320,7 @@ func (r *targetRunner) checkResult(s *targetSpec, result *actionResult) error {
 		if err := r.cache.checkTree(*result.Output); err != nil {
 			return fmt.Errorf("its files are missing from the cache: %w", err)
 		}
-	} else {
+	} else if !s.task {
 		if result.Image == "" {
 			return errors.New("it has no image")
 		}
@@ -349,10 +352,12 @@ func (r *targetRunner) replay(result *actionResult) error {
 // record makes the result of target s available to later targets.
 func (r *targetRunner) record(s *targetSpec, result *actionResult) {
 	epoch := time.Unix(result.Epoch, 0)
-	if s.output != nil {
-		r.trees[s.output] = setTree{tree: *result.Output, epoch: epoch}
+	if s.task {
+		if s.output != nil {
+			r.trees[s.output] = setTree{tree: *result.Output, epoch: epoch}
+		}
 	} else {
-		r.images[s.name] = builtImage{id: result.Image.Encoded(), epoch: epoch}
+		r.images[s.label] = builtImage{id: result.Image.Encoded(), epoch: epoch}
 	}
 }
 
@@ -379,7 +384,7 @@ func (r *targetRunner) epoch(s *targetSpec) time.Time {
 func (r *targetRunner) runTarget(
 	ctx context.Context, s *targetSpec, a *action, finish func(*targetState, *actionResult) error,
 ) (*actionResult, error) {
-	target := describeTarget(s)
+	target := r.describe(s)
 	log, err := r.cache.newLog()
 	if err != nil {
 		return nil, fmt.Errorf("%s: saving to the build cache: %w", target, err)
@@ -474,7 +479,7 @@ func (r *targetRunner) send(ctx context.Context, id string) (string, error) {
 func (r *targetRunner) start(
 	ctx context.Context, s *targetSpec, a *action, log *logRecorder,
 ) (_ *targetState, err error) {
-	target := describeTarget(s)
+	target := r.describe(s)
 	builder, err := buildah.NewBuilder(ctx, r.store, buildah.BuilderOptions{
 		FromImage:     r.images[s.base].id,
 		PullPolicy:    buildah.PullNever, // only pull() reaches registries
@@ -509,7 +514,7 @@ func (r *targetRunner) start(
 		return nil, err
 	}
 
-	if s.output == nil && len(s.command) > 0 {
+	if !s.task && len(s.command) > 0 {
 		builder.SetCmd(s.command)
 	}
 	return st, nil
@@ -591,7 +596,7 @@ func (st *targetState) addSource(set *fileSet, files blob, dest string) error {
 	}
 	for _, src := range sourcePaths([]*fileSet{set}) {
 		if err := addPath(st.builder, contextDir, src, dest); err != nil {
-			return fmt.Errorf("adding %q from %s: %w", src, set.name, err)
+			return fmt.Errorf("adding %q from %s: %w", src, st.workspace.display(set.label), err)
 		}
 	}
 	return nil

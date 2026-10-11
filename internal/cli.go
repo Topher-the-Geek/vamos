@@ -57,13 +57,14 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 		SilenceErrors:              true,
 		SuggestionsMinimumDistance: 2,
 	}
-	root.PersistentFlags().StringVarP(&dir, "dir", "C", ".", "directory containing the BUILD file")
+	root.PersistentFlags().StringVarP(&dir, "dir", "C", ".",
+		"directory of the BUILD file whose targets are named without a label, such as //dir:name")
 	root.PersistentFlags().BoolVar(&tlsVerify, "tls-verify", true,
 		"require HTTPS and verify certificates when contacting registries")
 	root.PersistentFlags().Var(&timestamp, "timestamp",
 		"stamp the files of targets that run no earlier than this time, in Unix seconds or RFC 3339")
 
-	// readBuild reads dir/BUILD, returning the options for building from it.
+	// readBuild opens the workspace holding dir, returning the options for building from it.
 	readBuild := func(cmd *cobra.Command) (buildOptions, error) {
 		systemContext, err := newSystemContext(cmd, tlsVerify)
 		if err != nil {
@@ -73,14 +74,12 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 		if err != nil {
 			return buildOptions{}, err
 		}
-		file, err := loadBuildFile(fsys, absDir)
+		w, err := openWorkspace(fsys, absDir)
 		if err != nil {
 			return buildOptions{}, err
 		}
 		return buildOptions{
-			fs:            fsys,
-			dir:           absDir,
-			file:          file,
+			workspace:     w,
 			timestamp:     time.Time(timestamp),
 			systemContext: systemContext,
 			stdout:        cmd.OutOrStdout(),
@@ -88,12 +87,17 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 		}, nil
 	}
 
-	// build builds the image described by dir/BUILD and sends it to dest.
-	build := func(cmd *cobra.Command, dest destination) error {
+	// build builds the image of the target named target and sends it to dest.
+	build := func(cmd *cobra.Command, target string, dest destination) error {
 		options, err := readBuild(cmd)
 		if err != nil {
 			return err
 		}
+		image, err := options.workspace.imageTarget(target)
+		if err != nil {
+			return err
+		}
+		options.targets = []string{image}
 		options.dest, options.action = dest.ref, dest.action
 		imageId, err := buildImage(cmd.Context(), options)
 		if err != nil {
@@ -110,17 +114,17 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 	}
 
 	push := &cobra.Command{
-		Use:     "push <image>",
-		Short:   "Build the image and push it to a registry",
-		Example: "  vamos push ghcr.io/me/app:1.0",
-		Args:    exactlyOne("image name", "vamos push ghcr.io/me/app:1.0"),
+		Use:     "push <target> <image>",
+		Short:   "Build a target's image and push it to a registry",
+		Example: "  vamos push server ghcr.io/me/app:1.0\n  vamos push //ui:site ghcr.io/me/site:1.0",
+		Args:    targetAnd("image name", "vamos push server ghcr.io/me/app:1.0"),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			name, err := parseImageName(args[0])
+			name, err := parseImageName(args[1])
 			if err != nil {
 				return err
 			}
 			label := reference.FamiliarString(name)
-			return build(cmd, destination{
+			return build(cmd, args[0], destination{
 				ref:    func() (types.ImageReference, error) { return docker.NewReference(name) },
 				action: "pushing to " + label,
 				label:  label,
@@ -129,13 +133,13 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 	}
 
 	load := &cobra.Command{
-		Use:     "load <image>",
-		Short:   "Build the image and load it into the local Docker daemon",
-		Long:    "Build the image and load it into the Docker daemon at $DOCKER_HOST, or the local socket.",
-		Example: "  vamos load app:dev",
-		Args:    exactlyOne("image name", "vamos load app:dev"),
+		Use:     "load <target> <image>",
+		Short:   "Build a target's image and load it into the local Docker daemon",
+		Long:    "Build a target's image and load it into the Docker daemon at $DOCKER_HOST, or the local socket.",
+		Example: "  vamos load server app:dev",
+		Args:    targetAnd("image name", "vamos load server app:dev"),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			name, err := parseImageName(args[0])
+			name, err := parseImageName(args[1])
 			if err != nil {
 				return err
 			}
@@ -149,7 +153,7 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 					os.Remove(tmp.Name())
 				}
 			}()
-			return build(cmd, destination{
+			return build(cmd, args[0], destination{
 				ref: func() (types.ImageReference, error) {
 					var err error
 					if tmp, err = os.CreateTemp("", "vamos-load-*.tar"); err != nil {
@@ -166,12 +170,12 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 
 	var tag string
 	write := &cobra.Command{
-		Use:     "write <file.tar>",
-		Short:   "Build the image and write it to a tarball that `docker load` can import",
-		Example: "  vamos write app.tar --tag app:dev",
-		Args:    exactlyOne("output file", "vamos write app.tar"),
+		Use:     "write <target> <file.tar>",
+		Short:   "Build a target's image and write it to a tarball that `docker load` can import",
+		Example: "  vamos write server app.tar --tag app:dev",
+		Args:    targetAnd("output file", "vamos write server app.tar"),
 		RunE: func(cmd *cobra.Command, args []string) (err error) {
-			path, err := filepath.Abs(args[0])
+			path, err := filepath.Abs(args[1])
 			if err != nil {
 				return err
 			}
@@ -195,7 +199,7 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 					os.Remove(tmp.Name())
 				}
 			}()
-			return build(cmd, destination{
+			return build(cmd, args[0], destination{
 				ref: func() (types.ImageReference, error) {
 					var err error
 					if tmp, err = createTempBeside(path); err != nil {
@@ -209,8 +213,8 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 					}
 					return os.Rename(tmp.Name(), path)
 				},
-				action: "writing " + args[0],
-				label:  args[0],
+				action: "writing " + args[1],
+				label:  args[1],
 			})
 		},
 	}
@@ -220,18 +224,18 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 	buildTargets := &cobra.Command{
 		Use:   "build <target>...",
 		Short: "Build targets into the build cache",
-		Long: "Build the named targets of the BUILD file, and the targets they use, into the build cache, where\n" +
+		Long: "Build the named targets, and the targets they use, into the build cache, where\n" +
 			"push, load and write find them. Targets already cached are reused, unless --rebuild is given:\n" +
 			"then the named targets run again, though the targets they use are still reused. A pull() named\n" +
 			"with --rebuild is pulled again, in case its tag names a newer image.",
-		Example: "  vamos build packages\n  vamos build compile --rebuild",
+		Example: "  vamos build packages //backend:test\n  vamos build compile --rebuild",
 		Args:    atLeastOne("target name", "vamos build packages"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			options, err := readBuild(cmd)
 			if err != nil {
 				return err
 			}
-			if options.targets, err = options.file.parseTargets(args); err != nil {
+			if options.targets, err = options.workspace.buildTargets(args); err != nil {
 				return err
 			}
 			options.rebuild = rebuild
@@ -269,14 +273,17 @@ type destination struct {
 	label  string // names the destination after "Image built!"
 }
 
-// exactlyOne requires a single positional argument, described by what and example.
-func exactlyOne(what, example string) cobra.PositionalArgs {
+// targetAnd requires a target and one more positional argument, described by what and example.
+func targetAnd(what, example string) cobra.PositionalArgs {
 	return func(cmd *cobra.Command, args []string) error {
 		switch {
 		case len(args) == 0:
-			return fmt.Errorf("missing %s, e.g. %s", what, example)
-		case len(args) > 1:
-			return fmt.Errorf("expected one %s, got %d arguments: %s", what, len(args), strings.Join(args, " "))
+			return fmt.Errorf("missing target and %s, e.g. %s", what, example)
+		case len(args) == 1:
+			return fmt.Errorf("missing %s after target %q, e.g. %s", what, args[0], example)
+		case len(args) > 2:
+			return fmt.Errorf("expected a target and one %s, got %d arguments: %s",
+				what, len(args), strings.Join(args, " "))
 		}
 		return nil
 	}

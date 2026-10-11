@@ -10,6 +10,9 @@ import (
 )
 
 // validBuild is a BUILD file that would build, were the command line right.
+// addCode declares a layer "app" that adds the glob "code", so that building it checks the glob's files.
+const addCode = `layer(name="app", base="busybox", steps=[add("code", "/app")])`
+
 var validBuild = map[string]string{
 	"BUILD": pullBusybox + `layer(name="app", base="busybox", command=["echo", "hello"])`,
 }
@@ -21,58 +24,63 @@ func TestCommandLineMistakes(t *testing.T) {
 		want []string
 	}{
 		{
-			name: "push without image",
+			name: "push without target",
 			args: []string{"push"},
-			want: []string{"missing image name", "vamos push ghcr.io/me/app:1.0"},
+			want: []string{"missing target and image name", "vamos push server ghcr.io/me/app:1.0"},
+		},
+		{
+			name: "push without image",
+			args: []string{"push", "app"},
+			want: []string{`missing image name after target "app"`, "vamos push server ghcr.io/me/app:1.0"},
 		},
 		{
 			name: "load without image",
-			args: []string{"load"},
-			want: []string{"missing image name", "vamos load app:dev"},
+			args: []string{"load", "app"},
+			want: []string{`missing image name after target "app"`, "vamos load server app:dev"},
 		},
 		{
 			name: "write without file",
-			args: []string{"write"},
-			want: []string{"missing output file", "vamos write app.tar"},
+			args: []string{"write", "app"},
+			want: []string{`missing output file after target "app"`, "vamos write server app.tar"},
 		},
 		{
 			name: "push with two images",
-			args: []string{"push", "app:1", "app:2"},
-			want: []string{"expected one image name, got 2 arguments: app:1 app:2"},
+			args: []string{"push", "app", "app:1", "app:2"},
+			want: []string{"expected a target and one image name, got 3 arguments: app app:1 app:2"},
 		},
 		{
 			name: "write with two files",
-			args: []string{"write", "a.tar", "b.tar"},
-			want: []string{"expected one output file, got 2 arguments"},
+			args: []string{"write", "app", "a.tar", "b.tar"},
+			want: []string{"expected a target and one output file, got 3 arguments"},
 		},
 		{
 			name: "unknown flag",
-			args: []string{"load", "app", "--bogus"},
+			args: []string{"load", "app", "app", "--bogus"},
 			want: []string{"unknown flag: --bogus"},
 		},
 		{
 			name: "unknown shorthand",
-			args: []string{"push", "-x", "app"},
+			args: []string{"push", "-x", "app", "app"},
 			want: []string{"unknown shorthand flag: 'x'"},
 		},
 		{
 			name: "tag without value",
-			args: []string{"write", "app.tar", "--tag"},
+			args: []string{"write", "app", "app.tar", "--tag"},
 			want: []string{"flag needs an argument: --tag"},
 		},
 		{
 			name: "tag on push",
-			args: []string{"push", "app", "--tag", "app:1"},
+			args: []string{"push", "app", "app", "--tag", "app:1"},
 			want: []string{"unknown flag: --tag"},
 		},
 		{
 			name: "dir without value",
-			args: []string{"load", "app", "-C"},
+			args: []string{"load", "app", "app", "-C"},
 			want: []string{"flag needs an argument: 'C'"},
 		},
 		{
 			name: "tls-verify not a bool",
-			args: []string{"push", "app", "--tls-verify=maybe"},
+			args: []string{"push", "app", "app", "--tls-verify=maybe"},
 			want: []string{`invalid argument "maybe"`, "--tls-verify"},
 		},
 		{
@@ -82,7 +90,7 @@ func TestCommandLineMistakes(t *testing.T) {
 		},
 		{
 			name: "rebuild on push",
-			args: []string{"push", "app", "--rebuild"},
+			args: []string{"push", "app", "app", "--rebuild"},
 			want: []string{"unknown flag: --rebuild"},
 		},
 		{
@@ -92,7 +100,7 @@ func TestCommandLineMistakes(t *testing.T) {
 		},
 		{
 			name: "timestamp not a time",
-			args: []string{"write", "app.tar", "--timestamp", "yesterday"},
+			args: []string{"write", "app", "app.tar", "--timestamp", "yesterday"},
 			want: []string{`invalid argument "yesterday"`, "--timestamp", "want Unix seconds"},
 		},
 		{
@@ -131,9 +139,16 @@ layer(name="packages", base="busybox", steps=[add("code", "/app")])
 			want:    []string{`/project/BUILD has no target "server"; its targets are "busybox", "code", "packages"`},
 		},
 		{
+			name:    "label without its leading slashes",
+			targets: []string{"backend:test"},
+			want: []string{
+				`/project/BUILD has no target "backend:test"; a label starts with "//", as in "//backend:test"`,
+			},
+		},
+		{
 			name:    "glob",
 			targets: []string{"code"},
-			want:    []string{`"code" is a glob(), whose files are read by every build`},
+			want:    []string{`"code" is a glob(), whose files are read by the targets that add them`},
 		},
 	}
 	for _, tt := range tests {
@@ -174,32 +189,32 @@ func TestInvalidImageNames(t *testing.T) {
 	}{
 		{
 			name: "uppercase push",
-			args: []string{"push", "MyApp"},
+			args: []string{"push", "app", "MyApp"},
 			want: []string{`invalid image name "MyApp"`, "must be lowercase"},
 		},
 		{
 			name: "uppercase load",
-			args: []string{"load", "MyApp"},
+			args: []string{"load", "app", "MyApp"},
 			want: []string{`invalid image name "MyApp"`, "must be lowercase"},
 		},
 		{
 			name: "space",
-			args: []string{"load", "my app"},
+			args: []string{"load", "app", "my app"},
 			want: []string{`invalid image name "my app"`},
 		},
 		{
 			name: "empty tag",
-			args: []string{"load", "app:"},
+			args: []string{"load", "app", "app:"},
 			want: []string{`invalid image name "app:"`},
 		},
 		{
 			name: "digest",
-			args: []string{"push", "app" + digest},
+			args: []string{"push", "app", "app" + digest},
 			want: []string{"must not include a digest"},
 		},
 		{
 			name: "invalid write tag",
-			args: []string{"write", out, "-t", "Bad Tag"},
+			args: []string{"write", "app", out, "-t", "Bad Tag"},
 			want: []string{`invalid image name "Bad Tag"`},
 		},
 	}
@@ -215,15 +230,15 @@ func TestInvalidImageNames(t *testing.T) {
 func TestProjectDirectoryMistakes(t *testing.T) {
 	t.Setenv("DOCKER_HOST", "unix:///nonexistent/docker.sock")
 	t.Run("missing directory", func(t *testing.T) {
-		vamos(t, project(t, validBuild), "load", "app", "-C", "/nope").
+		vamos(t, project(t, validBuild), "load", "app", "app", "-C", "/nope").
 			failsWith(t, false, "directory /nope does not exist")
 	})
 	t.Run("directory is a file", func(t *testing.T) {
-		vamos(t, project(t, validBuild), "load", "app", "-C", "/project/BUILD").
+		vamos(t, project(t, validBuild), "load", "app", "app", "-C", "/project/BUILD").
 			failsWith(t, false, "/project/BUILD is not a directory")
 	})
 	t.Run("no BUILD file", func(t *testing.T) {
-		vamos(t, project(t, map[string]string{"script.sh": "echo hi"}), "load", "app", "-C", projectDir).
+		vamos(t, project(t, map[string]string{"script.sh": "echo hi"}), "load", "app", "app", "-C", projectDir).
 			failsWith(t, false, "no BUILD file in /project")
 	})
 	t.Run("relative directory", func(t *testing.T) {
@@ -232,7 +247,7 @@ func TestProjectDirectoryMistakes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		vamos(t, afero.NewMemMapFs(), "load", "app", "-C", "sub").
+		vamos(t, afero.NewMemMapFs(), "load", "app", "app", "-C", "sub").
 			failsWith(t, false, "directory "+filepath.Join(wd, "sub")+" does not exist")
 	})
 }
@@ -342,19 +357,6 @@ func TestBuildFileMistakes(t *testing.T) {
 			name:  "empty pull name",
 			build: `pull(name="", image="busybox")`,
 			want:  []string{"/project/BUILD:1:5:", "pull: name must not be empty"},
-		},
-		{
-			name:  "unused pull",
-			build: pullBusybox + "pull(name=\"alpine\", image=\"alpine\")\nlayer(name=\"app\", base=\"busybox\")\n",
-			want:  []string{"/project/BUILD:2:5: pull: \"alpine\" is not the base of any layer()"},
-		},
-		{
-			name:  "unused layer",
-			build: pullBusybox + "layer(name=\"test\", base=\"busybox\")\nlayer(name=\"app\", base=\"busybox\")\n",
-			want: []string{
-				`/project/BUILD:2:6: layer: "test" is not the base of any later layer() or task(); ` +
-					"only the last layer() makes the image",
-			},
 		},
 		{
 			name:  "old arguments",
@@ -577,8 +579,14 @@ func TestBuildFileMistakes(t *testing.T) {
 		},
 		{
 			name:  "missing file",
-			build: `glob(name="code", include=["app.sh"])`,
+			build: withGlob + pullBusybox + addCode,
 			want:  []string{"/project/BUILD:1:5:", `glob: include "app.sh" not found in /project`},
+		},
+		{
+			name: "missing file in a glob the target needs",
+			build: `glob(name="docs", include=["README"])` + "\n" + withGlob + pullBusybox + addCode + "\n" +
+				`layer(name="docs-layer", base="busybox", steps=[add("docs", "/docs")])`,
+			want: []string{"/project/BUILD:2:5:", `glob: include "app.sh" not found in /project`},
 		},
 		{
 			name:  "absolute include",
@@ -603,20 +611,23 @@ func TestBuildFileMistakes(t *testing.T) {
 			want:  []string{"/project/BUILD:2:5:", `glob: name "busybox" is already used at /project/BUILD:1:5`},
 		},
 		{
-			name:  "unused glob",
-			build: pullBusybox + withGlob + `layer(name="app", base="busybox")`,
-			files: map[string]string{"app.sh": "echo hi"},
-			want:  []string{`/project/BUILD:2:5: glob: "code" is not added by any later layer() or task()`},
-		},
-		{
-			name:  "task without source",
+			name:  "task include without source",
 			build: pullBusybox + `task(name="make", base="busybox", include=["app"])`,
-			want:  []string{"/project/BUILD:2:5:", "missing argument for source"},
+			want:  []string{"/project/BUILD:2:5:", "task: include needs source, the directory it is relative to"},
 		},
 		{
-			name:  "task without include",
+			name:  "task source without include",
 			build: pullBusybox + `task(name="make", base="busybox", source="/out")`,
-			want:  []string{"/project/BUILD:2:5:", "missing argument for include"},
+			want:  []string{"/project/BUILD:2:5:", "task: source needs include, the files to collect from it"},
+		},
+		{
+			name: "add a task without output",
+			build: pullBusybox + `task(name="test", base="busybox", steps=[run(["true"])])` + "\n" +
+				`layer(name="app", base="busybox", steps=[add("test", "/app")])`,
+			want: []string{
+				"/project/BUILD:3:45:",
+				`add: source "test" is a task() without output; give it source and include`,
+			},
 		},
 		{
 			name:  "relative task source",
@@ -645,20 +656,6 @@ func TestBuildFileMistakes(t *testing.T) {
 			want: []string{"/project/BUILD:3:6:", `layer: base "make" is a task(), not a pull() or layer()`},
 		},
 		{
-			name: "unused task",
-			build: pullBusybox + `task(name="make", base="busybox", source="/out", include=["app"])` + "\n" +
-				`layer(name="app", base="busybox")`,
-			want: []string{`/project/BUILD:2:5: task: "make" is not added by any later layer() or task()`},
-		},
-		{
-			name: "task after the last layer",
-			build: pullBusybox + `glob(name="code", include=["app.sh"])` + "\n" +
-				`layer(name="app", base="busybox", steps=[add("code", "/app")])` + "\n" +
-				`task(name="make", base="app", source="/app", include=["app.sh"])`,
-			files: map[string]string{"app.sh": "echo hi"},
-			want:  []string{`/project/BUILD:4:5: task: "make" is not added by any later layer() or task()`},
-		},
-		{
 			name: "run outside steps",
 			build: pullBusybox + `run(["true"])` + "\n" +
 				`layer(name="app", base="busybox")`,
@@ -685,19 +682,9 @@ func TestBuildFileMistakes(t *testing.T) {
 			},
 		},
 		{
-			name:  "only tasks",
-			build: pullBusybox + `task(name="make", base="busybox", source="/out", include=["app"])`,
-			want:  []string{"/project/BUILD: layer() was never called"},
-		},
-		{
-			name:  "layer never called",
-			build: pullBusybox,
-			want:  []string{"/project/BUILD: layer() was never called"},
-		},
-		{
 			name:  "empty BUILD",
 			build: "",
-			want:  []string{"layer() was never called"},
+			want:  []string{`/project/BUILD has no target "app"; it declares none`},
 		},
 		{
 			name:  "fail in BUILD",
@@ -711,6 +698,7 @@ def app(src):
     glob(name="code", include=[src])
 
 app("main.sh")
+layer(name="app", base="busybox", steps=[add("code", "/app")])
 `,
 			want: []string{"/project/BUILD:4:9:", `include "main.sh" not found`},
 		},
@@ -722,7 +710,7 @@ app("main.sh")
 				files[name] = content
 			}
 			out := t.TempDir()
-			vamos(t, project(t, files), "write", filepath.Join(out, "app.tar"), "-C", projectDir).
+			vamos(t, project(t, files), "write", "app", filepath.Join(out, "app.tar"), "-C", projectDir).
 				failsWith(t, false, tt.want...)
 			assertNoFiles(t, out)
 		})
@@ -733,11 +721,11 @@ func TestWriteDestinationMistakes(t *testing.T) {
 	dir := t.TempDir()
 	t.Run("missing directory", func(t *testing.T) {
 		path := filepath.Join(dir, "nope", "app.tar")
-		vamos(t, project(t, validBuild), "write", path, "-C", projectDir).
+		vamos(t, project(t, validBuild), "write", "app", path, "-C", projectDir).
 			failsWith(t, false, "cannot write "+path+": directory "+filepath.Join(dir, "nope")+" does not exist")
 	})
 	t.Run("path is a directory", func(t *testing.T) {
-		vamos(t, project(t, validBuild), "write", dir, "-C", projectDir).
+		vamos(t, project(t, validBuild), "write", "app", dir, "-C", projectDir).
 			failsWith(t, false, "cannot write "+dir+": it is a directory")
 	})
 	t.Run("parent is a file", func(t *testing.T) {
@@ -745,7 +733,7 @@ func TestWriteDestinationMistakes(t *testing.T) {
 		if err := os.WriteFile(file, nil, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		vamos(t, project(t, validBuild), "write", filepath.Join(file, "app.tar"), "-C", projectDir).
+		vamos(t, project(t, validBuild), "write", "app", filepath.Join(file, "app.tar"), "-C", projectDir).
 			failsWith(t, false, file+" is not a directory")
 	})
 }
@@ -753,18 +741,18 @@ func TestWriteDestinationMistakes(t *testing.T) {
 func TestMissingAuthFile(t *testing.T) {
 	t.Setenv("REGISTRY_AUTH_FILE", "/nonexistent/auth.json")
 
-	vamos(t, project(t, validBuild), "push", "app", "-C", projectDir).
+	vamos(t, project(t, validBuild), "push", "app", "app", "-C", projectDir).
 		failsWith(t, false, "REGISTRY_AUTH_FILE", "/nonexistent/auth.json", "no such file")
 }
 
 // TestSymlinkSource rejects an include that is itself a link.
 func TestSymlinkSource(t *testing.T) {
 	fsys, _ := diskProject(t, map[string]string{
-		"BUILD": `glob(name="code", include=["lib"])`,
+		"BUILD": `glob(name="code", include=["lib"])` + "\n" + pullBusybox + addCode,
 	}, map[string]string{"lib": "../shared"})
 	out := t.TempDir()
 
-	vamos(t, fsys, "write", filepath.Join(out, "app.tar"), "-C", projectDir).
+	vamos(t, fsys, "write", "app", filepath.Join(out, "app.tar"), "-C", projectDir).
 		failsWith(t, false, "/project/BUILD:1:5:", `include "lib" is a symbolic link`)
 	assertNoFiles(t, out)
 }
@@ -779,11 +767,11 @@ func TestSymlinkSourceParent(t *testing.T) {
 		t.Run(parent, func(t *testing.T) {
 			src := parent + "/secret"
 			fsys, _ := diskProject(t, map[string]string{
-				"BUILD": `glob(name="code", include=["` + src + `"])`,
+				"BUILD": `glob(name="code", include=["` + src + `"])` + "\n" + pullBusybox + addCode,
 			}, map[string]string{parent: external})
 			out := t.TempDir()
 
-			vamos(t, fsys, "write", filepath.Join(out, "app.tar"), "-C", projectDir).
+			vamos(t, fsys, "write", "app", filepath.Join(out, "app.tar"), "-C", projectDir).
 				failsWith(t, false, "/project/BUILD:1:5:",
 					`include "`+src+`" has symbolic link parent "`+filepath.Join(projectDir, parent)+`"`)
 			assertNoFiles(t, out)

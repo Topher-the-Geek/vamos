@@ -29,7 +29,7 @@ uv pip compile --python-platform linux --python-version 3.14 --generate-hashes -
 The image installs only `requirements_lock.txt`. From the repository root:
 
 ```
-./vamos load vamos-fastmcp -C examples/fastmcp
+./vamos load server vamos-fastmcp -C examples/fastmcp
 (cat examples/nodejs/echo-request.jsonl; sleep 2) | docker run -i --rm vamos-fastmcp
 ```
 

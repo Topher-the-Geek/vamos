@@ -1,18 +1,20 @@
 # vamos
 
 A Go CLI that uses the [buildah](https://github.com/containers/buildah) library to build
-a container image described by a `BUILD` file written in [Starlark](https://github.com/bazelbuild/starlark).
+container images described by `BUILD` files written in [Starlark](https://github.com/bazelbuild/starlark).
 
 ```
-vamos push <image>                  # push to a registry, e.g. ghcr.io/me/app:1.0
-vamos load <image>                  # load into the local Docker daemon, e.g. app:dev
-vamos write <file.tar> [-t app]     # write a tarball that `docker load` can import
-vamos build <target>... [--rebuild] # build targets into the build cache, e.g. packages
-vamos prune                         # empty the build cache
+vamos push <target> <image>              # push a target's image to a registry, e.g. server ghcr.io/me/app:1.0
+vamos load <target> <image>              # load it into the local Docker daemon, e.g. server app:dev
+vamos write <target> <file.tar> [-t app] # write a tarball that `docker load` can import
+vamos build <target>... [--rebuild]      # build targets into the build cache, e.g. packages
+vamos prune                              # empty the build cache
 ```
 
-Each command builds from the `BUILD` file in the current directory, or in the directory
-given with `-C <dir>`. Image names without a tag get `:latest`.
+Targets are named as the `BUILD` file in the current directory, or in the directory given with `-C <dir>`,
+declares them, or by a label such as `//backend:server` for a target of another `BUILD` file in the
+[workspace](#workspaces). Each command builds only the targets it names and those they use. `push`, `load`
+and `write` send the image of a `pull()` or `layer()`. Image names without a tag get `:latest`.
 
 - `push` uses credentials from `docker login` (`~/.docker/config.json`) or, if set, only those
   in `$REGISTRY_AUTH_FILE`. Use `--tls-verify=false` for a registry served over plain HTTP, or mark
@@ -111,8 +113,8 @@ task(
         add("server-source", "/build"),
         run(["npm", "run", "build"]),
     ],
-    source="/build/dist",                          # required: directory the files are made in
-    include=["server.js"],                         # required: files or directories relative to source
+    source="/build/dist",                          # directory the files are made in
+    include=["server.js"],                         # files or directories relative to source
 )
 
 layer(
@@ -126,16 +128,27 @@ layer(
 )
 ```
 
-The last `layer()` makes the image. Every other target must be used by a later `layer()` or `task()`, as its base
-or added by it, so nothing is declared but left out. A layer keeps its base's files, command, variables and
-working directory, as Docker's `FROM` does; only the last one's image is sent, and the others are kept in the
-build cache. A pulled image is kept in local storage and reused. `base="scratch"` starts from an empty image, so
-no target may be named `scratch`. A task's image is discarded once its files are collected and cached, so its
-base can hold build tools the image doesn't need. A task can't be a base.
+A layer keeps its base's files, command, variables and working directory, as Docker's `FROM` does. The image of
+the layer named on the command line is sent, and the others are kept in the build cache. A target nothing uses
+is fine, to build with `vamos build`. A pulled image is kept in local storage and reused. `base="scratch"` starts
+from an empty image, so no target may be named `scratch`. A task's image is discarded once its files are collected
+and cached, so its base can hold build tools the image doesn't need. A task can't be a base.
+
+A task without `source` and `include` makes no files, so no target can add it. It runs only for its steps to
+succeed, as a task that runs tests or a linter does, and is cached like any other:
+
+```python
+task(
+    name="test",
+    base="dev-packages",
+    steps=[add("server-source", "/build"), run(["npm", "test"])],
+)
+```
 
 A target applies its steps in order, and each of them sees what those before it did:
 
-- `add(source, dest)` copies the files of an earlier `glob()` or `task()` into the absolute directory `dest`.
+- `add(source, dest)` copies the files of an earlier `glob()` or `task()`, or one of another package, into the
+  absolute directory `dest`.
   Files added later replace those added before.
 - `run(argv)` runs a command, which must succeed, in the target's container. It isn't run through a shell, so
   use `["sh", "-c", "..."]` for one.
@@ -162,7 +175,44 @@ Included paths and their parent directories, within the project or a task's `sou
 links. Links in `source` itself are resolved within the task's container.
 Links inside an included directory are copied as links, as Docker's `COPY` does.
 
+A glob's files are checked only when a target that adds them is built, so a missing file doesn't stop building
+targets that don't need it.
+
 See [examples/nodejs/](examples/nodejs/) and [examples/fastmcp/](examples/fastmcp/).
+
+## Workspaces
+
+A project can have a `BUILD` file in each of several directories, or packages, beneath a directory holding a
+`WORKSPACE` file, which may be empty. A `BUILD` file names the targets of another by label: `//dir:name`, where
+`dir` is the package's directory relative to the workspace, and `//:name` names one in the workspace's own
+`BUILD` file. Any kind of target can be named this way, such as another package's `pull()` as a base, or its
+`glob()` or `task()` in `add()`; a glob's files are relative to its own `BUILD` file. A target of the same file
+is named as `name` or `:name`, and must be declared earlier; any target of another package can be named.
+
+```python
+task(
+    name="graphql-codegen",
+    base="packages",
+    steps=[
+        add("//backend:schema", "/workspace"),     # a task in backend/BUILD
+        run(["pnpm", "graphql-codegen"]),
+    ],
+    source="/workspace",
+    include=["src/gql"],
+)
+```
+
+vamos looks for the `WORKSPACE` file in the directory given with `-C` and the directories above it; without one,
+labels are relative to `-C`. It loads only the `BUILD` files that the named targets need, and reports packages
+whose targets name each other in a cycle. On the command line, targets of `-C`'s own `BUILD` file can be named
+without a label:
+
+```
+vamos load layer strawberry-ui -C examples/strawberry-react/ui
+vamos build //backend:test //ui:lint -C examples/strawberry-react
+```
+
+See [examples/strawberry-react/](examples/strawberry-react/).
 
 ## Build
 
@@ -194,7 +244,7 @@ Run with full privileges, loading the image straight into the host's Docker:
 docker run --rm -it --privileged \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v "$PWD/examples/nodejs:/example" \
-  vamos load vamos-example -C /example
+  vamos load server vamos-example -C /example
 ```
 
 Or grant only what buildah needs:
@@ -206,7 +256,7 @@ docker run --rm -it \
   --security-opt apparmor=unconfined \
   --security-opt label=disable \
   -v "$PWD/examples/nodejs:/example" -v "$PWD/output:/output" \
-  vamos write /output/example.tar -t vamos-example -C /example
+  vamos write server /output/example.tar -t vamos-example -C /example
 ```
 
 This variant writes a tarball instead. To push, use `vamos push` and mount your credentials,

@@ -25,6 +25,6 @@ fix sooner, add `--min-release-age=0` to `npm install`.
 The image installs only the runtime dependencies. From the repository root:
 
 ```
-./vamos load vamos-example -C examples/nodejs
+./vamos load server vamos-example -C examples/nodejs
 docker run -i --rm vamos-example < examples/nodejs/echo-request.jsonl
 ```

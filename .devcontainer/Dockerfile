@@ -8,6 +8,7 @@ RUN dnf -y install \
     buildah \
     containers-common \
     docker-cli \
+    docker-compose \
     findutils \
     git \
     golang \
@@ -19,6 +20,7 @@ RUN dnf -y install \
     nodejs24 \
     nodejs24-npm \
     openssh-clients \
+    pnpm \
     procps-ng \
     python3 \
     tar \

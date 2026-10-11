@@ -11,6 +11,10 @@
 		{
 			"name": "examples/fastmcp",
 			"path": "examples/fastmcp"
+		},
+		{
+			"name": "examples/strawberry-react",
+			"path": "examples/strawberry-react"
 		}
 	],
 	"settings": {
