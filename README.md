@@ -4,9 +4,11 @@ A Go CLI that uses the [buildah](https://github.com/containers/buildah) library 
 a container image described by a `BUILD` file written in [Starlark](https://github.com/bazelbuild/starlark).
 
 ```
-vamos push <image>              # push to a registry, e.g. ghcr.io/me/app:1.0
-vamos load <image>              # load into the local Docker daemon, e.g. app:dev
-vamos write <file.tar> [-t app] # write a tarball that `docker load` can import
+vamos push <image>                # push to a registry, e.g. ghcr.io/me/app:1.0
+vamos load <image>                # load into the local Docker daemon, e.g. app:dev
+vamos write <file.tar> [-t app]   # write a tarball that `docker load` can import
+vamos build <step>... [--rebuild] # build steps into the build cache, e.g. packages
+vamos prune                       # empty the build cache
 ```
 
 Each command builds from the `BUILD` file in the current directory, or in the directory
@@ -21,6 +23,39 @@ given with `-C <dir>`. Image names without a tag get `:latest`.
   replaced only once the new image is complete.
 
 Run `vamos <command> --help` for details.
+
+## Build cache
+
+Each step's result is cached, and a later build reuses it instead of running the step again, as long as
+the step's inputs are the same: its base image, its arguments, and the content, modes and links of its
+sources. Modification times and step names aren't inputs, so touching a file or renaming a step doesn't
+make it run again. A build says which steps it reused, and replays what they printed when they ran:
+
+```
+layer "packages": cached
+layer "dev-packages": cached
+task "compile": building
+layer "server": cached
+```
+
+A cached result is reused even if running the step again would make something different, as when it
+downloads the latest version of a dependency. `push`, `load` and `write` never run a cached step again.
+To run one again, pass its name to `vamos build --rebuild`, which runs the named steps again, reusing the
+steps they use, and replaces their results; steps that use them then run again if their files changed.
+Naming a `pull()` pulls it again, in case its tag names a newer image.
+
+```
+vamos build packages --rebuild
+```
+
+Layers are kept as images named `localhost/vamos-cache:<id>` in the container store, and the rest of the
+cache beside it, in `/var/lib/containers/vamos`, so a volume on `/var/lib/containers` keeps both. Nothing is
+removed until `vamos prune`, which empties the cache but keeps pulled images.
+
+So that the same inputs make the same image, every file a step adds is stamped with the creation time of
+the pulled images it is built on, which is also the image's creation time. `--timestamp` gives a later time
+to stamp steps that run with, in Unix seconds or as `2026-01-01T00:00:00Z`; it isn't an input, so steps
+that are reused keep the time they were built with.
 
 ## BUILD files
 
@@ -83,10 +118,10 @@ layer(
 
 The last `layer()` makes the image. Every other step must be used by a later `layer()` or `task()`, as its base
 or in its sources, so nothing is declared but left out. A layer keeps its base's files and command, as Docker's `FROM`
-does; the images of earlier layers are discarded once the last one is done. A pulled image is kept in local
-storage and reused. `base="scratch"` starts from an empty image, so no step may be named `scratch`.
-A task's image is discarded once its files are collected, so its base can hold build tools the image
-doesn't need. A task can't be a base.
+does; only the last one's image is sent, and the others are kept in the build cache. A pulled image is kept
+in local storage and reused. `base="scratch"` starts from an empty image, so no step may be named `scratch`.
+A task's image is discarded once its files are collected and cached, so its base can hold build tools the
+image doesn't need. A task can't be a base.
 
 Sources keep their paths relative to the `BUILD` file, or to a task's `source`, beneath `destination`: with
 `include=["src/main.ts"]` and `destination="/app"`, the file lands at `/app/src/main.ts`. A directory brings
@@ -116,7 +151,8 @@ go test -short ./...   # command line and BUILD file checks only
 
 Image builds use `busybox` from Docker Hub. `push` is tested against an in-process registry
 and `load` against a fake Docker daemon; if a real Docker daemon is running, `load` is also
-checked against it.
+checked against it. The tests use the machine's build cache, and one of them empties it, so the
+next build of your own project runs every step again.
 
 ## Run
 
@@ -148,7 +184,7 @@ docker run --rm -it \
 This variant writes a tarball instead. To push, use `vamos push` and mount your credentials,
 e.g. `-v ~/.docker/config.json:/root/.docker/config.json:ro`.
 
-On success it prints `Image built! <destination> <image-id>`.
+On success `push`, `load` and `write` print `Image built! <destination> <image-id>`.
 
 ## Run the built image
 

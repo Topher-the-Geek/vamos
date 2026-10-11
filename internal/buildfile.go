@@ -18,8 +18,11 @@ import (
 
 // buildFile is the sequence of steps declared by a BUILD file. Its last layer makes the image.
 type buildFile struct {
-	pulls []*pullSpec // in the order declared
-	steps []*stepSpec // layers and tasks, in the order declared; each uses only earlier steps
+	path  string            // of the BUILD file, for messages
+	names []string          // of every step, globs included, in the order declared
+	kinds map[string]string // each step's kind, by name: "glob", "pull", "layer" or "task"
+	pulls []*pullSpec       // in the order declared
+	steps []*stepSpec       // layers and tasks, in the order declared; each uses only earlier steps
 }
 
 // final returns the index in steps of the last layer, which makes the image.
@@ -82,7 +85,7 @@ func loadBuildFile(fsys afero.Fs, dir string) (*buildFile, error) {
 		return nil, err
 	}
 
-	file := &buildFile{}
+	file := &buildFile{path: buildPath, kinds: map[string]string{}}
 	fileSets := map[string]*fileSet{}    // globs and tasks, by name
 	declared := map[string]declaration{} // each step's name
 	used := map[string]bool{}            // names of steps that are a base or a source
@@ -101,6 +104,8 @@ func loadBuildFile(fsys afero.Fs, dir string) (*buildFile, error) {
 		}
 		fn := thread.CallFrame(0).Name
 		declared[name] = declaration{kind: fn, pos: thread.CallFrame(1).Pos}
+		file.names = append(file.names, name)
+		file.kinds[name] = fn
 		if fn == "glob" || fn == "task" {
 			files = append(files, name)
 		} else {
@@ -313,6 +318,84 @@ func loadBuildFile(fsys afero.Fs, dir string) (*buildFile, error) {
 	return file, nil
 }
 
+// targets checks the names of steps to build, given on the command line, and returns them
+// without repeats.
+func (f *buildFile) targets(names []string) ([]string, error) {
+	var targets []string
+	for _, name := range names {
+		switch f.kinds[name] {
+		case "":
+			hint := "; its steps are " + quoteNames(f.names)
+			if closest := closestName(name, f.names); closest != "" {
+				hint = fmt.Sprintf("; did you mean %q?", closest)
+			}
+			return nil, fmt.Errorf("%s has no step %q%s", f.path, name, hint)
+		case "glob":
+			return nil, fmt.Errorf("%q is a glob(), whose files are read by every build; "+
+				"name a pull(), layer() or task() to build", name)
+		}
+		if !slices.Contains(targets, name) {
+			targets = append(targets, name)
+		}
+	}
+	return targets, nil
+}
+
+// needs returns the names of the pulls, layers and tasks that building targets runs:
+// the targets themselves, and the steps they use, directly or not.
+func (f *buildFile) needs(targets []string) map[string]bool {
+	needed := map[string]bool{}
+	for _, name := range targets {
+		needed[name] = true
+	}
+	// Steps use only earlier steps, so one pass from the last finds everything.
+	for _, s := range slices.Backward(f.steps) {
+		if !needed[s.name] {
+			continue
+		}
+		needed[s.base] = true
+		for _, set := range s.sources {
+			if set.task != nil {
+				needed[set.task.name] = true
+			}
+		}
+	}
+	return needed
+}
+
+// closestName returns the name in names nearest to name, as a likely misspelling of it, or
+// "" if none is near enough.
+func closestName(name string, names []string) string {
+	closest, best := "", max(2, len(name)/3)+1
+	for _, candidate := range names {
+		if d := editDistance(name, candidate); d < best {
+			closest, best = candidate, d
+		}
+	}
+	return closest
+}
+
+// editDistance returns the number of single-byte insertions, deletions and substitutions that
+// turn a into b.
+func editDistance(a, b string) int {
+	row := make([]int, len(b)+1)
+	for j := range row {
+		row[j] = j
+	}
+	for i := 1; i <= len(a); i++ {
+		diagonal := row[0]
+		row[0] = i
+		for j := 1; j <= len(b); j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			diagonal, row[j] = row[j], min(row[j]+1, row[j-1]+1, diagonal+cost)
+		}
+	}
+	return row[len(b)]
+}
+
 // declaration records where a step's name was declared, and by which builtin.
 type declaration struct {
 	kind string // "glob", "pull", "layer" or "task"
@@ -347,11 +430,16 @@ func describeNames(kind string, names []string) string {
 	if len(names) == 0 {
 		return "; there are none before this"
 	}
+	return "; earlier " + kind + " are " + quoteNames(names)
+}
+
+// quoteNames lists names, quoted, for a message.
+func quoteNames(names []string) string {
 	quoted := make([]string, len(names))
 	for i, name := range names {
 		quoted[i] = strconv.Quote(name)
 	}
-	return "; earlier " + kind + " are " + strings.Join(quoted, ", ")
+	return strings.Join(quoted, ", ")
 }
 
 // describeEvalError reports e at the innermost position within a BUILD file, in the

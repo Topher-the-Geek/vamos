@@ -9,7 +9,9 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	dockerclient "github.com/moby/moby/client"
 	"github.com/moby/moby/client/pkg/jsonmessage"
@@ -27,6 +29,7 @@ import (
 func NewRootCommand(fsys afero.Fs) *cobra.Command {
 	var dir string
 	var tlsVerify bool
+	var timestamp timestampFlag
 
 	root := &cobra.Command{
 		Use:   "vamos",
@@ -57,32 +60,42 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 	root.PersistentFlags().StringVarP(&dir, "dir", "C", ".", "directory containing the BUILD file")
 	root.PersistentFlags().BoolVar(&tlsVerify, "tls-verify", true,
 		"require HTTPS and verify certificates when contacting registries")
+	root.PersistentFlags().Var(&timestamp, "timestamp",
+		"stamp the files of steps that run no earlier than this time, in Unix seconds or RFC 3339")
 
-	// build builds the image described by dir/BUILD and sends it to dest.
-	build := func(cmd *cobra.Command, dest destination) error {
+	// readBuild reads dir/BUILD, returning the options for building from it.
+	readBuild := func(cmd *cobra.Command) (buildOptions, error) {
 		systemContext, err := newSystemContext(cmd, tlsVerify)
 		if err != nil {
-			return err
+			return buildOptions{}, err
 		}
 		absDir, err := filepath.Abs(dir)
 		if err != nil {
-			return err
+			return buildOptions{}, err
 		}
 		file, err := loadBuildFile(fsys, absDir)
 		if err != nil {
-			return err
+			return buildOptions{}, err
 		}
-
-		imageId, err := buildImage(cmd.Context(), buildOptions{
+		return buildOptions{
 			fs:            fsys,
 			dir:           absDir,
 			file:          file,
-			dest:          dest.ref,
-			action:        dest.action,
+			timestamp:     time.Time(timestamp),
 			systemContext: systemContext,
 			stdout:        cmd.OutOrStdout(),
 			stderr:        cmd.ErrOrStderr(),
-		})
+		}, nil
+	}
+
+	// build builds the image described by dir/BUILD and sends it to dest.
+	build := func(cmd *cobra.Command, dest destination) error {
+		options, err := readBuild(cmd)
+		if err != nil {
+			return err
+		}
+		options.dest, options.action = dest.ref, dest.action
+		imageId, err := buildImage(cmd.Context(), options)
 		if err != nil {
 			return err
 		}
@@ -203,7 +216,43 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 	}
 	write.Flags().StringVarP(&tag, "tag", "t", "", "image name to record in the tarball")
 
-	root.AddCommand(push, load, write)
+	var rebuild bool
+	buildSteps := &cobra.Command{
+		Use:   "build <step>...",
+		Short: "Build steps into the build cache",
+		Long: "Build the named steps of the BUILD file, and the steps they use, into the build cache, where\n" +
+			"push, load and write find them. Steps already cached are reused, unless --rebuild is given:\n" +
+			"then the named steps run again, though the steps they use are still reused. A pull() named\n" +
+			"with --rebuild is pulled again, in case its tag names a newer image.",
+		Example: "  vamos build packages\n  vamos build compile --rebuild",
+		Args:    atLeastOne("step name", "vamos build packages"),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			options, err := readBuild(cmd)
+			if err != nil {
+				return err
+			}
+			if options.targets, err = options.file.targets(args); err != nil {
+				return err
+			}
+			options.rebuild = rebuild
+			_, err = buildImage(cmd.Context(), options)
+			return err
+		},
+	}
+	buildSteps.Flags().BoolVar(&rebuild, "rebuild", false, "run the named steps again rather than reuse cached results")
+
+	prune := &cobra.Command{
+		Use:   "prune",
+		Short: "Remove everything from the build cache",
+		Long: "Remove the cached results of every step: the images of cached layers, from the container\n" +
+			"store, and the build cache beside it. Pulled images are kept.",
+		Args: noArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return pruneCache(cmd.OutOrStdout())
+		},
+	}
+
+	root.AddCommand(buildSteps, push, load, write, prune)
 	return root
 }
 
@@ -230,6 +279,57 @@ func exactlyOne(what, example string) cobra.PositionalArgs {
 		}
 		return nil
 	}
+}
+
+// atLeastOne requires one or more positional arguments, described by what and example.
+func atLeastOne(what, example string) cobra.PositionalArgs {
+	return func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			return fmt.Errorf("missing %s, e.g. %s", what, example)
+		}
+		return nil
+	}
+}
+
+// noArgs refuses positional arguments.
+func noArgs(cmd *cobra.Command, args []string) error {
+	if len(args) > 0 {
+		return fmt.Errorf("%s takes no arguments, got: %s", cmd.CommandPath(), strings.Join(args, " "))
+	}
+	return nil
+}
+
+// timestampFlag is the value of --timestamp: a time given in Unix seconds or in RFC 3339 form.
+type timestampFlag time.Time
+
+// String returns the time given, or "" if none was.
+func (f *timestampFlag) String() string {
+	if time.Time(*f).IsZero() {
+		return ""
+	}
+	return time.Time(*f).UTC().Format(time.RFC3339)
+}
+
+// Set parses value as Unix seconds or an RFC 3339 time, no earlier than 1970.
+func (f *timestampFlag) Set(value string) error {
+	t, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		seconds, parseErr := strconv.ParseInt(value, 10, 64)
+		if parseErr != nil {
+			return errors.New("want Unix seconds, such as 1767225600, or a time such as 2026-01-01T00:00:00Z")
+		}
+		t = time.Unix(seconds, 0)
+	}
+	if t.Before(time.Unix(0, 0)) {
+		return errors.New("must not be before 1970")
+	}
+	*f = timestampFlag(t)
+	return nil
+}
+
+// Type names the kind of value the flag takes, for help.
+func (f *timestampFlag) Type() string {
+	return "time"
 }
 
 // parseImageName parses a name such as "app" or "ghcr.io/me/app:1.0", adding

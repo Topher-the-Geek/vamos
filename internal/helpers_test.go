@@ -96,33 +96,42 @@ func diskProject(t *testing.T, files, links map[string]string) (fsys afero.Fs, r
 }
 
 // unnamedImages returns the IDs of the images in the local container store that have no
-// name, as the images of a BUILD file's intermediate steps do.
+// name, such as an image a failed step might leave behind. Cached layers' images are named.
 func unnamedImages(t *testing.T) map[string]bool {
 	t.Helper()
-	options, err := storage.DefaultStoreOptions()
-	if err != nil {
-		t.Fatal(err)
-	}
-	store, err := storage.GetStore(options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Shutdown(false)
-	images, err := store.Images()
-	if err != nil {
-		t.Fatal(err)
-	}
+	return imageIDs(t, func(img storage.Image) bool { return len(img.Names) == 0 })
+}
+
+// imageIDs returns the IDs of the images in the local container store for which keep is true.
+func imageIDs(t *testing.T, keep func(storage.Image) bool) map[string]bool {
+	t.Helper()
 	ids := map[string]bool{}
-	for _, img := range images {
-		if len(img.Names) == 0 {
-			ids[img.ID] = true
+	withStore(t, func(store storage.Store) {
+		images, err := store.Images()
+		must(t, err)
+		for _, img := range images {
+			if keep(img) {
+				ids[img.ID] = true
+			}
 		}
-	}
+	})
 	return ids
 }
 
+// withStore calls use with the local container store, open only until use returns, since each
+// vamos run opens and shuts it too.
+func withStore(t *testing.T, use func(storage.Store)) {
+	t.Helper()
+	options, err := storage.DefaultStoreOptions()
+	must(t, err)
+	store, err := storage.GetStore(options)
+	must(t, err)
+	defer store.Shutdown(false)
+	use(store)
+}
+
 // assertNoNewImages fails the test if the local container store has unnamed images that
-// aren't in before, such as an intermediate step's image left behind.
+// aren't in before.
 func assertNoNewImages(t *testing.T, before map[string]bool) {
 	t.Helper()
 	for id := range unnamedImages(t) {
@@ -169,6 +178,15 @@ func (r result) succeeds(t *testing.T) result {
 	}
 	if !strings.Contains(r.stdout, "Image built!") {
 		t.Errorf("stdout = %q, want it to report the image built", r.stdout)
+	}
+	return r
+}
+
+// ran fails the test unless r, a command that sends no image, such as build or prune, succeeded.
+func (r result) ran(t *testing.T) result {
+	t.Helper()
+	if r.err != nil {
+		t.Fatalf("vamos failed: %v\nstdout:\n%s\nstderr:\n%s", r.err, r.stdout, r.stderr)
 	}
 	return r
 }
@@ -349,5 +367,13 @@ func fakeDocker(t *testing.T, network, reply string) func() [][]byte {
 		mu.Lock()
 		defer mu.Unlock()
 		return loaded
+	}
+}
+
+// must fails the test at once if err isn't nil.
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
 	}
 }

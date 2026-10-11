@@ -75,10 +75,72 @@ func TestCommandLineMistakes(t *testing.T) {
 			args: []string{"push", "app", "--tls-verify=maybe"},
 			want: []string{`invalid argument "maybe"`, "--tls-verify"},
 		},
+		{
+			name: "build without steps",
+			args: []string{"build"},
+			want: []string{"missing step name", "vamos build packages"},
+		},
+		{
+			name: "rebuild on push",
+			args: []string{"push", "app", "--rebuild"},
+			want: []string{"unknown flag: --rebuild"},
+		},
+		{
+			name: "prune with argument",
+			args: []string{"prune", "all"},
+			want: []string{"vamos prune takes no arguments, got: all"},
+		},
+		{
+			name: "timestamp not a time",
+			args: []string{"write", "app.tar", "--timestamp", "yesterday"},
+			want: []string{`invalid argument "yesterday"`, "--timestamp", "want Unix seconds"},
+		},
+		{
+			name: "timestamp before 1970",
+			args: []string{"build", "app", "--timestamp=-1"},
+			want: []string{`invalid argument "-1"`, "must not be before 1970"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			vamos(t, project(t, validBuild), tt.args...).failsWith(t, true, tt.want...)
+		})
+	}
+}
+
+// TestBuildStepMistakes checks that naming steps `vamos build` can't build is reported before
+// anything is built.
+func TestBuildStepMistakes(t *testing.T) {
+	build := pullBusybox + `
+glob(name="code", include=["app.sh"])
+layer(name="packages", base="busybox", sources=["code"], destination="/app")
+`
+	tests := []struct {
+		name  string
+		steps []string
+		want  []string
+	}{
+		{
+			name:  "misspelled step",
+			steps: []string{"pakcages"},
+			want:  []string{`/project/BUILD has no step "pakcages"; did you mean "packages"?`},
+		},
+		{
+			name:  "unknown step",
+			steps: []string{"packages", "server"},
+			want:  []string{`/project/BUILD has no step "server"; its steps are "busybox", "code", "packages"`},
+		},
+		{
+			name:  "glob",
+			steps: []string{"code"},
+			want:  []string{`"code" is a glob(), whose files are read by every build`},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fsys := project(t, map[string]string{"BUILD": build, "app.sh": ""})
+			args := append([]string{"build", "-C", projectDir}, tt.steps...)
+			vamos(t, fsys, args...).failsWith(t, false, tt.want...)
 		})
 	}
 }
@@ -95,7 +157,7 @@ func TestNoCommandShowsHelp(t *testing.T) {
 	if r.err != nil {
 		t.Fatal(r.err)
 	}
-	for _, want := range []string{"push", "load", "write"} {
+	for _, want := range []string{"build", "push", "load", "write", "prune"} {
 		if !strings.Contains(r.stdout, want) {
 			t.Errorf("help = %q, want it to list %q", r.stdout, want)
 		}

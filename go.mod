@@ -7,6 +7,7 @@ require (
 	github.com/docker/distribution v2.8.3+incompatible
 	github.com/google/go-containerregistry v0.21.6
 	github.com/moby/moby/client v0.5.1
+	github.com/opencontainers/go-digest v1.0.0
 	github.com/sirupsen/logrus v1.9.4
 	github.com/spf13/afero v1.15.0
 	github.com/spf13/cobra v1.10.2
@@ -87,7 +88,6 @@ require (
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.3-0.20250322232337-35a7c28c31ee // indirect
 	github.com/opencontainers/cgroups v0.0.8 // indirect
-	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/opencontainers/runc v1.5.1 // indirect
 	github.com/opencontainers/runtime-spec v1.3.0 // indirect
