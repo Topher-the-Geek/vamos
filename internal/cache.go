@@ -24,12 +24,12 @@ import (
 // of files and logs, and an action cache, which maps each target's key to its latest result.
 // The images of layers are kept in the container store instead, and results name them by digest.
 type cache struct {
-	dir string // holds cas/sha256/<hex>, ac/<hex> and tmp/
+	dir string // holds cas/sha256/<hex>, ac/<hex>, tags/<hex> and tmp/
 }
 
 // openCache opens the cache in dir, creating it if need be.
 func openCache(dir string) (*cache, error) {
-	for _, sub := range []string{"cas/sha256", "ac", "tmp"} {
+	for _, sub := range []string{"cas/sha256", "ac", "tags", "tmp"} {
 		if err := os.MkdirAll(filepath.Join(dir, sub), 0o700); err != nil {
 			return nil, fmt.Errorf("opening build cache: %w", err)
 		}
@@ -357,18 +357,19 @@ func fileModeOf(bits uint32) fs.FileMode {
 
 // actionVersion changes whenever what a key covers, or how a target is built, changes, so that
 // results built the old way aren't reused.
-const actionVersion = 4
+const actionVersion = 6
 
 // action is everything a target's result depends on. Its digest is the target's key in the
 // action cache. Target names are left out, so renaming a target keeps its results.
 type action struct {
-	Version int          `json:"version"`
-	Kind    string       `json:"kind"`              // "layer" or "task"
-	Base    string       `json:"base"`              // image ID of the base, or "scratch"
-	Steps   []actionStep `json:"steps,omitempty"`   // in the order applied
-	Command []string     `json:"command,omitempty"` // a layer's default command
-	Source  string       `json:"source,omitempty"`  // a task's directory of output
-	Output  *selection   `json:"output,omitempty"`  // a task's output, within source
+	Version  int          `json:"version"`
+	Kind     string       `json:"kind"`               // "layer" or "task"
+	Base     string       `json:"base"`               // image ID of the base, or "scratch"
+	Platform string       `json:"platform,omitempty"` // a layer's, as its image records it
+	Steps    []actionStep `json:"steps,omitempty"`    // in the order applied
+	Command  []string     `json:"command,omitempty"`  // a layer's default command
+	Source   string       `json:"source,omitempty"`   // a task's directory of output
+	Output   *selection   `json:"output,omitempty"`   // a task's output, within source
 }
 
 // actionStep is one step of an action. Op says which step, and which other
@@ -376,6 +377,7 @@ type action struct {
 type actionStep struct {
 	Op    string   `json:"op"`              // "add", "run", "env", "build_env" or "workdir"
 	Files *blob    `json:"files,omitempty"` // add: tree of the files, as placed beneath dest
+	Epoch int64    `json:"epoch,omitempty"` // add: a task's epoch, in Unix seconds; it stamps what adds its files
 	Dest  string   `json:"dest,omitempty"`  // add
 	Owner string   `json:"owner,omitempty"` // add
 	Group string   `json:"group,omitempty"` // add

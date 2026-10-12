@@ -16,8 +16,11 @@ file) holds a `BUILD` file per package, which name each other's targets by label
 - `internal/cli.go` — Cobra commands, argument checks, destinations (`docker://`, `docker-daemon:`,
   `docker-archive:`).
 - `internal/buildfile.go` — finds the workspace, runs each package's `BUILD` with starlark-go as labels
-  name it, and validates its `glob()`, `pull()`, `layer()` and `task()` targets, and the `add()` steps
-  that name other targets.
+  name it, and `.star` files as `load()` names them, and validates its `glob()`, `pull()`, `layer()` and
+  `task()` targets, and the `add()` steps that name other targets.
+- `internal/config.go` — targets' parameters (`params`, `param()`), `dep()` and `arg()`, each target's
+  configurations (its platform and arguments) and `ctx`, and the configuration phase: the graph of each target the
+  named targets need, in each configuration it's needed in.
 - `internal/glob.go` — the selection of a glob's or task's files: include and exclude patterns, mode mask and
   limits, and the walk that reads only the folders they could match into a tree for the cache.
 - `internal/step.go` — the other steps a layer or task applies in order (`run()`, `env()`,
@@ -25,11 +28,14 @@ file) holds a `BUILD` file per package, which name each other's targets by label
   itself with buildah. Add new kinds here.
 - `internal/image.go` — pulls, then runs each layer and task the named targets need with buildah, or reuses
   its cached result, and copies the named target's image to the destination.
+- `internal/pull.go` — resolves each `pull()`'s tag once, recording what it named in the build cache, and pulls
+  the image for each platform a build needs by digest.
 - `internal/cache.go` — the build cache: a content-addressed store of files, trees and logs, and an action
   cache from each target's key to its latest result. Layers' images stay in the container store.
 - `examples/` — sample `BUILD` projects: `typescript-mcp/` (TypeScript) and `fastmcp/` (Python), each an MCP server
-  with an echo tool, and `strawberry-react/`, a workspace whose UI package uses the backend's GraphQL
-  schema. Each has its own lint and tests; see its README.
+  with an echo tool; `strawberry-react/`, a workspace whose UI package uses the backend's GraphQL schema, built
+  as indexes for two platforms, with parameters for the mode and languages; and `golang-cli/`, a Go command
+  cross-compiled for two platforms. Each has its own lint and tests; see its README.
 
 ## Environment
 
@@ -111,9 +117,10 @@ docker build -q . -t vamos \
   -c 'mkdir /example && tar -x -C /example && vamos load server vamos-example:image -C /example' \
   && docker run -i --rm vamos-example:image < examples/typescript-mcp/echo-request.jsonl
 
-# 5. The fastmcp example. Its SDK cancels pending requests when stdin closes, so hold stdin open.
+# 5. The fastmcp example. Its SDK cancels pending requests when stdin closes, so hold stdin open long enough
+#    for it to start.
 ./vamos load server vamos-fastmcp -C examples/fastmcp \
-  && (cat examples/typescript-mcp/echo-request.jsonl; sleep 2) | docker run -i --rm vamos-fastmcp
+  && (cat examples/typescript-mcp/echo-request.jsonl; sleep 6) | docker run -i --rm vamos-fastmcp
 
 # 6. The strawberry-react workspace, behind its compose file's ingress. The devcontainer can't reach the
 #    host's port 8080, so curl from the compose network. Expect the page's <title>, then the reply below.
@@ -128,6 +135,14 @@ S=examples/strawberry-react
 ```
 
 Check 6's reply is `{"data":{"increment":{"value":1}}}`.
+
+```
+# 7. The golang-cli example: an index, cross-compiled; load sends the daemon's platform's image. Expect "hola",
+#    from each platform's image.
+./vamos load echo vamos-echo -C examples/golang-cli && docker run --rm vamos-echo \
+  && ./vamos write //:layer "$TMP/echo.tar" -t vamos-echo:other --platform linux/amd64 -C examples/golang-cli \
+  && docker load -i "$TMP/echo.tar" && docker run --rm --platform linux/amd64 vamos-echo:other
+```
 
 `push` has no manual check here: the tests already push to a real (in-process) registry.
 
@@ -159,9 +174,22 @@ Errors are a feature here, and every user mistake should have a test for its mes
 ## Gotchas
 
 - A package's `BUILD` file is loaded when a label first names one of its targets, even partway through running
-  another `BUILD` file, so every target is declared after the targets it uses, and `workspace.targets` is
-  already in build order. An error inside the loaded file is a `loadError`, reported as it is rather than as
-  an error of the call that named its target.
+  another `BUILD` file, or while configuring. An error inside the loaded file is a `loadError`, reported as it is
+  rather than as an error of the call that named its target.
+- A `declaration` holds a *template* of its target, made and checked as the `BUILD` file runs, so its errors
+  say where. Only if an attribute is a function of `ctx` is the template made later, once per configuration
+  (`workspace.template`). `params` is never a function, so a target's parameters are known as it is declared, and
+  `dep()` checks its arguments then. Configuring turns templates into *instances* (`targetSpec`, `pullSpec`,
+  `fileSet`), one per target and configuration (`confLabel`), which the build runs in the order
+  `workspace.configure` returns. A configuration belongs to one target: its platform and a value for each of its
+  parameters, and `workspace.edge` works out each used target's from the using one's. Labels outside functions
+  name earlier targets, but those in functions needn't, so `configurer` reports cycles.
+- `arg()` runs before the call declaring the target that uses it, so it records its position, and the declarer
+  (or `template`, for what functions give) checks its name (`checkArgNames`), reporting it there with `posError`.
+  Its value's type is only checked by `edge`, as the using target is configured.
+- Builtins are made once per workspace and read what's calling them from the thread's `evalContext`: a `BUILD`
+  file running, a function of `ctx` (which can't declare targets), or a `.star` file loading. A function from a
+  `.star` file thus resolves labels against the `BUILD` file or target it runs for.
 - Checks that touch the filesystem, such as that a glob's patterns' leading folders exist, run only for the
   targets a command needs (`checkSources`). There are no workspace-wide checks. Whether patterns match any file,
   and the limits, are checked by the walk, as the files are read.
@@ -186,19 +214,39 @@ Errors are a feature here, and every user mistake should have a test for its mes
 - `collectOutput` reads a task's files from its mounted container on the host, where an absolute link
   would point at the host's own files. So it resolves `source` with `securejoin` and refuses links
   along included paths; `TestTaskOutputLinks` and `TestTaskFailures` cover this.
-- Only `pull()` reaches registries: layers use `PullNever` on image IDs (or `scratch`). Every layer is
+- Only `pull()` reaches registries: layers use `PullNever` on image IDs (or `scratch`). A pull resolves its tag
+  once and records the manifest it names, and each platform's image in it, in the build cache (`tagRecord`, kept by
+  `prune`), so later builds don't reach the registry until `--rebuild`. Pulled images are named by digest in the
+  store, since a tag can name only one image there, and every platform's would need it. Find a pulled image with
+  `ImagesByDigest` before calling `buildah.Pull`, which asks the registry even when the store has the image:
+  Docker Hub allows 100 anonymous pulls an hour, and then stalls requests, so a test run would hang
+  (`TestPullTag` counts requests). Every layer is
   cached: committed to local storage and named `localhost/vamos-cache:<image ID>`, so that tools removing
   unnamed images leave it alone. The named target's is then sent with `copy.Image`, under the system's signature
   policy, not `buildah.Push`, which re-parses the destination as a string. A target that fails leaves no
   unnamed image; tests check this with `assertNoNewImages`.
 - The build cache (`internal/cache.go`) sits beside the container store, in `/var/lib/containers/vamos`. Tests
   share it, and a reused target prints `cached` rather than `building`, so tests about caching put a value unique
-  to the run (`newNonce`) in their targets. `TestPrune` empties the cache, so the run after a full test run
-  builds every target again.
+  to the run (`newNonce`) in their targets. `TestPrune` and `TestPullTag` empty the cache, so the run after a full
+  test run builds every target again.
 - Layers are committed with `HistoryTimestamp`, which sets every file a layer adds to the target's epoch: the
   latest of its base's and its added tasks' epochs (a pulled image's is its creation time) and `--timestamp`.
   `RewriteTimestamp` only moves times earlier, which would leave build times and source files' own times in
   layers, so the same inputs could make different layers.
+- A target's key covers each added task's epoch as well as its files (`actionStep.Epoch`), since trees hold no
+  times and the same files can come with a later epoch (`TestTaskEpochInKey`). The base's epoch needs no field,
+  as its image ID fixes it. `--timestamp` is deliberately not an input: targets reused keep their time.
+- A configuration's `platform` is its own field, which every edge passes on unless `dep()` gives another. A layer's
+  action includes it, since
+  a layer on `scratch` has no base to tell platforms apart; a task's doesn't, since only its base and steps
+  matter. A layer's base must be for its platform (`setPlatform`). Pass `forPlatform` contexts to buildah, or it
+  warns about images for other platforms than the host's. Emulated steps run through the kernel's binfmt_misc
+  handlers, which Docker Desktop registers for amd64 (Rosetta) and qemu's architectures; buildah prints "exec format
+  error" itself, so vamos can only hint at it (`emulatorHint`).
+- An `index()` is only ever named on the command line: `roots` in `cli.go` turns it into its manifests, or, for
+  `load` and `write`, which take one image, the one for the destination's platform, before configuring, so that
+  the others aren't built. `sendIndex` pushes it through a temporary OCI layout, since containers/image copies an
+  index, with `CopyAllImages`, only from a source that holds one.
 - `--tls-verify=false` lets a registry use plain HTTP, both for pushing and for pulling the base image.
   Without the flag, `registries.conf` decides, so leave `DockerInsecureSkipTLSVerify` unset.
 

@@ -260,7 +260,8 @@ func TestWorkspaceTargetMistakes(t *testing.T) {
 		{
 			name: "send a task",
 			args: []string{"load", "//lib:make", "app"},
-			want: `"//lib:make" is a task(), whose image is discarded once it runs; name a pull() or layer() to send`,
+			want: `"//lib:make" is a task(), whose image is discarded once it runs; ` +
+				"name a pull(), layer() or index() to send",
 		},
 	}
 	for _, tt := range tests {

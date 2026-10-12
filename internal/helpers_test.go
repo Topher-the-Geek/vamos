@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -181,7 +182,7 @@ func (r result) succeeds(t *testing.T) result {
 	if r.err != nil {
 		t.Fatalf("vamos failed: %v\nstdout:\n%s\nstderr:\n%s", r.err, r.stdout, r.stderr)
 	}
-	if !strings.Contains(r.stdout, "Image built!") {
+	if !strings.Contains(r.stdout, " built! ") {
 		t.Errorf("stdout = %q, want it to report the image built", r.stdout)
 	}
 	return r
@@ -212,7 +213,7 @@ func (r result) failsWith(t *testing.T, usage bool, wants ...string) result {
 	if got := strings.Contains(r.stdout+r.stderr, "Usage:"); got != usage {
 		t.Errorf("printed usage = %v, want %v; stdout:\n%s\nstderr:\n%s", got, usage, r.stdout, r.stderr)
 	}
-	if strings.Contains(r.stdout, "Image built!") {
+	if strings.Contains(r.stdout, " built! ") {
 		t.Errorf("stdout = %q, want no image reported after an error", r.stdout)
 	}
 	return r
@@ -306,11 +307,17 @@ func imagePath(hdr *tar.Header) string {
 	return "/" + strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(hdr.Name, "./"), "/"), "/")
 }
 
-// fakeDocker serves the parts of the Docker Engine API that loading an image uses,
+// fakeDocker serves the parts of the Docker Engine API that loading an image uses, on an amd64 machine,
 // over plain HTTP on a "unix" socket or a "tcp" port, and points DOCKER_HOST at it.
 // It answers loads with reply, a stream of JSON messages, or reports success if reply
 // is empty. It returns the tarballs loaded.
 func fakeDocker(t *testing.T, network, reply string) func() [][]byte {
+	t.Helper()
+	return fakeDockerOn(t, network, reply, "x86_64")
+}
+
+// fakeDockerOn is fakeDocker on a machine whose architecture uname names machine, such as "armv7l".
+func fakeDockerOn(t *testing.T, network, reply, machine string) func() [][]byte {
 	t.Helper()
 	var listener net.Listener
 	var err error
@@ -344,6 +351,10 @@ func fakeDocker(t *testing.T, network, reply string) func() [][]byte {
 		case strings.HasSuffix(r.URL.Path, "/_ping"):
 			w.Header().Set("API-Version", "1.45")
 			io.WriteString(w, "OK")
+		case strings.HasSuffix(r.URL.Path, "/info"):
+			// The daemon runs on machine, as uname names it, whatever machine the tests run on.
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"OSType":"linux","Architecture":%q}`, machine)
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/images/load"):
 			b, err := io.ReadAll(r.Body)
 			if err != nil {

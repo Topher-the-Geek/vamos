@@ -1,0 +1,5 @@
+{
+  "count": "count is {value}",
+  "error": "Error: {message}",
+  "loading": "Loading..."
+}

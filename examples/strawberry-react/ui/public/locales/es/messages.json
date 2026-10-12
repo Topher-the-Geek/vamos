@@ -1,0 +1,5 @@
+{
+  "count": "la cuenta es {value}",
+  "error": "Error: {message}",
+  "loading": "Cargando..."
+}

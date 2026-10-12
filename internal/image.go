@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,18 +15,22 @@ import (
 	"strings"
 	"time"
 
+	"github.com/containerd/platforms"
 	securejoin "github.com/cyphar/filepath-securejoin"
 	"github.com/docker/distribution/registry/api/errcode"
 	v2 "github.com/docker/distribution/registry/api/v2"
 	"github.com/opencontainers/go-digest"
+	"github.com/opencontainers/image-spec/specs-go"
+	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/spf13/afero"
 	"go.podman.io/buildah"
 	"go.podman.io/buildah/define"
 	"go.podman.io/buildah/pkg/parse"
-	"go.podman.io/common/pkg/config"
+	containersconfig "go.podman.io/common/pkg/config"
 	imagecopy "go.podman.io/image/v5/copy"
 	"go.podman.io/image/v5/docker"
 	"go.podman.io/image/v5/manifest"
+	"go.podman.io/image/v5/oci/layout"
 	"go.podman.io/image/v5/signature"
 	is "go.podman.io/image/v5/storage"
 	"go.podman.io/image/v5/types"
@@ -35,7 +40,8 @@ import (
 // buildOptions describes one build: of a target's image, sent to dest, or else of targets, kept in the cache.
 type buildOptions struct {
 	workspace *workspace
-	targets   []string                             // labels of the targets to build: if dest is set, the one to send
+	targets   []confLabel                          // the targets to build: if dest is set, the image to send
+	index     bool                                 // send targets, each a manifest, as an index, rather than one image
 	dest      func() (types.ImageReference, error) // called once the image is ready to commit
 	action    string                               // describes sending the image, e.g. "pushing to app:latest"
 
@@ -51,13 +57,16 @@ type buildOptions struct {
 // target's result is kept in the build cache, and reused instead of running the target again whenever
 // a later build gives it the same inputs, unless it is a target to rebuild.
 func buildImage(ctx context.Context, o buildOptions) (string, error) {
-	needed := o.workspace.needs(o.targets)
-	if err := o.workspace.checkSources(needed); err != nil {
+	g, err := o.workspace.configure(o.targets)
+	if err != nil {
 		return "", err
 	}
-	rebuild := map[string]bool{}
-	for _, l := range o.targets {
-		rebuild[l] = o.rebuild
+	if err := o.workspace.checkSources(g); err != nil {
+		return "", err
+	}
+	rebuild := map[confLabel]bool{}
+	for _, cl := range o.targets {
+		rebuild[cl] = o.rebuild
 	}
 
 	buildStoreOptions, err := storage.DefaultStoreOptions()
@@ -75,26 +84,34 @@ func buildImage(ctx context.Context, o buildOptions) (string, error) {
 	}
 
 	// Pull everything first, so a bad image name is reported before any slow target runs.
-	images := map[string]builtImage{
-		scratch: {id: scratch, epoch: time.Unix(0, 0)}, // buildah starts an empty image from this name
+	images := map[confLabel]builtImage{
+		{label: scratch}: {id: scratch, epoch: time.Unix(0, 0)}, // buildah starts an empty image from this name
 	}
-	for _, p := range o.workspace.pulls {
-		if !needed[p.label] {
-			continue
+	pl := &puller{
+		store:         buildStore,
+		cache:         buildCache,
+		systemContext: o.systemContext,
+		tags:          map[string]*tagRecord{},
+		again:         map[string]bool{},
+	}
+	for _, p := range g.pulls {
+		// Every pull of a tag that one pulls again gets the image it names now, even if pulled before that one.
+		if rebuild[p.id] {
+			pl.again[p.image.String()] = true
 		}
-		name := o.workspace.display(p.label)
-		policy := buildah.PullIfMissing
-		if rebuild[p.label] {
+	}
+	for _, p := range g.pulls {
+		name := o.describe("pull", p.id)
+		if rebuild[p.id] {
 			// The tag may name a newer image now.
-			fmt.Fprintf(o.stdout, "pull %q: pulling again\n", name)
-			policy = buildah.PullAlways
+			fmt.Fprintf(o.stdout, "%s: pulling again\n", name)
 		}
-		if images[p.label], err = pullImage(ctx, buildStore, p, policy, o.systemContext); err != nil {
-			return "", fmt.Errorf("pull %q: %w", name, err)
+		if images[p.id], err = pl.pull(ctx, p, platformOf(p.id)); err != nil {
+			return "", fmt.Errorf("%s: %w", name, err)
 		}
 	}
 
-	conf, err := config.Default()
+	conf, err := containersconfig.Default()
 	if err != nil {
 		return "", err
 	}
@@ -116,18 +133,29 @@ func buildImage(ctx context.Context, o buildOptions) (string, error) {
 		images:       images,
 		trees:        map[*fileSet]setTree{},
 	}
-	for _, s := range o.workspace.targets {
-		if !needed[s.label] {
-			continue
-		}
-		if err := r.runCached(ctx, s, rebuild[s.label]); err != nil {
+	for _, s := range g.targets {
+		if err := r.runCached(ctx, s, rebuild[s.id]); err != nil {
 			return "", err
 		}
 	}
-	if o.dest == nil {
+	switch {
+	case o.dest == nil:
 		return "", nil
+	case o.index:
+		return r.sendIndex(ctx)
 	}
 	return r.send(ctx, r.images[o.targets[0]].id)
+}
+
+// describe names the target cl, declared by kind, for messages, e.g. `layer "app"` or `task "//ui:build"`.
+// A target for another platform than the command's, or given arguments other than its defaults, is described
+// with them, e.g. `task "build" (platform=linux/arm64, mode="debug")`.
+func (o *buildOptions) describe(kind string, cl confLabel) string {
+	name := fmt.Sprintf("%s %q", kind, o.workspace.display(cl.label))
+	if diffs := o.workspace.describeConfig(cl); diffs != "" {
+		name += " (" + diffs + ")"
+	}
+	return name
 }
 
 // cacheDir returns where the build cache is kept: beside the container store, so that a volume
@@ -152,39 +180,9 @@ type setTree struct {
 	epoch time.Time // as for builtImage; zero for a glob
 }
 
-// pullImage fetches p's image into store, as policy says: unless it is already there, or always.
-func pullImage(
-	ctx context.Context, store storage.Store, p *pullSpec, policy define.PullPolicy,
-	systemContext *types.SystemContext,
-) (builtImage, error) {
-	image := p.image.String()
-	id, err := buildah.Pull(ctx, image, buildah.PullOptions{
-		Store:         store,
-		SystemContext: systemContext,
-		PullPolicy:    policy,
-	})
-	if err != nil {
-		if imageUnavailable(err) {
-			return builtImage{}, fmt.Errorf("image %q: %w (check the name, and log in if the image is private)",
-				image, err)
-		}
-		return builtImage{}, fmt.Errorf("image %q: %w", image, err)
-	}
-	// buildah.Pull can't be cancelled, so check for an interrupt after it.
-	if err := ctx.Err(); err != nil {
-		return builtImage{}, err
-	}
-	img, err := store.Image(id)
-	if err != nil {
-		return builtImage{}, fmt.Errorf("image %q: %w", image, err)
-	}
-	// Files built on the image are stamped with its creation time: a time that is the same on
-	// every machine, and that moves forward only when the image does.
-	epoch := img.Created
-	if epoch.IsZero() {
-		epoch = time.Unix(0, 0)
-	}
-	return builtImage{id: id, epoch: epoch}, nil
+// platformOf returns the platform that the target cl is built for.
+func platformOf(cl confLabel) *platformValue {
+	return cl.cfg.platform
 }
 
 // targetRunner runs the layers and tasks of a build.
@@ -194,16 +192,16 @@ type targetRunner struct {
 	cache        *cache
 	capabilities []string // given to run() steps, as root
 	isolation    define.Isolation
-	images       map[string]builtImage // the images of pulls and layers, by label, once they are ready
-	trees        map[*fileSet]setTree  // the files of globs and tasks, once they are ready
+	images       map[confLabel]builtImage // the images of pulls and layers, once they are ready
+	trees        map[*fileSet]setTree     // the files of globs and tasks, once they are ready
 }
 
-// describe names target s for messages, e.g. `layer "app"` or `task "//ui:build"`.
-func (r *targetRunner) describe(s *targetSpec) string {
+// describeTarget names target s for messages, as buildOptions.describe does.
+func (r *targetRunner) describeTarget(s *targetSpec) string {
 	if s.task {
-		return fmt.Sprintf("task %q", r.workspace.display(s.label))
+		return r.describe("task", s.id)
 	}
-	return fmt.Sprintf("layer %q", r.workspace.display(s.label))
+	return r.describe("layer", s.id)
 }
 
 // runCached makes the result of target s ready for later targets, reusing the result the cache
@@ -211,7 +209,7 @@ func (r *targetRunner) describe(s *targetSpec) string {
 // it did, and replays a reused target's output, so a build prints what the target printed. With
 // rebuild, it runs s even if its result is cached, and replaces that result.
 func (r *targetRunner) runCached(ctx context.Context, s *targetSpec, rebuild bool) error {
-	target := r.describe(s)
+	target := r.describeTarget(s)
 	a, err := r.inputs(s)
 	if err != nil {
 		return fmt.Errorf("%s: %w", target, err)
@@ -277,6 +275,9 @@ func (r *targetRunner) inputs(s *targetSpec) (*action, error) {
 	}
 	if s.task {
 		a.Kind = "task"
+	} else {
+		// A layer's image says what it is for, even one on scratch, which has no platform of its own.
+		a.Platform = platformOf(s.id).String()
 	}
 	if s.output != nil {
 		a.Source = s.source
@@ -290,6 +291,10 @@ func (r *targetRunner) inputs(s *targetSpec) (*action, error) {
 				return nil, err
 			}
 			entry.Files = &b
+			// The tree has no times, and the task's epoch can differ for the same files, e.g. after --rebuild.
+			if e := r.trees[set].epoch; !e.IsZero() {
+				entry.Epoch = e.Unix()
+			}
 		}
 		a.Steps = append(a.Steps, entry)
 	}
@@ -358,7 +363,7 @@ func (r *targetRunner) record(s *targetSpec, result *actionResult) {
 			r.trees[s.output] = setTree{tree: *result.Output, epoch: epoch}
 		}
 	} else {
-		r.images[s.label] = builtImage{id: result.Image.Encoded(), epoch: epoch}
+		r.images[s.id] = builtImage{id: result.Image.Encoded(), epoch: epoch}
 	}
 }
 
@@ -385,7 +390,7 @@ func (r *targetRunner) epoch(s *targetSpec) time.Time {
 func (r *targetRunner) runTarget(
 	ctx context.Context, s *targetSpec, a *action, finish func(*targetState, *actionResult) error,
 ) (*actionResult, error) {
-	target := r.describe(s)
+	target := r.describeTarget(s)
 	log, err := r.cache.newLog()
 	if err != nil {
 		return nil, fmt.Errorf("%s: saving to the build cache: %w", target, err)
@@ -413,7 +418,7 @@ func (r *targetRunner) commitLayer(ctx context.Context, builder *buildah.Builder
 	epoch := time.Unix(result.Epoch, 0)
 	// A nil reference commits to the store under a temporary name, which buildah then removes.
 	id, _, _, err := builder.Commit(ctx, nil, buildah.CommitOptions{
-		SystemContext: r.systemContext,
+		SystemContext: forPlatform(r.systemContext, &platformValue{builderPlatform(builder)}),
 		// Stamp every file the layer adds, its creation and its history with the epoch, so that the
 		// same files make the same layer whenever they are built and whatever times they had on disk.
 		HistoryTimestamp: &epoch,
@@ -448,16 +453,7 @@ func (r *targetRunner) send(ctx context.Context, id string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", r.action, err)
 	}
-	// Follow the system's signature policy, as buildah does when committing, but trust local
-	// storage, where the image was just built.
-	policy, err := signature.DefaultPolicy(r.systemContext)
-	if err != nil {
-		return "", fmt.Errorf("%s: %w", r.action, err)
-	}
-	policy.Transports[is.Transport.Name()] = signature.PolicyTransportScopes{
-		"": {signature.NewPRInsecureAcceptAnything()},
-	}
-	policyContext, err := signature.NewPolicyContext(policy)
+	policyContext, err := r.policyContext()
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", r.action, err)
 	}
@@ -474,18 +470,127 @@ func (r *targetRunner) send(ctx context.Context, id string) (string, error) {
 	return m.ConfigInfo().Digest.Encoded(), nil
 }
 
+// policyContext returns the signature policy to copy images under: the system's, as buildah follows when
+// committing, but trusting local storage and layouts, where vamos has just put the images. The caller
+// must destroy it.
+func (r *targetRunner) policyContext() (*signature.PolicyContext, error) {
+	policy, err := signature.DefaultPolicy(r.systemContext)
+	if err != nil {
+		return nil, err
+	}
+	for _, transport := range []string{is.Transport.Name(), layout.Transport.Name()} {
+		policy.Transports[transport] = signature.PolicyTransportScopes{
+			"": {signature.NewPRInsecureAcceptAnything()},
+		}
+	}
+	return signature.NewPolicyContext(policy)
+}
+
+// sendIndex copies the images of r.targets, the manifests of an index, from the container store to r.dest, as
+// an index listing each with its platform, in order. It returns the digest of the index there.
+func (r *targetRunner) sendIndex(ctx context.Context) (string, error) {
+	// containers/image copies an index, and its images, from a source that has one, so make one: an OCI
+	// layout holding the images, and an index of them, which its index.json names.
+	dir, err := os.MkdirTemp("", "vamos-index-")
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", r.action, err)
+	}
+	defer os.RemoveAll(dir)
+	policyContext, err := r.policyContext()
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", r.action, err)
+	}
+	defer policyContext.Destroy()
+
+	index := imgspecv1.Index{Versioned: specs.Versioned{SchemaVersion: 2}, MediaType: imgspecv1.MediaTypeImageIndex}
+	for i, cl := range r.targets {
+		src, err := is.Transport.NewStoreReference(r.store, nil, r.images[cl].id)
+		if err != nil {
+			return "", fmt.Errorf("%s: %w", r.action, err)
+		}
+		dest, err := layout.NewReference(dir, fmt.Sprintf("manifest-%d", i))
+		if err != nil {
+			return "", fmt.Errorf("%s: %w", r.action, err)
+		}
+		written, err := imagecopy.Image(ctx, policyContext, dest, src, &imagecopy.Options{
+			ForceManifestMIMEType: imgspecv1.MediaTypeImageManifest,
+		})
+		if err != nil {
+			return "", fmt.Errorf("%s: %w", r.action, err)
+		}
+		platform := platformOf(cl).spec
+		index.Manifests = append(index.Manifests, imgspecv1.Descriptor{
+			MediaType: imgspecv1.MediaTypeImageManifest,
+			Digest:    digest.FromBytes(written),
+			Size:      int64(len(written)),
+			Platform:  &platform,
+		})
+	}
+	if err := writeLayoutIndex(dir, index, "index"); err != nil {
+		return "", fmt.Errorf("%s: %w", r.action, err)
+	}
+
+	src, err := layout.NewReference(dir, "index")
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", r.action, err)
+	}
+	dest, err := r.dest()
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", r.action, err)
+	}
+	written, err := imagecopy.Image(ctx, policyContext, dest, src, &imagecopy.Options{
+		DestinationCtx:     r.systemContext,
+		ImageListSelection: imagecopy.CopyAllImages,
+	})
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", r.action, err)
+	}
+	return digest.FromBytes(written).String(), nil
+}
+
+// writeLayoutIndex stores index as a blob of the OCI layout in dir, and makes the layout's index.json name it,
+// as ref, alone.
+func writeLayoutIndex(dir string, index imgspecv1.Index, ref string) error {
+	data, err := json.Marshal(index)
+	if err != nil {
+		return err
+	}
+	d := digest.FromBytes(data)
+	if err := os.WriteFile(filepath.Join(dir, "blobs", d.Algorithm().String(), d.Encoded()), data, 0o644); err != nil {
+		return err
+	}
+	top := imgspecv1.Index{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: imgspecv1.MediaTypeImageIndex,
+		Manifests: []imgspecv1.Descriptor{{
+			MediaType:   imgspecv1.MediaTypeImageIndex,
+			Digest:      d,
+			Size:        int64(len(data)),
+			Annotations: map[string]string{imgspecv1.AnnotationRefName: ref},
+		}},
+	}
+	if data, err = json.Marshal(top); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "index.json"), data, 0o644)
+}
+
 // start makes a container for target s from its base image, mounts it, and applies its steps,
 // whose files are stored as a says, recording what they print in log. A layer's default command is
 // set too. The caller must delete the returned target's container.
 func (r *targetRunner) start(
 	ctx context.Context, s *targetSpec, a *action, log *logRecorder,
 ) (_ *targetState, err error) {
-	target := r.describe(s)
+	target := r.describeTarget(s)
+	sys := r.systemContext
+	if s.base.label != scratch {
+		sys = forPlatform(sys, platformOf(s.base))
+	}
 	builder, err := buildah.NewBuilder(ctx, r.store, buildah.BuilderOptions{
 		FromImage:     r.images[s.base].id,
 		PullPolicy:    buildah.PullNever, // only pull() reaches registries
 		Capabilities:  r.capabilities,
-		SystemContext: r.systemContext,
+		SystemContext: sys,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", target, err)
@@ -496,6 +601,11 @@ func (r *targetRunner) start(
 			st.delete()
 		}
 	}()
+	if !s.task {
+		if err := setPlatform(builder, s, r.workspace); err != nil {
+			return nil, fmt.Errorf("%s: %w", target, err)
+		}
+	}
 	// Mount the container once for the whole target, rather than for each step that needs its
 	// files. buildah's own Run and Add then only count another use of the mount.
 	if st.mountPoint, err = builder.Mount(""); err != nil {
@@ -508,7 +618,7 @@ func (r *targetRunner) start(
 			return nil, err
 		}
 		if err := in.apply(st, a.Steps[i].Files); err != nil {
-			return nil, fmt.Errorf("%s: %s failed: %w", target, in, err)
+			return nil, fmt.Errorf("%s: %s failed: %w%s", target, in, err, emulatorHint(in, builder))
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -521,6 +631,48 @@ func (r *targetRunner) start(
 	return st, nil
 }
 
+// setPlatform makes layer s's image say it is for its platform: an image on scratch, which has none, says so
+// once set, and one on another image must already be for it, since the base's files are.
+func setPlatform(builder *buildah.Builder, s *targetSpec, w *workspace) error {
+	want := platformOf(s.id)
+	if s.base.label == scratch {
+		builder.SetOS(want.spec.OS)
+		builder.SetArchitecture(want.spec.Architecture)
+		builder.SetVariant(want.spec.Variant)
+		return nil
+	}
+	got := builderPlatform(builder)
+	if !platforms.NewMatcher(want.spec).Match(got) {
+		return fmt.Errorf("its base %s is for %s, not %s; a layer's base must be for its platform",
+			w.display(s.base.label), platforms.Format(got), want)
+	}
+	return nil
+}
+
+// builderPlatform returns the platform that builder's image says it is for, normalized.
+func builderPlatform(builder *buildah.Builder) imgspecv1.Platform {
+	return platforms.Normalize(imgspecv1.Platform{
+		OS:           builder.OS(),
+		Architecture: builder.Architecture(),
+		Variant:      builder.Variant(),
+	})
+}
+
+// emulatorHint explains, if in is a run() step in an image for another platform than the host's, that its
+// programs run under emulation, which may be why it failed. The error that says so, "exec format error", is
+// printed by buildah, not returned.
+func emulatorHint(in step, builder *buildah.Builder) string {
+	if _, ok := in.(*runStep); !ok {
+		return ""
+	}
+	p := builderPlatform(builder)
+	if platforms.NewMatcher(hostPlatform).Match(p) {
+		return ""
+	}
+	return fmt.Sprintf(`; the image is for %s, which runs here under emulation: "exec format error" above means `+
+		"no emulator for it is registered (tonistiigi/binfmt registers them)", platforms.Format(p))
+}
+
 // delete unmounts and removes the target's container.
 func (st *targetState) delete() {
 	if st.mountPoint != "" {
@@ -530,7 +682,8 @@ func (st *targetState) delete() {
 }
 
 // pruneCache removes every cached result: the images of cached layers from the container store,
-// other than names that other tools gave them, and the build cache. Pulled images are kept.
+// other than names that other tools gave them, and the build cache. Pulled images are kept, and so are the
+// records of what their tags named, which say which pulled images builds use.
 func pruneCache(w io.Writer) error {
 	options, err := storage.DefaultStoreOptions()
 	if err != nil {
@@ -574,8 +727,10 @@ func pruneCache(w io.Writer) error {
 	dir := cacheDir(options)
 	results, _ := os.ReadDir(filepath.Join(dir, "ac"))
 	blobs, _ := os.ReadDir(filepath.Join(dir, "cas", "sha256"))
-	if err := os.RemoveAll(dir); err != nil {
-		errs = append(errs, err)
+	for _, sub := range []string{"ac", "cas", "tmp"} {
+		if err := os.RemoveAll(filepath.Join(dir, sub)); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	fmt.Fprintf(w, "Removed %d images from the container store, and %d results and %d files from %s\n",
 		removed, len(results), len(blobs), dir)

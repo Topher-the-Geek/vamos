@@ -37,14 +37,32 @@ pnpm dev             # http://localhost:3100, proxying /graphql to the backend o
 
 ## Build with vamos
 
-The directory is a vamos workspace: its `WORKSPACE` file is empty, and `backend/` and `ui/` each have a `BUILD`
-file. The UI's `graphql-codegen` task adds `//backend:schema`, the backend's exported schema, so no generated
-file is needed on disk. From the repository root:
+The directory is a vamos workspace: `backend/` and `ui/` each have a `BUILD` file, and both load helpers from
+`defs.star`. The UI's `graphql-codegen` task adds `//backend:schema`, the backend's exported schema, so no
+generated file is needed on disk. From the repository root:
 
 ```
 ./vamos load //backend:layer strawberry-backend -C examples/strawberry-react
 ./vamos load //ui:layer strawberry-ui -C examples/strawberry-react
 ./vamos build //backend:lint //backend:test //ui:lint -C examples/strawberry-react
+```
+
+Each package's `server` is an index of its `layer` for amd64 and arm64, which `push` sends whole:
+
+```
+./vamos push //ui:server ghcr.io/me/strawberry-ui:1.0 -C examples/strawberry-react
+```
+
+The backend's layer installs Python packages, which may have native code, so each platform's runs on that
+platform, under emulation for the other. The schema, codegen and the UI's bundle are the same on every platform,
+so those tasks run once, natively, on a base for the exec platform (`dep(..., platform = EXEC_PLATFORM)`).
+
+The UI's `build` task takes two parameters, which its `layer` and `server` pass on. `mode` builds it with Vite's
+`development` mode when `debug`, and `languages` chooses which of `ui/public/locales` go into the bundle (the page
+doesn't read them yet). The backend takes none, so they don't reach it:
+
+```
+./vamos load //ui:layer strawberry-ui:debug --set mode=debug --set languages=en,es -C examples/strawberry-react
 ```
 
 The checks are tasks without output: building them runs pyright, pytest and eslint.

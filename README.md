@@ -14,7 +14,8 @@ vamos prune                              # empty the build cache
 Targets are named as the `BUILD` file in the current directory, or in the directory given with `-C <dir>`,
 declares them, or by a label such as `//backend:server` for a target of another `BUILD` file in the
 [workspace](#workspaces). Each command builds only the targets it names and those they use. `push`, `load`
-and `write` send the image of a `pull()` or `layer()`. Image names without a tag get `:latest`.
+and `write` send the image of a `pull()` or `layer()`, or an `index()` of images for several
+[platforms](#platforms). Image names without a tag get `:latest`.
 
 - `push` uses credentials from `docker login` (`~/.docker/config.json`) or, if set, only those
   in `$REGISTRY_AUTH_FILE`. Use `--tls-verify=false` for a registry served over plain HTTP, or mark
@@ -45,7 +46,8 @@ A cached result is reused even if running the target again would make something 
 downloads the latest version of a dependency. `push`, `load` and `write` never run a cached target again.
 To run one again, pass its name to `vamos build --rebuild`, which runs the named targets again, reusing the
 targets they use, and replaces their results; targets that use them then run again if their files changed.
-Naming a `pull()` pulls it again, in case its tag names a newer image.
+Naming a `pull()` asks the registry what its tag names again, in case it names a newer image: until then, builds
+use what it named when it was first pulled, even if it has moved since, without reaching the registry.
 
 ```
 vamos build packages --rebuild
@@ -53,7 +55,7 @@ vamos build packages --rebuild
 
 Layers are kept as images named `localhost/vamos-cache:<id>` in the container store, and the rest of the
 cache beside it, in `/var/lib/containers/vamos`, so a volume on `/var/lib/containers` keeps both. Nothing is
-removed until `vamos prune`, which empties the cache but keeps pulled images.
+removed until `vamos prune`, which empties the cache but keeps pulled images, and what their tags named.
 
 So that the same inputs make the same image, every file a target adds is stamped with the creation time of
 the pulled images it is built on, which is also the image's creation time. `--timestamp` gives a later time
@@ -131,7 +133,9 @@ layer(
 
 A layer keeps its base's files, command, variables and working directory, as Docker's `FROM` does. The image of
 the layer named on the command line is sent, and the others are kept in the build cache. A target nothing uses
-is fine, to build with `vamos build`. A pulled image is kept in local storage and reused. `base="scratch"` starts
+is fine, to build with `vamos build`. A pulled image is kept in local storage, named by its digest, and reused.
+If its tag names an index of images for several platforms, the one for the platform being built is pulled
+(see [Platforms](#platforms)). `base="scratch"` starts
 from an empty image, so no target may be named `scratch`. A task's image is discarded once its files are collected
 and cached, so its base can hold build tools the image doesn't need. A task can't be a base.
 
@@ -227,7 +231,8 @@ A project can have a `BUILD` file in each of several directories, or packages, b
 `dir` is the package's directory relative to the workspace, and `//:name` names one in the workspace's own
 `BUILD` file. Any kind of target can be named this way, such as another package's `pull()` as a base, or its
 `glob()` or `task()` in `add()`; a glob's files are relative to its own `BUILD` file. A target of the same file
-is named as `name` or `:name`, and must be declared earlier; any target of another package can be named.
+is named as `name` or `:name`, and must be declared earlier, unless a function of `ctx` names it (see
+[Parameters](#parameters)); any target of another package can be named.
 
 ```python
 task(
@@ -253,6 +258,127 @@ vamos build //backend:test //ui:lint -C examples/strawberry-react
 ```
 
 See [examples/strawberry-react/](examples/strawberry-react/).
+
+## Parameters
+
+A target can take parameters, such as a build mode or the languages to bundle, which make it behave like a
+function. `params` declares them, each with its default, whose type (a string, a bool, an int, or a list of
+strings) is the type of the values it takes. `param()` declares more: the values allowed, or, with `type` and
+no default, a parameter every use must give.
+
+```python
+glob(
+    name="messages",
+    params={"languages": ["en"]},
+    include=lambda ctx: ["locales/%s" % language for language in ctx.languages],
+)
+
+task(
+    name="build",
+    params={
+        "languages": ["en"],
+        "mode": param(default="release", values=["debug", "release"]),
+    },
+    base="packages",
+    steps=lambda ctx: [
+        add("build-files", "/workspace"),
+        add(dep("messages", languages=arg("languages")), "/workspace"),
+        run(["pnpm", "build", "--mode", "development" if ctx.mode == "debug" else "production"]),
+    ],
+    ...
+)
+```
+
+Any attribute of a target but its name and `params` can be a function of the target's configuration, `ctx`,
+which reads a parameter as `ctx.<name>`. vamos calls the function for each configuration the target is built
+in, and checks what it returns as if it were written in its place. A function gives a whole attribute, not an
+item of a list.
+
+`dep()` names a target with arguments for its parameters, wherever a label is accepted; a plain label gives
+every parameter its default. `arg("name")`, as an argument of `dep()`, passes on the value of the using target's
+own parameter `name`. Arguments reach only the target they're given to, so a target that takes no parameters is
+built once however many other targets take:
+
+```python
+add(dep("lib", mode="release"), "/lib")           # the release build of "lib", whatever this target's mode
+base=dep("tools", verbose=arg("verbose"))          # this target's verbose, passed on
+```
+
+`--set` gives the named target's parameters values for one command: `--set mode=debug`, `--set languages=en,es`.
+A list's strings are separated by commas, and keep their order. With several targets, `vamos build` gives each
+the flags that name its own parameters, and each flag must name a parameter of at least one of them.
+
+Targets that an argument doesn't change aren't built again for it: a build is cached by what it does, so `--set
+mode=debug` rebuilds only the targets whose steps or files the mode changes, and those that use them. A target
+given arguments other than its defaults is reported with them, as in `task "lib" (mode="debug"): cached`.
+
+### Platforms
+
+Every target is built for a platform, which is the host's unless `--platform linux/arm64` names another. A
+platform is written `os/arch` or `os/arch/variant`; in a function, `ctx.platform` is the whole, as a string
+such as `"linux/arm64"`, and `ctx.os`, `ctx.arch` and `ctx.variant` its parts, as Go's `GOOS` and `GOARCH` name
+them. A target passes its
+platform on to the targets it uses, unless `dep()` gives another, such as `EXEC_PLATFORM`, the platform build
+steps run on, which is the host's (`ctx.exec_platform`). A target built for another platform than the command's
+is reported with it, as in `layer "app" (platform=linux/arm64): building`.
+
+A `pull()` fetches the image for its platform, a layer's image records it, even on `scratch`, and its `run()`
+steps run for it. Another machine's programs run under emulation, through the emulators the kernel has
+registered, such as Docker Desktop's: they are slower, and if none is registered for the platform, a `run()`
+fails with "exec format error". A task whose files are the same for every platform, such as a JavaScript bundle,
+or which cross-compiles, can run natively instead, on a base for the exec platform:
+
+```python
+task(
+    name="build",
+    base=dep("golang", platform=EXEC_PLATFORM),
+    steps=lambda ctx: [
+        add("build-files", "/src"),
+        build_env(GOOS=ctx.os, GOARCH=ctx.arch, CGO_ENABLED="0"),
+        run(["go", "build", "-o", "/out/app", "."]),
+    ],
+    ...
+)
+```
+
+The task is then built once, and shared by every platform's image that adds it, unless, as here, it reads its
+platform: then it is built once for each. A layer's base must be for the layer's own platform.
+
+An `index()` lists images for several platforms under one name, as a multi-platform tag does. Each of its
+manifests is the pull or layer `layer`, with the same arguments, for one of `platforms`, in order. Its `dep()`
+can't give a platform, since `platforms` does. For a different target on each platform, `layer` is a dict from
+each platform to its target instead:
+
+```python
+index(
+    name="server",
+    params={"mode": "release"},
+    layer=dep("layer", mode=arg("mode")),
+    platforms=["linux/amd64", "linux/arm64"],
+)
+
+index(name="tools", layer={"linux/amd64": "linux-tools", "windows/amd64": "windows-tools"})
+```
+
+`push` sends the whole index, in the order listed. `load` and `write` send one image, so they choose the
+manifest for the platform that will run it: the Docker daemon's for `load`, which may be another machine's, and
+the host's for `write`. Only that manifest is built. `build` builds them all. `--set` gives the index's own
+parameters, while `--platform` can't be given with an index, whose manifests give their own platforms; name one
+of them instead.
+
+### Loading .star files
+
+`load()` reads functions and values from a `.star` file, named by its label within the workspace, so that
+`BUILD` files can share them:
+
+```python
+load("//:defs.star", "node_task", "LANGUAGES")
+```
+
+A `.star` file can't declare targets as it is loaded, but its functions can, when a `BUILD` file calls them.
+Labels in them are relative to the package of that `BUILD` file, or, in a function of `ctx`, of the target it
+gives an attribute of. A function of `ctx` may name targets declared after the one it belongs to, so vamos
+reports targets that use each other in a cycle, even in different configurations.
 
 ## Build
 
@@ -302,7 +428,8 @@ docker run --rm -it \
 This variant writes a tarball instead. To push, use `vamos push` and mount your credentials,
 e.g. `-v ~/.docker/config.json:/root/.docker/config.json:ro`.
 
-On success `push`, `load` and `write` print `Image built! <destination> <image-id>`.
+On success `push`, `load` and `write` print `Image built! <destination> <image-id>`, or, for an index that
+`push` sends, `Index built! <destination> <digest>`, the digest of the index's manifest.
 
 ## Run the built image
 

@@ -13,8 +13,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/containerd/platforms"
 	dockerclient "github.com/moby/moby/client"
 	"github.com/moby/moby/client/pkg/jsonmessage"
+	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
@@ -30,6 +32,8 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 	var dir string
 	var tlsVerify bool
 	var timestamp timestampFlag
+	var sets []string
+	var platform string
 
 	root := &cobra.Command{
 		Use:   "vamos",
@@ -63,6 +67,11 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 		"require HTTPS and verify certificates when contacting registries")
 	root.PersistentFlags().Var(&timestamp, "timestamp",
 		"stamp the files of targets that run no earlier than this time, in Unix seconds or RFC 3339")
+	root.PersistentFlags().StringArrayVar(&sets, "set", nil,
+		"give a parameter of the named target a value, as `name=value`; separate a list's strings with commas. "+
+			"build gives it to each named target that has the parameter")
+	root.PersistentFlags().StringVar(&platform, "platform", "",
+		"build for this `os/arch`, such as linux/arm64, rather than the host's")
 
 	// readBuild opens the workspace holding dir, returning the options for building from it.
 	readBuild := func(cmd *cobra.Command) (buildOptions, error) {
@@ -78,6 +87,11 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 		if err != nil {
 			return buildOptions{}, err
 		}
+		if platform != "" {
+			if w.platform, err = parsePlatform(platform); err != nil {
+				return buildOptions{}, fmt.Errorf("--platform %s: %w", platform, err)
+			}
+		}
 		return buildOptions{
 			workspace:     w,
 			timestamp:     time.Time(timestamp),
@@ -87,17 +101,55 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 		}, nil
 	}
 
+	// commandConfig returns the configuration that the command line gives the target with label l and kind, one
+	// of several named if shared.
+	commandConfig := func(w *workspace, l, kind string, shared bool) (*config, error) {
+		if kind == "index" && platform != "" {
+			return nil, fmt.Errorf("%q is an index(), whose manifests are each built for their own platform; "+
+				"name one of them to build it for the platform given", w.display(l))
+		}
+		return w.commandConfig(l, sets, shared)
+	}
+
+	// roots returns the targets that building the target cl, of kind, builds: the target itself, or an index's
+	// manifests.
+	roots := func(w *workspace, cl confLabel, kind string) ([]confLabel, error) {
+		if kind != "index" {
+			return []confLabel{cl}, nil
+		}
+		return w.indexManifests(cl)
+	}
+
 	// build builds the image of the target named target and sends it to dest.
 	build := func(cmd *cobra.Command, target string, dest destination) error {
 		options, err := readBuild(cmd)
 		if err != nil {
 			return err
 		}
-		image, err := options.workspace.imageTarget(target)
+		l, kind, err := options.workspace.imageTarget(target)
 		if err != nil {
 			return err
 		}
-		options.targets = []string{image}
+		c, err := commandConfig(options.workspace, l, kind, false)
+		if err != nil {
+			return err
+		}
+		if options.targets, err = roots(options.workspace, confLabel{l, c}, kind); err != nil {
+			return err
+		}
+		if kind == "index" && dest.platform != nil {
+			// The destination takes one image: the manifest for its platform.
+			p, why, err := dest.platform(cmd.Context())
+			if err != nil {
+				return fmt.Errorf("%s: %w", dest.action, err)
+			}
+			m, err := options.workspace.chooseManifest(l, options.targets, p, why)
+			if err != nil {
+				return err
+			}
+			options.targets = []confLabel{m}
+		}
+		options.index = kind == "index" && dest.platform == nil
 		options.dest, options.action = dest.ref, dest.action
 		imageId, err := buildImage(cmd.Context(), options)
 		if err != nil {
@@ -109,7 +161,12 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 			}
 		}
 
-		fmt.Fprintf(cmd.OutOrStdout(), "Image built! %s %s\n", dest.label, imageId)
+		if options.index {
+			// An index has no image ID: name it by its manifest's digest, which is what registries show.
+			fmt.Fprintf(cmd.OutOrStdout(), "Index built! %s %s\n", dest.label, imageId)
+		} else {
+			fmt.Fprintf(cmd.OutOrStdout(), "Image built! %s %s\n", dest.label, imageId)
+		}
 		return nil
 	}
 
@@ -161,9 +218,10 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 					}
 					return archiveReference(tmp, name)
 				},
-				deliver: func(ctx context.Context) error { return loadIntoDocker(ctx, tmp) },
-				action:  "loading into Docker",
-				label:   reference.FamiliarString(name),
+				deliver:  func(ctx context.Context) error { return loadIntoDocker(ctx, tmp) },
+				platform: dockerPlatform,
+				action:   "loading into Docker",
+				label:    reference.FamiliarString(name),
 			})
 		},
 	}
@@ -213,6 +271,9 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 					}
 					return os.Rename(tmp.Name(), path)
 				},
+				platform: func(context.Context) (imgspecv1.Platform, string, error) {
+					return hostPlatform, "the host's platform", nil
+				},
 				action: "writing " + args[1],
 				label:  args[1],
 			})
@@ -235,8 +296,30 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if options.targets, err = options.workspace.buildTargets(args); err != nil {
+			labels, kinds, err := options.workspace.buildTargets(args)
+			if err != nil {
 				return err
+			}
+			// Check every target's arguments before configuring any. Each takes the --set flags naming its
+			// parameters.
+			shared := len(labels) > 1
+			configs := make([]*config, len(labels))
+			for i, l := range labels {
+				if configs[i], err = commandConfig(options.workspace, l, kinds[i], shared); err != nil {
+					return err
+				}
+			}
+			if shared {
+				if err := options.workspace.checkSets(labels, sets); err != nil {
+					return err
+				}
+			}
+			for i, l := range labels {
+				more, err := roots(options.workspace, confLabel{l, configs[i]}, kinds[i])
+				if err != nil {
+					return err
+				}
+				options.targets = append(options.targets, more...)
 			}
 			options.rebuild = rebuild
 			_, err = buildImage(cmd.Context(), options)
@@ -250,7 +333,7 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 		Use:   "prune",
 		Short: "Remove everything from the build cache",
 		Long: "Remove the cached results of every target: the images of cached layers, from the container\n" +
-			"store, and the build cache beside it. Pulled images are kept.",
+			"store, and the build cache beside it. Pulled images are kept, with what their tags named.",
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return pruneCache(cmd.OutOrStdout())
@@ -268,6 +351,9 @@ type destination struct {
 	ref func() (types.ImageReference, error)
 	// deliver, if not nil, finishes sending the committed image.
 	deliver func(ctx context.Context) error
+	// platform, if not nil, says the destination takes one image, and for which platform, with why, so that
+	// an index sends only its manifest for that platform. Otherwise the destination takes the whole index.
+	platform func(ctx context.Context) (imgspecv1.Platform, string, error)
 
 	action string // describes sending the image, e.g. "pushing to app:latest"
 	label  string // names the destination after "Image built!"
@@ -386,6 +472,26 @@ func newSystemContext(cmd *cobra.Command, tlsVerify bool) (*types.SystemContext,
 // socket, set up from the environment as the docker command does.
 func newDockerClient() (*dockerclient.Client, error) {
 	return dockerclient.New(dockerclient.FromEnv)
+}
+
+// dockerPlatform returns the platform of the Docker daemon's machine, which may not be this one's.
+func dockerPlatform(ctx context.Context) (imgspecv1.Platform, string, error) {
+	client, err := newDockerClient()
+	if err != nil {
+		return imgspecv1.Platform{}, "", err
+	}
+	defer client.Close()
+	info, err := client.Info(ctx, dockerclient.InfoOptions{})
+	if err != nil {
+		return imgspecv1.Platform{}, "", err
+	}
+	p := imgspecv1.Platform{OS: info.Info.OSType, Architecture: info.Info.Architecture}
+	// The daemon names its architecture as uname does, which containerd normalizes except for 32-bit ARM's,
+	// such as "armv7l".
+	if v, ok := strings.CutPrefix(p.Architecture, "armv"); ok && strings.HasSuffix(v, "l") {
+		p.Architecture, p.Variant = "arm", "v"+strings.TrimSuffix(v, "l")
+	}
+	return platforms.Normalize(p), "the Docker daemon's platform", nil
 }
 
 // loadIntoDocker sends the image tarball in f to the Docker daemon, like `docker load`.

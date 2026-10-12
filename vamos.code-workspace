@@ -9,6 +9,10 @@
 			"path": "examples/fastmcp"
 		},
 		{
+			"name": "examples/golang-cli",
+			"path": "examples/golang-cli"
+		},
+		{
 			"name": "examples/strawberry-react",
 			"path": "examples/strawberry-react"
 		},

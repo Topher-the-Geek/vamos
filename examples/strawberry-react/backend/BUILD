@@ -1,3 +1,5 @@
+load("//:defs.star", "PLATFORMS")
+
 pull(
     name = "python",
     image = "docker.io/library/python",
@@ -48,10 +50,17 @@ layer(
     ],
 )
 
-# The UI's types are generated from this.
+index(
+    name = "server",
+    layer = "layer",
+    platforms = PLATFORMS,
+)
+
+# The UI's types are generated from this. The schema is the same on every platform, so it is exported once,
+# natively, however many platforms the UI is built for.
 task(
     name = "schema",
-    base = "layer",
+    base = dep("layer", platform = EXEC_PLATFORM),
     steps = [
         run([
             "strawberry",

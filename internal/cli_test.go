@@ -380,14 +380,14 @@ func TestBuildFileMistakes(t *testing.T) {
 		{
 			name:  "add source not a name",
 			build: pullBusybox + `layer(name="app", base="busybox", steps=[add(1, "/app")])`,
-			want:  []string{"/project/BUILD:2:45:", "add: for parameter source: got int, want string"},
+			want:  []string{"/project/BUILD:2:45:", "add: source is int, want a label or dep()"},
 		},
 		{
 			name: "add sources as a list",
 			build: pullBusybox + withGlob +
 				`layer(name="app", base="busybox", steps=[add(["code"], "/app")])`,
 			files: map[string]string{"app.sh": "echo hi"},
-			want:  []string{"/project/BUILD:3:45:", "add: for parameter source: got list, want string"},
+			want:  []string{"/project/BUILD:3:45:", "add: source is list, want a label or dep()"},
 		},
 		{
 			name:  "source names a file",
@@ -729,6 +729,15 @@ func TestBuildFileMistakes(t *testing.T) {
 				`layer(name="app", base="busybox")`,
 			want: []string{
 				`/project/BUILD:2:4: run: run(["true"]) is not in the steps of any layer() or task()`,
+			},
+		},
+		{
+			name: "run outside steps, beside steps given by a function",
+			build: pullBusybox + `layer(name="lib", base="busybox", steps=[run(["true"])], command=lambda ctx: [])` +
+				"\n" + `run(["false"])` + "\n" +
+				`layer(name="app", base="busybox")`,
+			want: []string{
+				`/project/BUILD:3:4: run: run(["false"]) is not in the steps of any layer() or task()`,
 			},
 		},
 		{

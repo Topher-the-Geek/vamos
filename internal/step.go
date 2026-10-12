@@ -50,16 +50,17 @@ func (stepBase) source() *fileSet      { return nil }
 // addStep copies files from a package or a task's output into the container.
 type addStep struct {
 	stepBase
-	ref   string   // names set, as given
-	set   *fileSet // placed beneath dest at their relative paths
-	dest  string   // as given: absolute once its variables are expanded
-	owner string   // user or ID that owns the files, as named in the image; root if empty
-	group string   // group or ID; the owner's group if empty, or root's if owner is too
+	target  targetRef // the glob or task whose files to add
+	display string    // target, as given, for messages
+	set     *fileSet  // of an instance, configured: the files, placed beneath dest at their relative paths
+	dest    string    // as given: absolute once its variables are expanded
+	owner   string    // user or ID that owns the files, as named in the image; root if empty
+	group   string    // group or ID; the owner's group if empty, or root's if owner is too
 }
 
 func (s *addStep) String() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "add(%s, %s", starlark.String(s.ref), starlark.String(s.dest))
+	fmt.Fprintf(&b, "add(%s, %s", s.display, starlark.String(s.dest))
 	if s.owner != "" {
 		fmt.Fprintf(&b, ", owner=%s", starlark.String(s.owner))
 	}
@@ -372,12 +373,21 @@ func stepList(fnName string, list *starlark.List) ([]step, error) {
 	for i := 0; i < list.Len(); i++ {
 		in, ok := list.Index(i).(step)
 		if !ok {
-			return nil, fmt.Errorf("%s: steps[%d] is %s, want a step, such as add() or run()",
-				fnName, i, list.Index(i).Type())
+			return nil, fmt.Errorf("%s: steps[%d] is %s, want a step, such as add() or run()%s",
+				fnName, i, list.Index(i).Type(), functionHint(list.Index(i)))
 		}
 		out = append(out, in)
 	}
 	return out, nil
+}
+
+// functionHint explains, if v is a function, that a function of ctx must give a whole attribute, not
+// an element of one.
+func functionHint(v starlark.Value) string {
+	if _, ok := v.(starlark.Callable); ok {
+		return "; a function of ctx must give the whole list"
+	}
+	return ""
 }
 
 // reprStrings formats ss as a Starlark list.

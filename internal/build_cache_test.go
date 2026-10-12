@@ -260,7 +260,7 @@ task(
     include=["*"],
     allow_no_files=True,
 )
-layer(name="app", base="busybox", steps=[add("none", "/app"), add("empty", "/app")])
+layer(name="app", base="busybox", steps=[add("none", "/app"), add("empty", "/app"), env(NONCE="%[1]s")])
 `, nonce),
 	})
 	dir := t.TempDir()
@@ -611,6 +611,33 @@ func TestTimestamp(t *testing.T) {
 	}
 }
 
+// TestTaskEpochInKey checks that a target's key covers the epoch of the tasks whose files it adds, not
+// only their files: a task run again with a later epoch makes the same files, but a layer adding them
+// must then be stamped with that epoch, as a build from an empty cache would be.
+func TestTaskEpochInKey(t *testing.T) {
+	requireBuildah(t)
+	fsys := project(t, map[string]string{"BUILD": cachedBuild(newNonce()), "input.txt": "hello\n"})
+	dir := t.TempDir()
+	first := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+	later := first.Add(time.Hour)
+
+	vamos(t, fsys, "write", "app", filepath.Join(dir, "1.tar"), "--timestamp", first.Format(time.RFC3339),
+		"-C", projectDir).succeeds(t)
+	vamos(t, fsys, "build", "size", "--rebuild", "--timestamp", later.Format(time.RFC3339),
+		"-C", projectDir).ran(t)
+	r := vamos(t, fsys, "write", "app", filepath.Join(dir, "2.tar"), "-C", projectDir).succeeds(t)
+	assertTargets(t, r, map[string]string{
+		`layer "deps"`: "cached",
+		`task "size"`:  "cached",
+		`layer "app"`:  "building",
+	})
+
+	img := readImage(t, filepath.Join(dir, "2.tar"))
+	if got := imageModTime(t, img, "/app/size.txt"); !got.Equal(later) {
+		t.Errorf("/app/size.txt modified at %v, want the task's epoch, %v", got, later)
+	}
+}
+
 // TestPrune checks that `vamos prune` removes every cached result, so that targets run again, and
 // leaves pulled images, and cached images that also have other names, in the container store.
 // It empties the cache that every test, and every vamos on this machine, shares.
@@ -632,6 +659,23 @@ func TestPrune(t *testing.T) {
 		withStore(t, func(store storage.Store) { _, _ = store.DeleteImage(keptID, true) })
 	})
 
+	// The pulled busybox is named by digest, or by its tag if an older vamos pulled it.
+	var pulled []string
+	withStore(t, func(store storage.Store) {
+		images, err := store.Images()
+		must(t, err)
+		for _, img := range images {
+			if slices.ContainsFunc(img.Names, func(n string) bool {
+				return strings.HasPrefix(n, "docker.io/library/busybox")
+			}) {
+				pulled = append(pulled, img.ID)
+			}
+		}
+	})
+	if len(pulled) == 0 {
+		t.Fatal("no busybox image in the container store after building")
+	}
+
 	r := vamos(t, fsys, "prune").ran(t)
 	if !strings.HasPrefix(r.stdout, "Removed ") || strings.HasPrefix(r.stdout, "Removed 0 images") {
 		t.Errorf("stdout = %q, want it to report the cached images removed", r.stdout)
@@ -648,8 +692,10 @@ func TestPrune(t *testing.T) {
 		} else if !slices.Equal(img.Names, []string{kept}) {
 			t.Errorf("image %s has names %v after pruning, want only %s", keptID[:12], img.Names, kept)
 		}
-		if _, err := store.Image("docker.io/library/busybox:1.36"); err != nil {
-			t.Errorf("pulled image busybox:1.36 removed by pruning: %v", err)
+		for _, id := range pulled {
+			if _, err := store.Image(id); err != nil {
+				t.Errorf("pulled busybox image %s removed by pruning: %v", id[:12], err)
+			}
 		}
 	})
 	r = vamos(t, fsys, "prune").ran(t)
