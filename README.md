@@ -6,7 +6,8 @@ container images described by `BUILD` files written in [Starlark](https://github
 ```
 vamos push <target> <image>              # push a target's image to a registry, e.g. server ghcr.io/me/app:1.0
 vamos load <target> <image>              # load it into the local Docker daemon, e.g. server app:dev
-vamos write <target> <file.tar> [-t app] # write a tarball that `docker load` can import
+vamos save <target> <file.tar> [-t app]  # save a tarball that `docker load` can import
+vamos export <task> <folder> [--replace] # write a task's files to a folder, e.g. codegen src/gen
 vamos build <target>... [--rebuild]      # build targets into the build cache, e.g. packages
 vamos prune                              # empty the build cache
 ```
@@ -14,16 +15,26 @@ vamos prune                              # empty the build cache
 Targets are named as the `BUILD` file in the current directory, or in the directory given with `-C <dir>`,
 declares them, or by a label such as `//backend:server` for a target of another `BUILD` file in the
 [workspace](#workspaces). Each command builds only the targets it names and those they use. `push`, `load`
-and `write` send the image of a `pull()` or `layer()`, or an `index()` of images for several
-[platforms](#platforms). Image names without a tag get `:latest`.
+and `save` send the image of a `pull()` or `layer()`, or an `index()` of images for several
+[platforms](#platforms). Image names without a tag get `:latest`. `export` writes the files of a `task()` given
+`source`. `write` is `save`'s earlier name, which still works for now.
 
 - `push` uses credentials from `docker login` (`~/.docker/config.json`) or, if set, only those
   in `$REGISTRY_AUTH_FILE`. Use `--tls-verify=false` for a registry served over plain HTTP, or mark
-  it `insecure = true` in `registries.conf`.
+  it `insecure = true` in `registries.conf`. The images are built by an executor, which pushes them with its
+  own credentials and settings unless `--push-from=client` is given. Today the executor runs within vamos, so
+  both are yours.
 - `load` talks to the Docker daemon as the `docker` command does: at `$DOCKER_HOST`, or
   `/var/run/docker.sock`, with TLS settings from `$DOCKER_CERT_PATH` and `$DOCKER_TLS_VERIFY`.
-- `write` records no image name in the tarball unless `--tag` is given. An existing file is
+- `save` records no image name in the tarball unless `--tag` is given. An existing file is
   replaced only once the new image is complete.
+- `export` writes a task's files at their paths within its `source`, so a task meant to make one folder of the
+  project, such as generated code, takes that folder as its `source`. It replaces the folder as a whole, so that it
+  holds the task's files alone, never a mix of old and new.
+  A folder that holds anything is replaced only with `--replace`, and if it gains files while the task builds,
+  they are kept and the export refused. The files belong to the owner of the folder's parent, even when vamos
+  runs as root, and are stamped with the task's time, as an image's files are. Links are written as links, and
+  never followed.
 
 Run `vamos <command> --help` for details.
 
@@ -43,7 +54,8 @@ layer "server": cached
 ```
 
 A cached result is reused even if running the target again would make something different, as when it
-downloads the latest version of a dependency. `push`, `load` and `write` never run a cached target again.
+downloads the latest version of a dependency. `push`, `load`, `save` and `export` never run a cached target
+again.
 To run one again, pass its name to `vamos build --rebuild`, which runs the named targets again, reusing the
 targets they use, and replaces their results; targets that use them then run again if their files changed.
 Naming a `pull()` asks the registry what its tag names again, in case it names a newer image: until then, builds
@@ -137,7 +149,8 @@ is fine, to build with `vamos build`. A pulled image is kept in local storage, n
 If its tag names an index of images for several platforms, the one for the platform being built is pulled
 (see [Platforms](#platforms)). `base="scratch"` starts
 from an empty image, so no target may be named `scratch`. A task's image is discarded once its files are collected
-and cached, so its base can hold build tools the image doesn't need. A task can't be a base.
+and cached, so its base can hold build tools the image doesn't need. A task can't be a base. `vamos export`
+writes a task's files to a folder, such as code it generates, to keep in the project.
 
 A task without `source` and `include` makes no files, so no target can add it. It runs only for its steps to
 succeed, as a task that runs tests or a linter does, and is cached like any other:
@@ -218,9 +231,10 @@ A pattern's leading folders, within the project or a task's `source`, must exist
 links. Links in `source` itself are resolved within the task's container. Links that patterns select are copied
 as links, as Docker's `COPY` does, and are never followed.
 
-Whether a glob's leading folders exist is checked before anything is built, but only for globs that the targets
-being built add, so a missing file doesn't stop building targets that don't need it. Whether its patterns match
-any file, and its limits, are checked as its files are read.
+The globs that the targets being built add are read before anything is built, each once, so a mistake in one,
+such as a missing leading folder, a pattern that matches no file or a file over a limit, is reported first. Globs
+that no target being built adds aren't read, so a missing file doesn't stop building targets that don't need it.
+Every target that adds a glob gets its files as they were read, even if they change during the build.
 
 See [examples/typescript-mcp/](examples/typescript-mcp/) and [examples/fastmcp/](examples/fastmcp/).
 
@@ -360,9 +374,9 @@ index(
 index(name="tools", layer={"linux/amd64": "linux-tools", "windows/amd64": "windows-tools"})
 ```
 
-`push` sends the whole index, in the order listed. `load` and `write` send one image, so they choose the
+`push` sends the whole index, in the order listed. `load` and `save` send one image, so they choose the
 manifest for the platform that will run it: the Docker daemon's for `load`, which may be another machine's, and
-the host's for `write`. Only that manifest is built. `build` builds them all. `--set` gives the index's own
+the host's for `save`. Only that manifest is built. `build` builds them all. `--set` gives the index's own
 parameters, while `--platform` can't be given with an index, whose manifests give their own platforms; name one
 of them instead.
 
@@ -422,14 +436,15 @@ docker run --rm -it \
   --security-opt apparmor=unconfined \
   --security-opt label=disable \
   -v "$PWD/examples/typescript-mcp:/example" -v "$PWD/output:/output" \
-  vamos write server /output/example.tar -t vamos-example -C /example
+  vamos save server /output/example.tar -t vamos-example -C /example
 ```
 
-This variant writes a tarball instead. To push, use `vamos push` and mount your credentials,
+This variant saves a tarball instead. To push, use `vamos push` and mount your credentials,
 e.g. `-v ~/.docker/config.json:/root/.docker/config.json:ro`.
 
-On success `push`, `load` and `write` print `Image built! <destination> <image-id>`, or, for an index that
-`push` sends, `Index built! <destination> <digest>`, the digest of the index's manifest.
+On success `push`, `load` and `save` print `Image built! <destination> <image-id>`, or, for an index that
+`push` sends, `Index built! <destination> <digest>`, the digest of the index's manifest. `export` prints
+`Files exported! <folder> <digest>`, the digest of the tree of the task's files in the build cache.
 
 ## Run the built image
 

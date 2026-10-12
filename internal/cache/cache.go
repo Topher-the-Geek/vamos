@@ -1,4 +1,7 @@
-package internal
+// Package cache is the build cache: a content-addressed store of files, trees and logs, and an action cache from
+// each target's key to its latest result. It is what the client and an executor share, so a remote cache server
+// could stand in for it.
+package cache
 
 import (
 	"bufio"
@@ -19,52 +22,52 @@ import (
 	"github.com/spf13/afero"
 )
 
-// cache is the local build cache. It has the two parts a remote cache server would hold, so one
+// Cache is the local build cache. It has the two parts a remote cache server would hold, so one
 // server could later stand in for it: a content-addressed store of blobs, such as files, trees
 // of files and logs, and an action cache, which maps each target's key to its latest result.
 // The images of layers are kept in the container store instead, and results name them by digest.
-type cache struct {
+type Cache struct {
 	dir string // holds cas/sha256/<hex>, ac/<hex>, tags/<hex> and tmp/
 }
 
-// openCache opens the cache in dir, creating it if need be.
-func openCache(dir string) (*cache, error) {
+// Open opens the cache in dir, creating it if need be.
+func Open(dir string) (*Cache, error) {
 	for _, sub := range []string{"cas/sha256", "ac", "tags", "tmp"} {
 		if err := os.MkdirAll(filepath.Join(dir, sub), 0o700); err != nil {
 			return nil, fmt.Errorf("opening build cache: %w", err)
 		}
 	}
-	return &cache{dir: dir}, nil
+	return &Cache{dir: dir}, nil
 }
 
-// blob identifies content in the cache by its digest and size, as a remote cache would.
-type blob struct {
+// Blob identifies content in the cache by its digest and size, as a remote cache would.
+type Blob struct {
 	Digest digest.Digest `json:"digest"`
 	Size   int64         `json:"size"`
 }
 
 // blobPath returns where the blob with digest d is kept.
-func (c *cache) blobPath(d digest.Digest) string {
+func (c *Cache) blobPath(d digest.Digest) string {
 	return filepath.Join(c.dir, "cas", d.Algorithm().String(), d.Encoded())
 }
 
-// errOverLimit means that what was to be stored holds more bytes than allowed.
-var errOverLimit = errors.New("more bytes than allowed")
+// ErrOverLimit means that what was to be stored holds more bytes than allowed.
+var ErrOverLimit = errors.New("more bytes than allowed")
 
-// put stores what r holds as a blob, or fails with errOverLimit, storing nothing, if it holds more than limit
+// put stores what r holds as a blob, or fails with ErrOverLimit, storing nothing, if it holds more than limit
 // bytes. It reads at most one byte past the limit.
-func (c *cache) put(r io.Reader, limit int64) (blob, error) {
+func (c *Cache) put(r io.Reader, limit int64) (Blob, error) {
 	f, err := c.create()
 	if err != nil {
-		return blob{}, err
+		return Blob{}, err
 	}
 	defer f.discard()
 	if _, err := io.Copy(f, io.LimitReader(r, limit+1)); err != nil {
-		return blob{}, err
+		return Blob{}, err
 	}
 	b := f.blob()
 	if b.Size > limit {
-		return blob{}, errOverLimit
+		return Blob{}, ErrOverLimit
 	}
 	// The same digest means the same content, so replacing an existing blob changes nothing.
 	return b, f.commit(c.blobPath(b.Digest))
@@ -80,7 +83,7 @@ type pendingFile struct {
 }
 
 // create starts writing a file into the cache. The caller commits or discards it.
-func (c *cache) create() (*pendingFile, error) {
+func (c *Cache) create() (*pendingFile, error) {
 	f, err := os.CreateTemp(filepath.Join(c.dir, "tmp"), "pending-")
 	if err != nil {
 		return nil, err
@@ -97,8 +100,8 @@ func (p *pendingFile) Write(data []byte) (int, error) {
 }
 
 // blob returns the blob that what has been written so far makes.
-func (p *pendingFile) blob() blob {
-	return blob{Digest: p.digester.Digest(), Size: p.size}
+func (p *pendingFile) blob() Blob {
+	return Blob{Digest: p.digester.Digest(), Size: p.size}
 }
 
 // commit finishes the file and moves it to path, replacing whatever is there.
@@ -115,46 +118,52 @@ func (p *pendingFile) discard() {
 	os.Remove(p.f.Name()) // fails harmlessly once committed
 }
 
-// putBytes stores data as a blob.
-func (c *cache) putBytes(data []byte) (blob, error) {
+// PutBytes stores data as a blob.
+func (c *Cache) PutBytes(data []byte) (Blob, error) {
 	return c.put(bytes.NewReader(data), int64(len(data)))
 }
 
-// open opens blob b for reading. An error wrapping fs.ErrNotExist means the cache lacks it.
-func (c *cache) open(b blob) (*os.File, error) {
+// OpenBlob opens blob b for reading. An error wrapping fs.ErrNotExist means the cache lacks it.
+func (c *Cache) OpenBlob(b Blob) (*os.File, error) {
 	return os.Open(c.blobPath(b.Digest))
 }
 
-// readBytes returns the content of blob b.
-func (c *cache) readBytes(b blob) ([]byte, error) {
+// Has reports why blob b is missing from the cache, if it is.
+func (c *Cache) Has(b Blob) error {
+	_, err := os.Stat(c.blobPath(b.Digest))
+	return err
+}
+
+// ReadBytes returns the content of blob b.
+func (c *Cache) ReadBytes(b Blob) ([]byte, error) {
 	return os.ReadFile(c.blobPath(b.Digest))
 }
 
-// tree is a set of files, directories and symbolic links, kept in the cache as a blob that
+// Tree is a set of files, directories and symbolic links, kept in the cache as a blob that
 // names the blobs of its files. Modification times are left out, so that the same files give
 // the same tree wherever and whenever they are made.
-type tree struct {
-	Entries []treeEntry `json:"entries"` // sorted by path, so a directory comes before what it holds
+type Tree struct {
+	Entries []TreeEntry `json:"entries"` // sorted by path, so a directory comes before what it holds
 }
 
-// treeEntry is a file, directory or symbolic link in a tree.
-type treeEntry struct {
+// TreeEntry is a file, directory or symbolic link in a tree.
+type TreeEntry struct {
 	Path   string `json:"path"`             // slash-separated and relative to the tree's root
 	Type   string `json:"type"`             // "dir", "file" or "link"
 	Mode   uint32 `json:"mode,omitempty"`   // permission and special bits, as chmod takes them; not for links
 	Target string `json:"target,omitempty"` // a link's target
-	Blob   *blob  `json:"blob,omitempty"`   // a file's content
+	Blob   *Blob  `json:"blob,omitempty"`   // a file's content
 }
 
 // The types of tree entries.
 const (
-	entryDir  = "dir"
-	entryFile = "file"
-	entryLink = "link"
+	EntryDir  = "dir"
+	EntryFile = "file"
+	EntryLink = "link"
 )
 
-// encode returns t's canonical encoding, the content of its blob.
-func (t *tree) encode() []byte {
+// Encode returns t's canonical encoding, the content of its blob.
+func (t *Tree) Encode() []byte {
 	data, err := json.Marshal(t)
 	if err != nil {
 		panic(err) // a tree always encodes
@@ -162,82 +171,74 @@ func (t *tree) encode() []byte {
 	return data
 }
 
-// digest returns the digest that t's blob has, whether or not it is stored.
-func (t *tree) digest() blob {
-	data := t.encode()
-	return blob{Digest: digest.FromBytes(data), Size: int64(len(data))}
+// Digest returns the digest that t's blob has, whether or not it is stored.
+func (t *Tree) Digest() Blob {
+	data := t.Encode()
+	return Blob{Digest: digest.FromBytes(data), Size: int64(len(data))}
 }
 
-// putFile stores the file name in fsys as a blob. It hashes the file first, and copies it only if
+// PutFile stores the file name in fsys as a blob. It hashes the file first, and copies it only if
 // the cache lacks that content, so a file the cache already holds is read once and not written.
 // The blob returned is always the content the cache holds, even if the file changes as it is read.
-// It fails with errOverLimit, storing nothing, if the file holds more than limit bytes, and reads at most
+// It fails with ErrOverLimit, storing nothing, if the file holds more than limit bytes, and reads at most
 // one byte past the limit, so a file that grows as it is read can't fill the cache.
-func (c *cache) putFile(fsys afero.Fs, name string, limit int64) (blob, error) {
-	f, err := fsys.Open(name)
+func (c *Cache) PutFile(fsys afero.Fs, name string, limit int64) (Blob, error) {
+	b, err := HashFile(fsys, name, limit)
 	if err != nil {
-		return blob{}, err
+		return Blob{}, err
 	}
-	digester := digest.Canonical.Digester()
-	size, err := io.Copy(digester.Hash(), io.LimitReader(f, limit+1))
-	f.Close()
-	if err != nil {
-		return blob{}, err
-	}
-	if size > limit {
-		return blob{}, errOverLimit
-	}
-	b := blob{Digest: digester.Digest(), Size: size}
-	if _, err := os.Stat(c.blobPath(b.Digest)); err == nil {
+	if c.Has(b) == nil {
 		return b, nil
 	}
-	f, err = fsys.Open(name)
+	f, err := fsys.Open(name)
 	if err != nil {
-		return blob{}, err
+		return Blob{}, err
 	}
 	defer f.Close()
 	return c.put(f, limit)
 }
 
-// putFiles stores the files that sel selects within dir in fsys, and returns the tree that
-// describes them, without storing it.
-func (c *cache) putFiles(fsys afero.Fs, dir string, sel *selection) (*tree, error) {
-	return walkTree(fsys, dir, sel, func(name string, limit int64) (blob, error) {
-		return c.putFile(fsys, name, limit)
-	})
-}
-
-// putTree stores the files that sel selects within dir in fsys, and then the tree that describes them.
-func (c *cache) putTree(fsys afero.Fs, dir string, sel *selection) (blob, error) {
-	t, err := c.putFiles(fsys, dir, sel)
+// HashFile returns the blob that the file name in fsys would be stored as, storing nothing. It fails with
+// ErrOverLimit if the file holds more than limit bytes, and reads at most one byte past the limit.
+func HashFile(fsys afero.Fs, name string, limit int64) (Blob, error) {
+	f, err := fsys.Open(name)
 	if err != nil {
-		return blob{}, err
+		return Blob{}, err
 	}
-	return c.putBytes(t.encode())
+	defer f.Close()
+	digester := digest.Canonical.Digester()
+	size, err := io.Copy(digester.Hash(), io.LimitReader(f, limit+1))
+	if err != nil {
+		return Blob{}, err
+	}
+	if size > limit {
+		return Blob{}, ErrOverLimit
+	}
+	return Blob{Digest: digester.Digest(), Size: size}, nil
 }
 
-// readTree returns the tree stored as blob b.
-func (c *cache) readTree(b blob) (*tree, error) {
-	data, err := c.readBytes(b)
+// ReadTree returns the tree stored as blob b.
+func (c *Cache) ReadTree(b Blob) (*Tree, error) {
+	data, err := c.ReadBytes(b)
 	if err != nil {
 		return nil, err
 	}
-	var t tree
+	var t Tree
 	if err := json.Unmarshal(data, &t); err != nil {
 		return nil, fmt.Errorf("tree %s: %w", b.Digest, err)
 	}
 	return &t, nil
 }
 
-// checkTree reports whether the tree stored as blob b, or any of its files, is missing.
-func (c *cache) checkTree(b blob) error {
-	t, err := c.readTree(b)
+// CheckTree reports whether the tree stored as blob b, or any of its files, is missing.
+func (c *Cache) CheckTree(b Blob) error {
+	t, err := c.ReadTree(b)
 	if err != nil {
 		return err
 	}
 	for _, e := range t.Entries {
 		if e.Blob != nil {
-			if _, err := os.Stat(c.blobPath(e.Blob.Digest)); err != nil {
+			if err := c.Has(*e.Blob); err != nil {
 				return fmt.Errorf("%s: %w", e.Path, err)
 			}
 		}
@@ -245,18 +246,18 @@ func (c *cache) checkTree(b blob) error {
 	return nil
 }
 
-// checkout writes the files of the tree stored as blob b into dir on disk, which must exist, and
+// Checkout writes the files of the tree stored as blob b into dir on disk, which must exist, and
 // returns the tree.
 // Folders above an entry that the tree doesn't list are made with the usual mode. Entries that
-// would be written outside dir are refused: walkTree never makes them, but the cache is a folder
+// would be written outside dir are refused: Walk never makes them, but the cache is a folder
 // on disk that anything running as root could change.
-func (c *cache) checkout(b blob, dir string) (*tree, error) {
-	t, err := c.readTree(b)
+func (c *Cache) Checkout(b Blob, dir string) (*Tree, error) {
+	t, err := c.ReadTree(b)
 	if err != nil {
 		return nil, err
 	}
 	links := map[string]bool{}
-	var dirs []treeEntry
+	var dirs []TreeEntry
 	for _, e := range t.Entries {
 		if !filepath.IsLocal(filepath.FromSlash(e.Path)) {
 			return nil, fmt.Errorf("tree %s: %q is outside it", b.Digest, e.Path)
@@ -275,17 +276,17 @@ func (c *cache) checkout(b blob, dir string) (*tree, error) {
 			return nil, err
 		}
 		switch {
-		case e.Type == entryDir:
+		case e.Type == EntryDir:
 			if err := os.Mkdir(dst, 0o700); err != nil {
 				return nil, err
 			}
 			dirs = append(dirs, e)
-		case e.Type == entryLink:
+		case e.Type == EntryLink:
 			if err := os.Symlink(e.Target, dst); err != nil {
 				return nil, err
 			}
 			links[e.Path] = true
-		case e.Type == entryFile && e.Blob != nil:
+		case e.Type == EntryFile && e.Blob != nil:
 			if err := c.checkoutFile(*e.Blob, dst, e.Mode); err != nil {
 				return nil, fmt.Errorf("%s: %w", e.Path, err)
 			}
@@ -303,8 +304,8 @@ func (c *cache) checkout(b blob, dir string) (*tree, error) {
 }
 
 // checkoutFile copies blob b to a new file at dst with the given chmod bits.
-func (c *cache) checkoutFile(b blob, dst string, mode uint32) error {
-	in, err := c.open(b)
+func (c *Cache) checkoutFile(b Blob, dst string, mode uint32) error {
+	in, err := c.OpenBlob(b)
 	if err != nil {
 		return err
 	}
@@ -324,8 +325,8 @@ func (c *cache) checkoutFile(b blob, dst string, mode uint32) error {
 	return os.Chmod(dst, fileModeOf(mode))
 }
 
-// chmodBits returns the permission and special bits of info's mode, as chmod takes them.
-func chmodBits(info fs.FileInfo) uint32 {
+// ChmodBits returns the permission and special bits of info's mode, as chmod takes them.
+func ChmodBits(info fs.FileInfo) uint32 {
 	mode := fileMode(info)
 	bits := uint32(mode.Perm())
 	if mode&fs.ModeSetuid != 0 {
@@ -355,69 +356,29 @@ func fileModeOf(bits uint32) fs.FileMode {
 	return mode
 }
 
-// actionVersion changes whenever what a key covers, or how a target is built, changes, so that
-// results built the old way aren't reused.
-const actionVersion = 6
-
-// action is everything a target's result depends on. Its digest is the target's key in the
-// action cache. Target names are left out, so renaming a target keeps its results.
-type action struct {
-	Version  int          `json:"version"`
-	Kind     string       `json:"kind"`               // "layer" or "task"
-	Base     string       `json:"base"`               // image ID of the base, or "scratch"
-	Platform string       `json:"platform,omitempty"` // a layer's, as its image records it
-	Steps    []actionStep `json:"steps,omitempty"`    // in the order applied
-	Command  []string     `json:"command,omitempty"`  // a layer's default command
-	Source   string       `json:"source,omitempty"`   // a task's directory of output
-	Output   *selection   `json:"output,omitempty"`   // a task's output, within source
-}
-
-// actionStep is one step of an action. Op says which step, and which other
-// fields it uses.
-type actionStep struct {
-	Op    string   `json:"op"`              // "add", "run", "env", "build_env" or "workdir"
-	Files *blob    `json:"files,omitempty"` // add: tree of the files, as placed beneath dest
-	Epoch int64    `json:"epoch,omitempty"` // add: a task's epoch, in Unix seconds; it stamps what adds its files
-	Dest  string   `json:"dest,omitempty"`  // add
-	Owner string   `json:"owner,omitempty"` // add
-	Group string   `json:"group,omitempty"` // add
-	Argv  []string `json:"argv,omitempty"`  // run
-	Vars  []string `json:"vars,omitempty"`  // env and build_env: NAME=value, sorted
-	Dir   string   `json:"dir,omitempty"`   // workdir
-}
-
-// key returns a's key in the action cache.
-func (a *action) key() digest.Digest {
-	data, err := json.Marshal(a)
-	if err != nil {
-		panic(err) // an action always encodes
-	}
-	return digest.FromBytes(data)
-}
-
-// actionResult is the latest result of a target. Everything it names is in the cache or, for
+// ActionResult is the latest result of a target. Everything it names is in the cache or, for
 // a layer's image, in the container store, so a result can be checked before it is reused.
-type actionResult struct {
+type ActionResult struct {
 	Image  digest.Digest `json:"image,omitempty"`  // a layer's image: its config's digest and store ID
-	Output *blob         `json:"output,omitempty"` // a task's files, as a tree
-	Log    *blob         `json:"log,omitempty"`    // what its run() steps printed, if anything
+	Output *Blob         `json:"output,omitempty"` // a task's files, as a tree
+	Log    *Blob         `json:"log,omitempty"`    // what its run() steps printed, if anything
 	Epoch  int64         `json:"epoch"`            // the time its files were stamped with, in Unix seconds
 }
 
 // actionPath returns where the result for key is kept.
-func (c *cache) actionPath(key digest.Digest) string {
+func (c *Cache) actionPath(key digest.Digest) string {
 	return filepath.Join(c.dir, "ac", key.Encoded())
 }
 
-// result returns the latest result for key, or nil if there is none.
-func (c *cache) result(key digest.Digest) (*actionResult, error) {
+// Result returns the latest result for key, or nil if there is none.
+func (c *Cache) Result(key digest.Digest) (*ActionResult, error) {
 	data, err := os.ReadFile(c.actionPath(key))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	} else if err != nil {
 		return nil, err
 	}
-	var r actionResult
+	var r ActionResult
 	if err := json.Unmarshal(data, &r); err != nil {
 		// A result that can't be read is as good as none; the target's next run replaces it.
 		return nil, nil
@@ -425,9 +386,9 @@ func (c *cache) result(key digest.Digest) (*actionResult, error) {
 	return &r, nil
 }
 
-// setResult records r as the latest result for key, replacing any earlier one, so that the last
+// SetResult records r as the latest result for key, replacing any earlier one, so that the last
 // of two builds to finish wins.
-func (c *cache) setResult(key digest.Digest, r *actionResult) error {
+func (c *Cache) SetResult(key digest.Digest, r *ActionResult) error {
 	data, err := json.Marshal(r)
 	if err != nil {
 		return err
@@ -443,38 +404,80 @@ func (c *cache) setResult(key digest.Digest, r *actionResult) error {
 	return f.commit(c.actionPath(key))
 }
 
+// tagPath returns where the record of the tag name is kept.
+func (c *Cache) tagPath(name string) string {
+	return filepath.Join(c.dir, "tags", digest.FromString(name).Encoded())
+}
+
+// Tag returns the record of the tag name, such as an image's tag, or nil if there is none. Records are kept until
+// replaced, even by Clear.
+func (c *Cache) Tag(name string) ([]byte, error) {
+	data, err := os.ReadFile(c.tagPath(name))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	return data, err
+}
+
+// SetTag records data for the tag name, replacing any earlier record.
+func (c *Cache) SetTag(name string, data []byte) error {
+	f, err := c.create()
+	if err != nil {
+		return err
+	}
+	defer f.discard()
+	if _, err := f.Write(data); err != nil {
+		return err
+	}
+	return f.commit(c.tagPath(name))
+}
+
+// Clear removes every result and blob from the cache, but not tag records, returning how many results and blobs
+// it held.
+func (c *Cache) Clear() (results, blobs int, err error) {
+	resultEntries, _ := os.ReadDir(filepath.Join(c.dir, "ac"))
+	blobEntries, _ := os.ReadDir(filepath.Join(c.dir, "cas", "sha256"))
+	var errs []error
+	for _, sub := range []string{"ac", "cas", "tmp"} {
+		if err := os.RemoveAll(filepath.Join(c.dir, sub)); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return len(resultEntries), len(blobEntries), errors.Join(errs...)
+}
+
 // The streams a log records.
 const (
-	streamStdout byte = 1
-	streamStderr byte = 2
+	StreamStdout byte = 1
+	StreamStderr byte = 2
 )
 
-// logRecorder keeps what a target prints to stdout and stderr, in the order it was written,
+// LogRecorder keeps what a target prints to stdout and stderr, in the order it was written,
 // so that a later build can replay it when it reuses the target's result. It writes the log to the
 // cache as it comes, so that a long one isn't held in memory.
-type logRecorder struct {
+type LogRecorder struct {
 	mu   sync.Mutex
 	file *pendingFile // records of a stream byte, a uvarint length and that many bytes
 	err  error        // the first error writing file
 }
 
-// newLog starts recording a log. The caller saves or discards it.
-func (c *cache) newLog() (*logRecorder, error) {
+// NewLog starts recording a log. The caller saves or discards it.
+func (c *Cache) NewLog() (*LogRecorder, error) {
 	f, err := c.create()
 	if err != nil {
 		return nil, err
 	}
-	return &logRecorder{file: f}, nil
+	return &LogRecorder{file: f}, nil
 }
 
-// writer returns a writer that passes output for stream on to w, recording it as well.
-func (l *logRecorder) writer(stream byte, w io.Writer) io.Writer {
+// Writer returns a writer that passes output for stream on to w, recording it as well.
+func (l *LogRecorder) Writer(stream byte, w io.Writer) io.Writer {
 	return logWriter{l, stream, w}
 }
 
-// logWriter records what is written to one stream of a logRecorder.
+// logWriter records what is written to one stream of a LogRecorder.
 type logWriter struct {
-	l      *logRecorder
+	l      *LogRecorder
 	stream byte
 	w      io.Writer
 }
@@ -495,8 +498,8 @@ func (lw logWriter) Write(data []byte) (int, error) {
 	return lw.w.Write(data)
 }
 
-// save stores the log as a blob in c, returning nil if nothing was written.
-func (l *logRecorder) save(c *cache) (*blob, error) {
+// Save stores the log as a blob in c, returning nil if nothing was written.
+func (l *LogRecorder) Save(c *Cache) (*Blob, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.err != nil {
@@ -512,13 +515,13 @@ func (l *logRecorder) save(c *cache) (*blob, error) {
 	return &b, nil
 }
 
-// discard removes the log, unless it has been saved.
-func (l *logRecorder) discard() {
+// Discard removes the log, unless it has been saved.
+func (l *LogRecorder) Discard() {
 	l.file.discard()
 }
 
-// replayLog writes a log recorded by a logRecorder to stdout and stderr, in its original order.
-func replayLog(log io.Reader, stdout, stderr io.Writer) error {
+// ReplayLog writes a log recorded by a LogRecorder to stdout and stderr, in its original order.
+func ReplayLog(log io.Reader, stdout, stderr io.Writer) error {
 	r := bufio.NewReader(log)
 	for {
 		stream, err := r.ReadByte()
@@ -532,11 +535,16 @@ func replayLog(log io.Reader, stdout, stderr io.Writer) error {
 			return fmt.Errorf("reading log: %w", err)
 		}
 		w := stdout
-		if stream == streamStderr {
+		if stream == StreamStderr {
 			w = stderr
 		}
 		if _, err := io.CopyN(w, r, int64(n)); err != nil {
 			return fmt.Errorf("reading log: %w", err)
 		}
 	}
+}
+
+// fileMode returns the permission and special bits of info's mode.
+func fileMode(info fs.FileInfo) fs.FileMode {
+	return info.Mode() & (fs.ModePerm | fs.ModeSetuid | fs.ModeSetgid | fs.ModeSticky)
 }

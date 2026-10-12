@@ -1,4 +1,4 @@
-package internal
+package cli
 
 import (
 	"path/filepath"
@@ -657,7 +657,7 @@ func TestParams(t *testing.T) {
 	dir := t.TempDir()
 
 	// By default, mode is release, so "mode" with app's mode is the same target as with "release".
-	r := vamos(t, fsys, "write", "app", filepath.Join(dir, "1.tar"), "-C", projectDir).succeeds(t)
+	r := vamos(t, fsys, "save", "app", filepath.Join(dir, "1.tar"), "-C", projectDir).succeeds(t)
 	assertTargets(t, r, map[string]string{
 		`task "plain"`: "building",
 		`task "mode"`:  "building",
@@ -680,7 +680,7 @@ func TestParams(t *testing.T) {
 
 	// In debug mode, the task that app passes mode to runs again, and the one named in release mode stays.
 	// Lists keep their order, so en,es names other files in the same order.
-	r = vamos(t, fsys, "write", "app", filepath.Join(dir, "2.tar"), "-C", projectDir,
+	r = vamos(t, fsys, "save", "app", filepath.Join(dir, "2.tar"), "-C", projectDir,
 		"--set", "mode=debug", "--set", "languages=es,en").succeeds(t)
 	assertTargets(t, r, map[string]string{
 		`task "plain"`:               "cached",
@@ -745,7 +745,7 @@ layer(
 `,
 	})
 	out := filepath.Join(t.TempDir(), "app.tar")
-	r := vamos(t, fsys, "write", "app", out, "-C", filepath.Join(projectDir, "app")).succeeds(t)
+	r := vamos(t, fsys, "save", "app", out, "-C", filepath.Join(projectDir, "app")).succeeds(t)
 	// The layer has no steps, so its key is the same in every run.
 	if !strings.Contains(r.stdout, `layer "debug" (mode="debug"): `) {
 		t.Errorf("stdout = %q, want the base built in debug mode", r.stdout)

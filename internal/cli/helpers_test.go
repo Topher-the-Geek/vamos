@@ -1,4 +1,4 @@
-package internal
+package cli
 
 import (
 	"archive/tar"
@@ -16,6 +16,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/Topher-the-Geek/vamos/internal/testenv"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/spf13/afero"
@@ -28,7 +29,15 @@ import (
 const pullBusybox = `pull(name="busybox", image="docker.io/library/busybox", tag="1.36")` + "\n"
 
 // projectDir is where in-memory test projects live.
-const projectDir = "/project"
+const projectDir = testenv.ProjectDir
+
+// The helpers of testenv, as this package's tests name them.
+var (
+	project        = testenv.Project
+	diskProject    = testenv.DiskProject
+	requireBuildah = testenv.RequireBuildah
+	must           = testenv.Must
+)
 
 func TestMain(m *testing.M) {
 	// buildah re-executes the test binary to run build steps.
@@ -39,66 +48,6 @@ func TestMain(m *testing.M) {
 		os.Setenv("BUILDAH_ISOLATION", "chroot")
 	}
 	os.Exit(m.Run())
-}
-
-// requireBuildah skips tests that build images when that isn't possible.
-func requireBuildah(t *testing.T) {
-	t.Helper()
-	if testing.Short() {
-		t.Skip("builds an image; skipped with -short")
-	}
-	if os.Geteuid() != 0 {
-		t.Skip("builds an image, which needs root")
-	}
-}
-
-// project returns an in-memory filesystem holding files, keyed by their path within
-// projectDir.
-func project(t *testing.T, files map[string]string) afero.Fs {
-	t.Helper()
-	fsys := afero.NewMemMapFs()
-	if err := fsys.MkdirAll(projectDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for name, content := range files {
-		path := filepath.Join(projectDir, name)
-		// MemMapFs would make missing folders with no permissions.
-		if err := fsys.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := afero.WriteFile(fsys, path, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return fsys
-}
-
-// diskProject is like project, but keeps the files on disk, under root/project, for tests
-// that need symbolic links or that write into the project. Links maps a link's path within
-// projectDir to its target.
-func diskProject(t *testing.T, files, links map[string]string) (fsys afero.Fs, root string) {
-	t.Helper()
-	root = t.TempDir()
-	fsys = afero.NewBasePathFs(afero.NewOsFs(), root)
-	for name, content := range files {
-		path := filepath.Join(projectDir, name)
-		if err := fsys.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := afero.WriteFile(fsys, path, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for name, target := range links {
-		path := filepath.Join(root, projectDir, name)
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Symlink(target, path); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return fsys, root
 }
 
 // unnamedImages returns the IDs of the images in the local container store that have no
@@ -383,13 +332,5 @@ func fakeDockerOn(t *testing.T, network, reply, machine string) func() [][]byte 
 		mu.Lock()
 		defer mu.Unlock()
 		return loaded
-	}
-}
-
-// must fails the test at once if err isn't nil.
-func must(t *testing.T, err error) {
-	t.Helper()
-	if err != nil {
-		t.Fatal(err)
 	}
 }

@@ -1,4 +1,4 @@
-package internal
+package cli
 
 import (
 	"fmt"
@@ -48,7 +48,7 @@ task(name="test", base="app", steps=[run(["false"])], source="/app", include=["a
 	})
 	out := filepath.Join(t.TempDir(), "app.tar")
 
-	r := vamos(t, fsys, "write", "app", out, "-C", filepath.Join(projectDir, "app")).succeeds(t)
+	r := vamos(t, fsys, "save", "app", out, "-C", filepath.Join(projectDir, "app")).succeeds(t)
 
 	if !strings.Contains(r.stdout, `task "//lib:make": building`) {
 		t.Errorf("stdout = %q, want another package's target named by its label", r.stdout)
@@ -254,7 +254,7 @@ func TestWorkspaceTargetMistakes(t *testing.T) {
 		},
 		{
 			name: "send a glob",
-			args: []string{"write", "//lib:code", "app.tar"},
+			args: []string{"save", "//lib:code", "app.tar"},
 			want: `"//lib:code" is a glob(), whose files are read by the targets that add them, not an image`,
 		},
 		{

@@ -1,15 +1,21 @@
-package internal
+package load
 
 import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"path"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 
+	"github.com/Topher-the-Geek/vamos/internal/cache"
+	"github.com/Topher-the-Geek/vamos/internal/fileset"
+	"github.com/Topher-the-Geek/vamos/internal/graph"
+
+	"github.com/containerd/platforms"
+	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/spf13/afero"
 	"go.podman.io/image/v5/docker/reference"
 	"go.starlark.net/starlark"
@@ -20,15 +26,16 @@ import (
 // A package is named by its directory relative to the workspace's root, "" for the root itself, and a
 // target by its label, "//dir:name".
 type workspace struct {
-	fs       afero.Fs
-	root     string                // absolute: the directory holding the WORKSPACE file, or else the only package
-	current  string                // the package of -C, whose targets are named without a label
-	packages map[string]*buildFile // those loaded, by package
-	loading  []string              // packages being loaded, innermost last, to report a cycle
-	modules  map[string]*module    // .star files loaded, by label
-	platform *platformValue        // the command's, given with --platform: the named target's, unless an index
-	configs  map[string]*config    // every configuration made, by key, so that equal ones are the same
-	builtins starlark.StringDict   // of BUILD and .star files, made once
+	fs           afero.Fs
+	root         string                // absolute: the directory holding the WORKSPACE file, or else the only package
+	current      string                // the package of -C, whose targets are named without a label
+	packages     map[string]*buildFile // those loaded, by package
+	loading      []string              // packages being loaded, innermost last, to report a cycle
+	modules      map[string]*module    // .star files loaded, by label
+	execPlatform *platformValue        // the executor's, which run() steps run on without emulation, as EXEC_PLATFORM
+	platform     *platformValue        // the command's, given with --platform: the named target's, unless an index
+	configs      map[string]*config    // every configuration made, by key, so that equal ones are the same
+	builtins     starlark.StringDict   // of BUILD and .star files, made once
 }
 
 // buildFile is the targets declared by the BUILD file of one package.
@@ -115,11 +122,11 @@ type pullSpec struct {
 // fileSet is a set of files that add() can name in its source: files in a package, declared by
 // glob(), or files a task makes.
 type fileSet struct {
-	label       string      // of the glob or task
-	task        *targetSpec // the task that makes the files, or nil for a glob
-	dir         string      // a glob's package directory
-	sel         *selection  // the files, within dir or the task's source
-	configuring string      // a glob given by a function of ctx: the target and configuration, for errors
+	label       string             // of the glob or task
+	task        *targetSpec        // the task that makes the files, or nil for a glob
+	dir         string             // a glob's package directory
+	sel         *fileset.Selection // the files, within dir or the task's source
+	configuring string             // a glob given by a function of ctx: the target and configuration, for errors
 }
 
 // targetSpec runs on another target's image, declared by a call to layer() or task(). A layer's
@@ -143,17 +150,6 @@ type indexSpec struct {
 	manifests []targetRef // in the order given, which the index keeps
 }
 
-// sets returns the file sets that s's steps add, in order.
-func (s *targetSpec) sets() []*fileSet {
-	var sets []*fileSet
-	for _, in := range s.steps {
-		if set := in.source(); set != nil {
-			sets = append(sets, set)
-		}
-	}
-	return sets
-}
-
 // madeStep is a step made by a call to the builtin kind at pos.
 type madeStep struct {
 	step step
@@ -171,8 +167,9 @@ func (e *loadError) Unwrap() error { return e.err }
 
 // openWorkspace returns the workspace that holds dir, the directory given with -C: the nearest
 // directory at or above dir with a WORKSPACE file, or else dir alone. A WORKSPACE file only marks the
-// workspace's root. It loads no BUILD file yet.
-func openWorkspace(fsys afero.Fs, dir string) (*workspace, error) {
+// workspace's root. It loads no BUILD file yet. exec is the executor's platform, which targets are built for
+// unless --platform gives another.
+func openWorkspace(fsys afero.Fs, dir string, exec imgspecv1.Platform) (*workspace, error) {
 	info, err := fsys.Stat(dir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("directory %s does not exist", dir)
@@ -201,14 +198,17 @@ func openWorkspace(fsys afero.Fs, dir string) (*workspace, error) {
 	if current == "." {
 		current = ""
 	}
+	// The graph's platforms must be normalized, and an executor's may not be.
+	exec = platforms.Normalize(exec)
 	return &workspace{
-		fs:       fsys,
-		root:     root,
-		current:  filepath.ToSlash(current),
-		packages: map[string]*buildFile{},
-		modules:  map[string]*module{},
-		platform: execPlatform,
-		configs:  map[string]*config{},
+		fs:           fsys,
+		root:         root,
+		current:      filepath.ToSlash(current),
+		packages:     map[string]*buildFile{},
+		modules:      map[string]*module{},
+		execPlatform: &platformValue{exec},
+		platform:     &platformValue{exec},
+		configs:      map[string]*config{},
 	}, nil
 }
 
@@ -247,6 +247,8 @@ func checkName(name string) error {
 		return fmt.Errorf("name %q is reserved for the empty base image", name)
 	case strings.ContainsAny(name, ":/"):
 		return fmt.Errorf(`name %q must not contain ":" or "/", which labels use`, name)
+	case strings.Contains(name, "\x00"):
+		return fmt.Errorf("name %q must not contain a NUL byte", name)
 	}
 	return nil
 }
@@ -359,7 +361,7 @@ func (f *buildFile) namesOf(kinds ...string) []string {
 
 // missing reports that f has no target name, suggesting the one meant.
 func (f *buildFile) missing(name string) error {
-	hint := "; its targets are " + quoteNames(f.names)
+	hint := "; its targets are " + fileset.QuoteNames(f.names)
 	if strings.Contains(name, ":") {
 		hint = labelHint(name)
 	} else if len(f.names) == 0 {
@@ -371,7 +373,7 @@ func (f *buildFile) missing(name string) error {
 }
 
 // exec executes the BUILD file f, whose source is src, declaring its targets in f. The files named by its
-// globs are checked only once they are needed, by checkSources.
+// globs are read only once a build needs them, by readGlobs.
 func (w *workspace) exec(f *buildFile, src []byte) error {
 	c := &evalContext{mode: declaring, file: f, listed: map[step]bool{}}
 	thread := &starlark.Thread{Name: f.path, Load: w.loadModule}
@@ -450,16 +452,16 @@ func (w *workspace) predeclared() starlark.StringDict {
 	if w.builtins != nil {
 		return w.builtins
 	}
-	selectionParams := func(required bool) []string {
-		params := defaultSelection().params(new(*starlark.List), new(*starlark.List), required)
+	selectionNames := func(required bool) []string {
+		params := selectionParams(fileset.DefaultSelection(), new(*starlark.List), new(*starlark.List), required)
 		var names []string
 		for i := 0; i < len(params); i += 2 {
 			names = append(names, params[i].(string))
 		}
 		return names
 	}
-	globParams := append([]string{"name"}, selectionParams(true)...)
-	taskParams := append([]string{"name", "base", "steps?", "source?"}, selectionParams(false)...)
+	globParams := append([]string{"name"}, selectionNames(true)...)
+	taskParams := append([]string{"name", "base", "steps?", "source?"}, selectionNames(false)...)
 	w.builtins = starlark.StringDict{
 		"glob":          w.declarer("glob", globParams, w.makeGlob),
 		"pull":          w.declarer("pull", []string{"name", "image", "tag?"}, w.makePull),
@@ -648,12 +650,12 @@ func (w *workspace) makeGlob(
 ) (string, any, error) {
 	var name string
 	var include, exclude *starlark.List
-	sel := defaultSelection()
-	params := append([]any{"name", &name}, sel.params(&include, &exclude, true)...)
+	sel := fileset.DefaultSelection()
+	params := append([]any{"name", &name}, selectionParams(sel, &include, &exclude, true)...)
 	if err := starlark.UnpackArgs(fn.Name(), args, kwargs, params...); err != nil {
 		return "", nil, err
 	}
-	if err := sel.selectFiles(fn.Name(), include, exclude, c.file.dir); err != nil {
+	if err := selectFiles(sel, fn.Name(), include, exclude, c.file.dir); err != nil {
 		return "", nil, err
 	}
 	return name, &fileSet{label: label(c.file.pkg, name), dir: c.file.dir, sel: sel}, nil
@@ -747,13 +749,16 @@ func (w *workspace) newAdd(
 	if _, err := w.resolve(c, fn, "source", &ref, false); err != nil {
 		return nil, err
 	}
-	if err := checkPath("dest", dest); err != nil {
+	if err := graph.CheckPath("dest", dest); err != nil {
 		return nil, fmt.Errorf("%s: %w", fn.Name(), err)
 	}
 	for _, id := range [][2]string{{"owner", owner}, {"group", group}} {
 		if strings.Contains(id[1], ":") {
 			return nil, fmt.Errorf(`%s: %s %q must not contain ":"; give owner and group apart`,
 				fn.Name(), id[0], id[1])
+		}
+		if strings.Contains(id[1], "\x00") {
+			return nil, fmt.Errorf("%s: %s %q must not contain a NUL byte", fn.Name(), id[0], id[1])
 		}
 	}
 	return &addStep{target: ref, display: source.String(), dest: dest, owner: owner, group: group}, nil
@@ -809,13 +814,13 @@ func (w *workspace) makeTask(
 	var name, source string
 	var base starlark.Value
 	var steps, include, exclude *starlark.List
-	sel := defaultSelection()
+	sel := fileset.DefaultSelection()
 	params := append([]any{
 		"name", &name,
 		"base", &base,
 		"steps?", &steps,
 		"source?", &source,
-	}, sel.params(&include, &exclude, false)...)
+	}, selectionParams(sel, &include, &exclude, false)...)
 	if err := starlark.UnpackArgs(fn.Name(), args, kwargs, params...); err != nil {
 		return "", nil, err
 	}
@@ -835,7 +840,10 @@ func (w *workspace) makeTask(
 		if !path.IsAbs(source) {
 			return "", nil, fmt.Errorf("%s: source %q must be an absolute path", fn.Name(), source)
 		}
-		if err := sel.selectFiles(fn.Name(), include, exclude, source); err != nil {
+		if strings.Contains(source, "\x00") {
+			return "", nil, fmt.Errorf("%s: source %q must not contain a NUL byte", fn.Name(), source)
+		}
+		if err := selectFiles(sel, fn.Name(), include, exclude, source); err != nil {
 			return "", nil, err
 		}
 		s.output = &fileSet{label: s.label, sel: sel}
@@ -985,10 +993,37 @@ func (w *workspace) imageTarget(name string) (string, string, error) {
 		return "", "", fmt.Errorf("%q is a glob(), whose files are read by the targets that add them, not an image; "+
 			"name a pull(), layer() or index() to send", name)
 	case "task":
+		hint := ""
+		if w.declaration(l).hasOutput {
+			hint = `, or export the task's files with "vamos export"`
+		}
 		return "", "", fmt.Errorf("%q is a task(), whose image is discarded once it runs; "+
-			"name a pull(), layer() or index() to send", name)
+			"name a pull(), layer() or index() to send%s", name, hint)
 	}
 	return l, kind, nil
+}
+
+// filesTarget returns the label of the task whose files to export that name, given on the command line, names.
+func (w *workspace) filesTarget(name string) (string, error) {
+	l, kind, err := w.target(name)
+	if err != nil {
+		return "", err
+	}
+	switch kind {
+	case "task":
+		if !w.declaration(l).hasOutput {
+			return "", fmt.Errorf("%q is a task() without source, so it has no files to export; "+
+				"%q runs it", name, "vamos build "+name)
+		}
+		return l, nil
+	case "glob":
+		return "", fmt.Errorf("%q is a glob(), whose files are already in the project; export writes a task's files",
+			name)
+	case "index":
+		return "", fmt.Errorf("%q is an index(), not a task(); export writes a task's files", name)
+	}
+	return "", fmt.Errorf(`%q is %s %s(), not a task(); export writes a task's files, and "vamos save" writes an image`,
+		name, article(kind), kind)
 }
 
 // declaration returns the declaration of the target with label l, whose package is loaded.
@@ -998,26 +1033,23 @@ func (w *workspace) declaration(l string) *declaration {
 	return w.packages[rest[:i]].decls[rest[i+1:]]
 }
 
-// checkSources reports a glob added by a target in g whose patterns' prefixes aren't in its package,
-// before anything is built. Whether its patterns match files is found as they are read.
-func (w *workspace) checkSources(g *graph) error {
-	checked := map[*fileSet]bool{}
-	for _, s := range g.targets {
-		for _, set := range s.sets() {
-			if set.task != nil || checked[set] {
-				continue
+// readGlobs reads the files of each glob in g, whose files are globs, by node, with store, which returns their tree,
+// setting the trees of g's Source nodes. A glob's files are read once, before anything is built, so that every
+// target that adds them gets the same files, as the build cache stored them, even if they change during the build.
+func (w *workspace) readGlobs(
+	g *graph.Graph, globs map[graph.Ref]*fileSet, store func(dir string, sel *fileset.Selection) (cache.Blob, error),
+) error {
+	for _, ref := range slices.Sorted(maps.Keys(globs)) {
+		set := globs[ref]
+		tree, err := store(set.dir, set.sel)
+		if err != nil {
+			err = fmt.Errorf("%s: glob: %w", w.declaration(set.label).pos, err)
+			if set.configuring != "" {
+				err = fmt.Errorf("%w (configuring %s)", err, set.configuring)
 			}
-			checked[set] = true
-			for _, p := range set.sel.include {
-				if err := checkInclude(w.fs, set.dir, p); err != nil {
-					err = fmt.Errorf("%s: glob: %w", w.declaration(set.label).pos, err)
-					if set.configuring != "" {
-						err = fmt.Errorf("%w (configuring %s)", err, set.configuring)
-					}
-					return err
-				}
-			}
+			return err
 		}
+		g.Node(ref).Source.Tree = tree
 	}
 	return nil
 }
@@ -1091,16 +1123,7 @@ func describeNames(kind string, names []string) string {
 	if len(names) == 0 {
 		return "; there are none before this"
 	}
-	return "; earlier " + kind + " are " + quoteNames(names)
-}
-
-// quoteNames lists names, quoted, for a message.
-func quoteNames(names []string) string {
-	quoted := make([]string, len(names))
-	for i, name := range names {
-		quoted[i] = strconv.Quote(name)
-	}
-	return strings.Join(quoted, ", ")
+	return "; earlier " + kind + " are " + fileset.QuoteNames(names)
 }
 
 // describeEvalError reports e at the innermost position within a BUILD file, in the
@@ -1139,6 +1162,9 @@ func stringList(fnName, param string, list *starlark.List) ([]string, error) {
 		if !ok {
 			return nil, fmt.Errorf("%s: %s[%d] is %s, want string%s",
 				fnName, param, i, list.Index(i).Type(), functionHint(list.Index(i)))
+		}
+		if strings.Contains(s, "\x00") {
+			return nil, fmt.Errorf("%s: %s[%d] must not contain a NUL byte", fnName, param, i)
 		}
 		out = append(out, s)
 	}

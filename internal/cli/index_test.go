@@ -1,4 +1,4 @@
-package internal
+package cli
 
 import (
 	"bytes"
@@ -150,7 +150,7 @@ layer(name="server", base="inner")`,
 		t.Run(tt.name, func(t *testing.T) {
 			fsys := project(t, map[string]string{"BUILD": layers + tt.build, "app.sh": "echo hi"})
 			out := t.TempDir()
-			args := append([]string{"write", "server", filepath.Join(out, "app.tar"), "-C", projectDir}, tt.args...)
+			args := append([]string{"save", "server", filepath.Join(out, "app.tar"), "-C", projectDir}, tt.args...)
 			vamos(t, fsys, args...).failsWith(t, false, tt.want...)
 			assertNoFiles(t, out)
 		})
@@ -179,7 +179,7 @@ index(
 `, nonce, native, foreign())
 }
 
-// TestIndex builds an index, and sends it: push sends every manifest, in order, with its platform, while write
+// TestIndex builds an index, and sends it: push sends every manifest, in order, with its platform, while save
 // and load, which take one image, send the manifest for the platform of the machine that will run it.
 func TestIndex(t *testing.T) {
 	requireBuildah(t)
@@ -232,9 +232,36 @@ func TestIndex(t *testing.T) {
 		}
 	})
 
-	t.Run("write", func(t *testing.T) {
+	t.Run("push from the client", func(t *testing.T) {
+		server := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))
+		t.Cleanup(server.Close)
+		image := strings.TrimPrefix(server.URL, "http://") + "/server:v1"
+		r := vamos(t, fsys, "push", "server", image, "--set", "greeting=hola", "--push-from=client",
+			"--tls-verify=false", "-C", projectDir).succeeds(t)
+
+		ref, err := name.ParseReference(image, name.Insecure)
+		must(t, err)
+		index, err := remote.Index(ref)
+		must(t, err)
+		digest, err := index.Digest()
+		must(t, err)
+		if !strings.HasSuffix(r.stdout, "Index built! "+image+" "+digest.String()+"\n") {
+			t.Errorf("stdout = %q, want it to end with the index's digest, %s", r.stdout, digest)
+		}
+		manifest, err := index.IndexManifest()
+		must(t, err)
+		var got []string
+		for _, m := range manifest.Manifests {
+			got = append(got, m.Platform.OS+"/"+m.Platform.Architecture)
+		}
+		if want := []string{native, foreign()}; strings.Join(got, " ") != strings.Join(want, " ") {
+			t.Errorf("manifests are for %q, want %q, in order", got, want)
+		}
+	})
+
+	t.Run("save", func(t *testing.T) {
 		out := filepath.Join(t.TempDir(), "server.tar")
-		vamos(t, fsys, "write", "server", out, "-C", projectDir).succeeds(t)
+		vamos(t, fsys, "save", "server", out, "-C", projectDir).succeeds(t)
 		assertPlatform(t, readImage(t, out), native)
 	})
 
@@ -288,7 +315,7 @@ index(name="server", layer={"%s": "other", "%s": dep("host")})
 	}
 }
 
-// TestIndexChoosesManifest checks that write and load, which send one image of an index, configure only the
+// TestIndexChoosesManifest checks that save and load, which send one image of an index, configure only the
 // manifest they send: another, which fails as it is configured, fails only a command that builds every manifest.
 func TestIndexChoosesManifest(t *testing.T) {
 	requireBuildah(t)
@@ -302,7 +329,7 @@ index(name="server", layer={"linux/s390x": "broken", "linux/amd64": "app", "linu
 	vamos(t, fsys, "build", "server", "-C", projectDir).failsWith(t, false, "configured broken for linux/s390x")
 
 	out := filepath.Join(t.TempDir(), "server.tar")
-	r := vamos(t, fsys, "write", "server", out, "-C", projectDir).succeeds(t)
+	r := vamos(t, fsys, "save", "server", out, "-C", projectDir).succeeds(t)
 	assertPlatform(t, readImage(t, out), native)
 	if strings.Contains(r.stdout, "broken") {
 		t.Errorf("stdout = %q, want only the host's manifest built", r.stdout)
@@ -330,7 +357,7 @@ index(name="server", layer="app", platforms=["linux/arm/v6", "linux/arm/v7"])
 `, nonce)})
 
 	out := filepath.Join(t.TempDir(), "app.tar")
-	vamos(t, fsys, "write", "app", out, "--platform", "linux/arm/v7", "-C", projectDir).succeeds(t)
+	vamos(t, fsys, "save", "app", out, "--platform", "linux/arm/v7", "-C", projectDir).succeeds(t)
 	img := readImage(t, out)
 	assertPlatform(t, img, "linux/arm/v7")
 	if cmd := imageCmd(t, img); !slices.Equal(cmd, []string{"app", nonce, "v7"}) {

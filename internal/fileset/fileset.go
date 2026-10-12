@@ -1,4 +1,7 @@
-package internal
+// Package fileset selects files, by include and exclude patterns, a mode mask and limits, and walks only the
+// folders the patterns could match to store them in the build cache as a tree: a glob's, from the project, or a
+// task's output, from its container.
+package fileset
 
 import (
 	"cmp"
@@ -8,10 +11,11 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
+	"github.com/Topher-the-Geek/vamos/internal/cache"
 	"github.com/spf13/afero"
-	"go.starlark.net/starlark"
 )
 
 // Defaults of a selection. The limits catch a pattern that reaches much further than meant, such as into
@@ -23,10 +27,10 @@ const (
 	defaultMaxTotalSize = 1 << 30   // 1 GiB
 )
 
-// selection says which files a glob() or a task's output holds: those within a directory that its include
+// Selection says which files a glob() or a task's output holds: those within a directory that its include
 // patterns match, less those its exclude patterns match. It is part of a task's action, so its fields are
 // encoded as the action is.
-type selection struct {
+type Selection struct {
 	Include      []string `json:"include"`           // cleaned patterns
 	Exclude      []string `json:"exclude,omitempty"` // cleaned patterns
 	ModeMask     int      `json:"mode_mask"`         // chmod bits kept of each file's and directory's mode
@@ -46,9 +50,9 @@ type pattern struct {
 	prefix string   // its leading parts without wildcards, or "." for none: the directory its files are beneath
 }
 
-// defaultSelection returns a selection with the default mode mask and limits, which has no patterns yet.
-func defaultSelection() *selection {
-	return &selection{
+// DefaultSelection returns a selection with the default mode mask and limits, which has no patterns yet.
+func DefaultSelection() *Selection {
+	return &Selection{
 		ModeMask:     defaultModeMask,
 		MaxFileCount: defaultMaxFileCount,
 		MaxFileSize:  defaultMaxFileSize,
@@ -56,58 +60,8 @@ func defaultSelection() *selection {
 	}
 }
 
-// params returns the parameters of glob() and task() that make a selection, for starlark.UnpackArgs. Its
-// include and exclude lists are unpacked into include and exclude, which selectFiles then checks, and the
-// rest into sel. include is optional unless required.
-func (sel *selection) params(include, exclude **starlark.List, required bool) []any {
-	includeParam := "include?"
-	if required {
-		includeParam = "include"
-	}
-	return []any{
-		includeParam, include,
-		"exclude?", exclude,
-		"mode_mask?", &sel.ModeMask,
-		"allow_no_files?", &sel.AllowNoFiles,
-		"max_file_count?", &sel.MaxFileCount,
-		"max_file_size?", &sel.MaxFileSize,
-		"max_total_size?", &sel.MaxTotalSize,
-	}
-}
-
-// isSelectionParam reports whether name is one of the parameters that params returns, so that task() can
-// tell those given without source from its own.
-func isSelectionParam(name string) bool {
-	params := defaultSelection().params(new(*starlark.List), new(*starlark.List), false)
-	for i := 0; i < len(params); i += 2 {
-		if strings.TrimSuffix(params[i].(string), "?") == name {
-			return true
-		}
-	}
-	return false
-}
-
-// selectFiles sets sel's patterns from the include and exclude arguments of a call to fnName, and checks
-// them, relative to dir.
-func (sel *selection) selectFiles(fnName string, include, exclude *starlark.List, dir string) error {
-	var err error
-	if sel.Include, err = stringList(fnName, "include", include); err != nil {
-		return err
-	}
-	if len(sel.Include) == 0 {
-		return fmt.Errorf("%s: include must not be empty", fnName)
-	}
-	if sel.Exclude, err = stringList(fnName, "exclude", exclude); err != nil {
-		return err
-	}
-	if err := sel.compile(dir); err != nil {
-		return fmt.Errorf("%s: %w", fnName, err)
-	}
-	return nil
-}
-
-// compile checks sel's patterns, relative to dir, mode mask and limits, cleans its patterns and parses them.
-func (sel *selection) compile(dir string) error {
+// Compile checks sel's patterns, relative to dir, mode mask and limits, cleans its patterns and parses them.
+func (sel *Selection) Compile(dir string) error {
 	switch {
 	case sel.ModeMask < 0 || sel.ModeMask > 0o7777:
 		return fmt.Errorf("mode_mask %O must be between 0 and 0o7777", sel.ModeMask)
@@ -235,14 +189,14 @@ func pathParts(rel string) []string {
 }
 
 // excluded reports whether an exclude pattern matches the path with the given parts.
-func (sel *selection) excluded(parts []string) bool {
+func (sel *Selection) excluded(parts []string) bool {
 	return slices.ContainsFunc(sel.exclude, func(p pattern) bool { return matchParts(p.parts, parts) })
 }
 
 // excludedWithin reports whether an exclude pattern matches the path with the given parts or a directory
 // that holds it. The walk skips an excluded directory and all it holds, so a walk that starts beneath one
 // must skip it too.
-func (sel *selection) excludedWithin(parts []string) bool {
+func (sel *Selection) excludedWithin(parts []string) bool {
 	for i := range parts {
 		if sel.excluded(parts[:i+1]) {
 			return true
@@ -254,7 +208,7 @@ func (sel *selection) excludedWithin(parts []string) bool {
 // matchPrefix returns the outermost prefix of the include patterns that match the path with the given parts,
 // or false if none does. The prefixes of patterns that match one path all hold it, so each holds the others or
 // is within them.
-func (sel *selection) matchPrefix(parts []string) (string, bool) {
+func (sel *Selection) matchPrefix(parts []string) (string, bool) {
 	prefix, matched := "", false
 	for _, p := range sel.include {
 		if matchParts(p.parts, parts) && (!matched || within(prefix, p.prefix)) {
@@ -264,20 +218,20 @@ func (sel *selection) matchPrefix(parts []string) (string, bool) {
 	return prefix, matched
 }
 
-// treeWalk is a walk of the files a selection selects within a directory, which walkTree describes.
+// treeWalk is a walk of the files a selection selects within a directory, which Walk describes.
 type treeWalk struct {
 	fsys     afero.Fs
 	dir      string
-	sel      *selection
-	file     func(name string, limit int64) (blob, error)
+	sel      *Selection
+	file     func(name string, limit int64) (cache.Blob, error)
 	dirModes map[string]uint32 // of the directories read but not yet recorded, by path relative to dir
-	entries  []treeEntry
+	entries  []cache.TreeEntry
 	files    int   // files and links selected
 	total    int64 // size of the files selected
 }
 
-// walkTree describes the files that sel selects within dir in fsys as a tree, passing each file's name to file
-// for its blob, with the most bytes the limits leave for it. file fails with errOverLimit if the file holds
+// Walk describes the files that sel selects within dir in fsys as a tree, passing each file's name to file
+// for its blob, with the most bytes the limits leave for it. file fails with ErrOverLimit if the file holds
 // more. It starts at each include pattern's prefix, and reads only directories that some include
 // pattern could match within and no exclude pattern matches. Directories beneath a prefix that hold selected
 // files are recorded too, with their modes, but not those at or above it, which the image keeps as they are.
@@ -285,9 +239,9 @@ type treeWalk struct {
 // The walk doesn't follow links within dir: they are recorded as links, as Docker's COPY does, so they can't
 // bring in files from outside it. checkInclude refuses links on the way to each prefix. dir itself may be a
 // link, as a project reached through a linked $PWD is.
-func walkTree(
-	fsys afero.Fs, dir string, sel *selection, file func(name string, limit int64) (blob, error),
-) (*tree, error) {
+func Walk(
+	fsys afero.Fs, dir string, sel *Selection, file func(name string, limit int64) (cache.Blob, error),
+) (*cache.Tree, error) {
 	w := &treeWalk{
 		fsys:     fsys,
 		dir:      dir,
@@ -332,15 +286,15 @@ func walkTree(
 		}
 	}
 	if w.files == 0 && !sel.AllowNoFiles {
-		subject := "include " + quoteNames(sel.Include)
+		subject := "include " + QuoteNames(sel.Include)
 		if len(sel.Exclude) > 0 {
-			subject += " but not exclude " + quoteNames(sel.Exclude)
+			subject += " but not exclude " + QuoteNames(sel.Exclude)
 		}
 		return nil, fmt.Errorf("no files in %s match %s; pass allow_no_files=True if that's expected", dir, subject)
 	}
 	w.recordBetween()
-	slices.SortFunc(w.entries, func(a, b treeEntry) int { return strings.Compare(a.Path, b.Path) })
-	return &tree{Entries: w.entries}, nil
+	slices.SortFunc(w.entries, func(a, b cache.TreeEntry) int { return strings.Compare(a.Path, b.Path) })
+	return &cache.Tree{Entries: w.entries}, nil
 }
 
 // visit walks the file at rel, relative to the walk's directory, which info describes.
@@ -381,7 +335,7 @@ func (w *treeWalk) visit(rel string, info fs.FileInfo) error {
 		return fmt.Errorf("more than max_file_count=%d files in %s match; exclude some, or raise the limit",
 			w.sel.MaxFileCount, w.dir)
 	}
-	entry := treeEntry{Path: rel}
+	entry := cache.TreeEntry{Path: rel}
 	switch {
 	case info.Mode()&fs.ModeSymlink != 0:
 		reader, ok := w.fsys.(afero.LinkReader)
@@ -392,7 +346,7 @@ func (w *treeWalk) visit(rel string, info fs.FileInfo) error {
 		if err != nil {
 			return err
 		}
-		entry.Type, entry.Target = entryLink, target
+		entry.Type, entry.Target = cache.EntryLink, target
 	case !info.Mode().IsRegular():
 		return fmt.Errorf("%s is not a regular file, directory or symbolic link", src)
 	default:
@@ -406,7 +360,7 @@ func (w *treeWalk) visit(rel string, info fs.FileInfo) error {
 			return w.overTotal()
 		}
 		b, err := w.file(src, min(w.sel.MaxFileSize, left))
-		if errors.Is(err, errOverLimit) {
+		if errors.Is(err, cache.ErrOverLimit) {
 			if w.sel.MaxFileSize < left {
 				return fmt.Errorf("%s grew to more than max_file_size=%d bytes as it was read", src, w.sel.MaxFileSize)
 			}
@@ -415,7 +369,7 @@ func (w *treeWalk) visit(rel string, info fs.FileInfo) error {
 			return err
 		}
 		w.total += b.Size
-		entry.Type, entry.Mode, entry.Blob = entryFile, w.mode(info), &b
+		entry.Type, entry.Mode, entry.Blob = cache.EntryFile, w.mode(info), &b
 	}
 	w.entries = append(w.entries, entry)
 	// Record the directories that hold the file beneath the prefix, which were read on the way to it. Go on past
@@ -423,7 +377,7 @@ func (w *treeWalk) visit(rel string, info fs.FileInfo) error {
 	for d := path.Dir(rel); d != prefix && within(d, prefix); d = path.Dir(d) {
 		if mode, ok := w.dirModes[d]; ok {
 			delete(w.dirModes, d)
-			w.entries = append(w.entries, treeEntry{Path: d, Type: entryDir, Mode: mode})
+			w.entries = append(w.entries, cache.TreeEntry{Path: d, Type: cache.EntryDir, Mode: mode})
 		}
 	}
 	return nil
@@ -436,7 +390,7 @@ func (w *treeWalk) visit(rel string, info fs.FileInfo) error {
 func (w *treeWalk) recordBetween() {
 	recorded := map[string]bool{}
 	for _, e := range w.entries {
-		if e.Type == entryDir {
+		if e.Type == cache.EntryDir {
 			recorded[e.Path] = true
 		}
 	}
@@ -447,7 +401,7 @@ func (w *treeWalk) recordBetween() {
 			if recorded[d] {
 				for _, b := range between {
 					recorded[b] = true
-					w.entries = append(w.entries, treeEntry{Path: b, Type: entryDir, Mode: w.dirModes[b]})
+					w.entries = append(w.entries, cache.TreeEntry{Path: b, Type: cache.EntryDir, Mode: w.dirModes[b]})
 				}
 				break
 			}
@@ -463,7 +417,36 @@ func (w *treeWalk) overTotal() error {
 
 // mode returns the chmod bits of info's mode that the selection keeps.
 func (w *treeWalk) mode(info fs.FileInfo) uint32 {
-	return chmodBits(info) & uint32(w.sel.ModeMask)
+	return cache.ChmodBits(info) & uint32(w.sel.ModeMask)
+}
+
+// Hash returns the blob that the tree of the files sel selects within dir in fsys would be stored as, storing
+// nothing.
+func Hash(fsys afero.Fs, dir string, sel *Selection) (cache.Blob, error) {
+	t, err := Walk(fsys, dir, sel, func(name string, limit int64) (cache.Blob, error) {
+		return cache.HashFile(fsys, name, limit)
+	})
+	if err != nil {
+		return cache.Blob{}, err
+	}
+	return t.Digest(), nil
+}
+
+// StoreFiles stores the files that sel selects within dir in fsys in c, and returns the tree that
+// describes them, without storing it.
+func StoreFiles(c *cache.Cache, fsys afero.Fs, dir string, sel *Selection) (*cache.Tree, error) {
+	return Walk(fsys, dir, sel, func(name string, limit int64) (cache.Blob, error) {
+		return c.PutFile(fsys, name, limit)
+	})
+}
+
+// Store stores the files that sel selects within dir in fsys in c, and then the tree that describes them.
+func Store(c *cache.Cache, fsys afero.Fs, dir string, sel *Selection) (cache.Blob, error) {
+	t, err := StoreFiles(c, fsys, dir, sel)
+	if err != nil {
+		return cache.Blob{}, err
+	}
+	return c.PutBytes(t.Encode())
 }
 
 // checkInclude reports whether the prefix of the include pattern p, the path its files are beneath, is
@@ -512,4 +495,33 @@ func checkRelative(param, p, dir string) error {
 // within reports whether the cleaned relative path p is dir or inside it.
 func within(p, dir string) bool {
 	return dir == "." || p == dir || strings.HasPrefix(p, dir+"/")
+}
+
+// QuoteNames lists names, quoted, for a message.
+func QuoteNames(names []string) string {
+	quoted := make([]string, len(names))
+	for i, name := range names {
+		quoted[i] = strconv.Quote(name)
+	}
+	return strings.Join(quoted, ", ")
+}
+
+// lstat describes the file at path in fsys without following a final symbolic link,
+// if fsys supports links.
+func lstat(fsys afero.Fs, path string) (fs.FileInfo, bool, error) {
+	if l, ok := fsys.(afero.Lstater); ok {
+		return l.LstatIfPossible(path)
+	}
+	info, err := fsys.Stat(path)
+	return info, false, err
+}
+
+// readDirNames returns the names of the entries in the directory dir in fsys.
+func readDirNames(fsys afero.Fs, dir string) ([]string, error) {
+	f, err := fsys.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return f.Readdirnames(-1)
 }

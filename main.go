@@ -7,7 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/Topher-the-Geek/vamos/internal"
+	"github.com/Topher-the-Geek/vamos/internal/cli"
 	"github.com/spf13/afero"
 	"go.podman.io/buildah"
 	"go.podman.io/storage/pkg/unshare"
@@ -27,7 +27,7 @@ func main() {
 		stop()
 	}()
 
-	if err := internal.NewRootCommand(afero.NewOsFs()).ExecuteContext(ctx); err != nil {
+	if err := cli.NewRootCommand(afero.NewOsFs()).ExecuteContext(ctx); err != nil {
 		if ctx.Err() != nil {
 			err = fmt.Errorf("interrupted: %w", err)
 		}

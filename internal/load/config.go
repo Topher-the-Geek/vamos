@@ -1,4 +1,4 @@
-package internal
+package load
 
 import (
 	"errors"
@@ -6,6 +6,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/Topher-the-Geek/vamos/internal/fileset"
+	"github.com/Topher-the-Geek/vamos/internal/graph"
 
 	"github.com/containerd/platforms"
 	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
@@ -58,7 +61,7 @@ func (p *param) canonical(what string, v starlark.Value) (starlark.Value, error)
 			return nil, fmt.Errorf("%s is %s, want string", what, v.Type())
 		}
 		if p.values != nil && !slices.Contains(p.values, str) {
-			return nil, fmt.Errorf("%s %q is not one of its values, %s", what, str, quoteNames(p.values))
+			return nil, fmt.Errorf("%s %q is not one of its values, %s", what, str, fileset.QuoteNames(p.values))
 		}
 		return v, nil
 	}
@@ -73,7 +76,8 @@ func (p *param) canonical(what string, v starlark.Value) (starlark.Value, error)
 			return nil, fmt.Errorf("%s[%d] is %s, want string", what, i, iterable.Index(i).Type())
 		}
 		if p.values != nil && !slices.Contains(p.values, str) {
-			return nil, fmt.Errorf("%s has %q, which is not one of its values, %s", what, str, quoteNames(p.values))
+			return nil, fmt.Errorf("%s has %q, which is not one of its values, %s",
+				what, str, fileset.QuoteNames(p.values))
 		}
 		items[i] = starlark.String(str)
 	}
@@ -135,7 +139,7 @@ func newParam(def starlark.Value, typ string, values *starlark.List) (*param, er
 		return nil, errors.New("give a default, or else the type of a value that every use must give")
 	case typ == "":
 	case k < 0:
-		return nil, fmt.Errorf("type %q is not one of %s", typ, quoteNames(paramKinds))
+		return nil, fmt.Errorf("type %q is not one of %s", typ, fileset.QuoteNames(paramKinds))
 	case def != nil && paramKind(k) != p.kind:
 		return nil, fmt.Errorf("default is %s, but type is %q", def.Type(), typ)
 	default:
@@ -273,7 +277,7 @@ func paramHint(name string, params []*param) string {
 	if closest := closestName(name, names); closest != "" {
 		return fmt.Sprintf("; did you mean %q?", closest)
 	} else if len(names) > 0 {
-		return "; its parameters are " + quoteNames(names)
+		return "; its parameters are " + fileset.QuoteNames(names)
 	}
 	return "; it declares none"
 }
@@ -395,7 +399,8 @@ func (w *workspace) describeConfigured(cl confLabel) string {
 type ctxValue struct {
 	params []*param
 	cfg    *config
-	glob   bool // of a glob, configured for no platform in particular
+	glob   bool           // of a glob, configured for no platform in particular
+	exec   *platformValue // the executor's platform, as ctx.exec_platform
 }
 
 func (v *ctxValue) Type() string          { return "ctx" }
@@ -435,13 +440,13 @@ func (v *ctxValue) Attr(name string) (starlark.Value, error) {
 	case "variant":
 		return starlark.String(v.cfg.platform.spec.Variant), nil
 	case "exec_platform":
-		return starlark.String(execPlatform.String()), nil
+		return starlark.String(v.exec.String()), nil
 	}
 	i := paramIndex(v.params, name)
 	if i < 0 {
 		declared := "; the target declares no parameters, in params"
 		if len(v.params) > 0 {
-			declared = "; the target's parameters are " + quoteNames(paramNames(v.params))
+			declared = "; the target's parameters are " + fileset.QuoteNames(paramNames(v.params))
 		}
 		return nil, starlark.NoSuchAttrError(fmt.Sprintf("ctx has no parameter %q%s", name, declared))
 	}
@@ -456,9 +461,6 @@ func (v *ctxValue) AttrNames() []string {
 type platformValue struct {
 	spec imgspecv1.Platform // normalized
 }
-
-// execPlatform is the platform that build steps run on: the host's.
-var execPlatform = &platformValue{hostPlatform}
 
 // parsePlatform parses a platform written as os/arch or os/arch/variant, normalizing it as containerd does:
 // linux/arm64/v8 is linux/arm64, and linux/arm is linux/arm/v7.
@@ -731,7 +733,7 @@ func (w *workspace) edge(ref targetRef, from confLabel) (confLabel, error) {
 	platform := from.cfg.platform
 	switch {
 	case ref.exec:
-		platform = execPlatform
+		platform = w.execPlatform
 	case ref.platform != nil:
 		platform = ref.platform
 	}
@@ -776,38 +778,160 @@ func targetRefOf(c *evalContext, fnName, param string, v starlark.Value) (target
 	return targetRef{}, fmt.Errorf("%s: %s is %s, want a label or dep()", fnName, param, v.Type())
 }
 
-// graph is what a build runs: the pulls, layers and tasks that the targets it names need, each in every
-// configuration it is needed in, in an order in which each comes after the targets it uses.
-type graph struct {
-	pulls   []*pullSpec
-	targets []*targetSpec
-}
-
-// configurer works out the graph of a build, configuring each target it needs once.
+// configurer works out the targets a build needs, configuring each once.
 type configurer struct {
 	w       *workspace
-	g       graph
 	pulls   map[confLabel]*pullSpec
 	targets map[confLabel]*targetSpec
 	globs   map[confLabel]*fileSet
-	path    []string // labels of the targets being configured, outermost first, to report a cycle
+	indexes map[confLabel][]confLabel // each index's manifests, in order
+	path    []string                  // labels of the targets being configured, outermost first, to report a cycle
 }
 
 // configure returns the graph that building roots needs: the targets, and those they use, each in the
-// configuration it is used in.
-func (w *workspace) configure(roots []confLabel) (*graph, error) {
+// configuration it is used in. It returns the files of each glob in it too, by node, for readGlobs to read.
+func (w *workspace) configure(roots []confLabel) (*graph.Graph, map[graph.Ref]*fileSet, error) {
 	cr := &configurer{
 		w:       w,
 		pulls:   map[confLabel]*pullSpec{},
 		targets: map[confLabel]*targetSpec{},
 		globs:   map[confLabel]*fileSet{},
+		indexes: map[confLabel][]confLabel{},
 	}
 	for _, cl := range roots {
 		if err := cr.image(cl); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
-	return &cr.g, nil
+	l := &lowering{
+		w:     w,
+		cr:    cr,
+		g:     &graph.Graph{Version: graph.Version},
+		refs:  map[confLabel]graph.Ref{},
+		globs: map[*fileSet]graph.Ref{},
+		sets:  map[graph.Ref]*fileSet{},
+	}
+	for _, cl := range roots {
+		ref, err := l.image(cl)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !slices.Contains(l.g.Roots, ref) {
+			l.g.Roots = append(l.g.Roots, ref)
+		}
+	}
+	return l.g, l.sets, nil
+}
+
+// lowering turns the targets a configurer made into the nodes of a graph, each after the nodes it uses, in the
+// order the configurer made them.
+type lowering struct {
+	w     *workspace
+	cr    *configurer
+	g     *graph.Graph
+	refs  map[confLabel]graph.Ref // of pulls, layers and tasks
+	globs map[*fileSet]graph.Ref
+	sets  map[graph.Ref]*fileSet // the files of each glob's node
+}
+
+// add appends n to the graph, returning its ref.
+func (l *lowering) add(n graph.Node) graph.Ref {
+	l.g.Nodes = append(l.g.Nodes, n)
+	return graph.Ref(len(l.g.Nodes) - 1)
+}
+
+// image returns the node of the pull, layer, task or index cl, adding it, and the nodes it uses, if it isn't yet.
+func (l *lowering) image(cl confLabel) (graph.Ref, error) {
+	if cl.label == scratch {
+		return graph.Scratch, nil
+	}
+	if ref, ok := l.refs[cl]; ok {
+		return ref, nil
+	}
+	n := graph.Node{Label: l.w.display(cl.label), Pos: l.w.declaration(cl.label).pos.String()}
+	if p, ok := l.cr.pulls[cl]; ok {
+		n.Desc = l.w.describe("pull", cl)
+		n.Pull = &graph.Pull{Image: p.image.String(), Platform: cl.cfg.platform.String()}
+	} else if manifests, ok := l.cr.indexes[cl]; ok {
+		n.Desc = l.w.describe("index", cl)
+		n.Index = &graph.Index{}
+		for _, m := range manifests {
+			ref, err := l.image(m)
+			if err != nil {
+				return 0, err
+			}
+			n.Index.Manifests = append(n.Index.Manifests, ref)
+		}
+	} else {
+		s := l.cr.targets[cl]
+		base, err := l.image(s.base)
+		if err != nil {
+			return 0, err
+		}
+		steps := make([]graph.Step, len(s.steps))
+		for i, in := range s.steps {
+			steps[i] = in.lower()
+			if set := in.source(); set != nil {
+				from, err := l.set(set)
+				if err != nil {
+					return 0, err
+				}
+				steps[i].From = &from
+			}
+		}
+		if s.task {
+			n.Desc = l.w.describe("task", cl)
+			n.Task = &graph.Task{Base: base, Steps: steps}
+			if s.output != nil {
+				n.Task.Output = &graph.Output{Source: s.source, Selection: s.output.sel}
+			}
+		} else {
+			n.Desc = l.w.describe("layer", cl)
+			platform := cl.cfg.platform.String()
+			// A layer's base must be for its platform, since the base's files are; dep() can give it another.
+			if base != graph.Scratch {
+				if got := l.g.Node(base).Platform(); got != platform {
+					return 0, fmt.Errorf("%s: its base %s is for %s, not %s; a layer's base must be for its platform",
+						n.Desc, l.g.Node(base).Label, got, platform)
+				}
+			}
+			n.Layer = &graph.Layer{Base: base, Platform: platform, Steps: steps, Command: s.command}
+		}
+	}
+	ref := l.add(n)
+	l.refs[cl] = ref
+	return ref, nil
+}
+
+// set returns the node whose files set is: a glob's, adding it if it isn't yet, or a task's.
+func (l *lowering) set(set *fileSet) (graph.Ref, error) {
+	if set.task != nil {
+		return l.image(set.task.id)
+	}
+	if ref, ok := l.globs[set]; ok {
+		return ref, nil
+	}
+	label := l.w.display(set.label)
+	ref := l.add(graph.Node{
+		Label:  label,
+		Desc:   fmt.Sprintf("glob %q", label),
+		Pos:    l.w.declaration(set.label).pos.String(),
+		Source: &graph.Source{},
+	})
+	l.globs[set] = ref
+	l.sets[ref] = set
+	return ref, nil
+}
+
+// describe names the target cl, declared by kind, for messages, e.g. `layer "app"` or `task "//ui:build"`.
+// A target for another platform than the command's, or given arguments other than its defaults, is described
+// with them, e.g. `task "build" (platform=linux/arm64, mode="debug")`.
+func (w *workspace) describe(kind string, cl confLabel) string {
+	name := fmt.Sprintf("%s %q", kind, w.display(cl.label))
+	if diffs := w.describeConfig(cl); diffs != "" {
+		name += " (" + diffs + ")"
+	}
+	return name
 }
 
 // indexManifests returns the manifests of the index cl, each a pull or layer in its configuration, in order.
@@ -827,6 +951,11 @@ func (w *workspace) indexManifests(cl confLabel) ([]confLabel, error) {
 	return manifests, nil
 }
 
+// platformOf returns the platform that the target cl is configured for.
+func platformOf(cl confLabel) *platformValue {
+	return cl.cfg.platform
+}
+
 // chooseManifest returns the manifest of the index l for platform, for a destination that takes one image.
 func (w *workspace) chooseManifest(l string, manifests []confLabel, platform imgspecv1.Platform, why string) (
 	confLabel, error) {
@@ -839,7 +968,7 @@ func (w *workspace) chooseManifest(l string, manifests []confLabel, platform img
 		found = append(found, platformOf(m).String())
 	}
 	return confLabel{}, fmt.Errorf("index %q has no manifest for %s, %s; it has %s",
-		w.display(l), platforms.Format(platform), why, quoteNames(found))
+		w.display(l), platforms.Format(platform), why, fileset.QuoteNames(found))
 }
 
 // enter records that the target l is being configured, reporting a cycle if it already is, in any
@@ -859,7 +988,7 @@ func (cr *configurer) enter(l string) error {
 // leave records that the target being configured last is done.
 func (cr *configurer) leave() { cr.path = cr.path[:len(cr.path)-1] }
 
-// image configures the pull, layer or task cl, and the targets it uses. Scratch needs none.
+// image configures the pull, layer, task or index cl, and the targets it uses. Scratch needs none.
 func (cr *configurer) image(cl confLabel) error {
 	if cl.label == scratch {
 		return nil
@@ -870,6 +999,9 @@ func (cr *configurer) image(cl confLabel) error {
 	if _, ok := cr.targets[cl]; ok {
 		return nil
 	}
+	if _, ok := cr.indexes[cl]; ok {
+		return nil
+	}
 	d := cr.w.declaration(cl.label)
 	tmpl, err := cr.w.template(d, cl)
 	if err != nil {
@@ -878,7 +1010,22 @@ func (cr *configurer) image(cl confLabel) error {
 	if p, ok := tmpl.(*pullSpec); ok {
 		instance := &pullSpec{label: p.label, id: cl, image: p.image}
 		cr.pulls[cl] = instance
-		cr.g.pulls = append(cr.g.pulls, instance)
+		return nil
+	}
+	if idx, ok := tmpl.(*indexSpec); ok {
+		// Only the command line names an index, so it can't be in a cycle.
+		var manifests []confLabel
+		for _, ref := range idx.manifests {
+			m, err := cr.w.edge(ref, cl)
+			if err != nil {
+				return err
+			}
+			if err := cr.image(m); err != nil {
+				return err
+			}
+			manifests = append(manifests, m)
+		}
+		cr.indexes[cl] = manifests
 		return nil
 	}
 
@@ -920,7 +1067,6 @@ func (cr *configurer) image(cl confLabel) error {
 		s.output = &fileSet{label: t.label, task: s, sel: t.output.sel}
 	}
 	cr.targets[cl] = s
-	cr.g.targets = append(cr.g.targets, s)
 	return nil
 }
 
@@ -958,7 +1104,7 @@ func (w *workspace) template(d *declaration, cl confLabel) (any, error) {
 	c := &evalContext{mode: configuring, file: d.file}
 	thread := &starlark.Thread{Name: d.file.path}
 	thread.SetLocal(contextKey, c)
-	ctx := &ctxValue{params: d.params, cfg: cl.cfg, glob: d.kind == "glob"}
+	ctx := &ctxValue{params: d.params, cfg: cl.cfg, glob: d.kind == "glob", exec: w.execPlatform}
 	var results []starlark.Value // of the functions, whose arg()s are checked once they run
 	call := func(param string, v starlark.Value) (starlark.Value, error) {
 		fn, ok := v.(starlark.Callable)

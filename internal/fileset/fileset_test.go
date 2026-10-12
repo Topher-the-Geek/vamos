@@ -1,4 +1,4 @@
-package internal
+package fileset
 
 import (
 	"fmt"
@@ -9,6 +9,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Topher-the-Geek/vamos/internal/cache"
+	"github.com/Topher-the-Geek/vamos/internal/testenv"
+
 	"github.com/opencontainers/go-digest"
 	"github.com/spf13/afero"
 )
@@ -18,14 +21,14 @@ import (
 
 // testSelection returns a selection of the files within projectDir that include matches and exclude doesn't,
 // with the defaults, less what change, if not nil, changes.
-func testSelection(t *testing.T, include, exclude []string, change func(sel *selection)) *selection {
+func testSelection(t *testing.T, include, exclude []string, change func(sel *Selection)) *Selection {
 	t.Helper()
-	sel := defaultSelection()
+	sel := DefaultSelection()
 	sel.Include, sel.Exclude = include, exclude
 	if change != nil {
 		change(sel)
 	}
-	must(t, sel.compile(projectDir))
+	testenv.Must(t, sel.Compile(testenv.ProjectDir))
 	return sel
 }
 
@@ -33,7 +36,7 @@ func testSelection(t *testing.T, include, exclude []string, change func(sel *sel
 func failedWith(t *testing.T, err error, wantErr string) bool {
 	t.Helper()
 	if wantErr == "" {
-		must(t, err)
+		testenv.Must(t, err)
 		return false
 	}
 	if err == nil || !strings.Contains(err.Error(), wantErr) {
@@ -44,7 +47,7 @@ func failedWith(t *testing.T, err error, wantErr string) bool {
 
 // checkTree fails t unless the walk that returned got and err failed with wantErr, if set, or else made the
 // tree that describeTree describes as want.
-func checkTree(t *testing.T, got *tree, err error, want []string, wantErr string) {
+func checkTree(t *testing.T, got *cache.Tree, err error, want []string, wantErr string) {
 	t.Helper()
 	if failedWith(t, err, wantErr) {
 		return
@@ -56,15 +59,15 @@ func checkTree(t *testing.T, got *tree, err error, want []string, wantErr string
 
 // describeTree lists t's entries as lines such as "file src/a.ts 644 content", for comparing in tests.
 // A file's blob, from walkFiles, holds its content as its digest's hex.
-func describeTree(t *tree) []string {
+func describeTree(t *cache.Tree) []string {
 	var lines []string
 	for _, e := range t.Entries {
 		switch e.Type {
-		case entryFile:
+		case cache.EntryFile:
 			lines = append(lines, fmt.Sprintf("file %s %o %s", e.Path, e.Mode, e.Blob.Digest.Encoded()))
-		case entryDir:
+		case cache.EntryDir:
 			lines = append(lines, fmt.Sprintf("dir %s %o", e.Path, e.Mode))
-		case entryLink:
+		case cache.EntryLink:
 			lines = append(lines, fmt.Sprintf("link %s -> %s", e.Path, e.Target))
 		}
 	}
@@ -73,10 +76,10 @@ func describeTree(t *tree) []string {
 
 // walkFiles walks sel within projectDir in fsys, giving each file a blob that holds its content in place of a
 // digest, so that describeTree shows which file each entry came from.
-func walkFiles(fsys afero.Fs, sel *selection) (*tree, error) {
-	return walkTree(fsys, projectDir, sel, func(name string, _ int64) (blob, error) {
+func walkFiles(fsys afero.Fs, sel *Selection) (*cache.Tree, error) {
+	return Walk(fsys, testenv.ProjectDir, sel, func(name string, _ int64) (cache.Blob, error) {
 		data, err := afero.ReadFile(fsys, name)
-		return blob{Digest: digest.NewDigestFromEncoded(digest.SHA256, string(data)), Size: int64(len(data))}, err
+		return cache.Blob{Digest: digest.NewDigestFromEncoded(digest.SHA256, string(data)), Size: int64(len(data))}, err
 	})
 }
 
@@ -108,8 +111,8 @@ func TestMatchParts(t *testing.T) {
 		{pattern: ".", name: "src/a.ts", want: true},
 	} {
 		t.Run(tc.pattern+" "+tc.name, func(t *testing.T) {
-			p, err := parsePattern("include", tc.pattern, projectDir)
-			must(t, err)
+			p, err := parsePattern("include", tc.pattern, testenv.ProjectDir)
+			testenv.Must(t, err)
 			if got := matchParts(p.parts, pathParts(tc.name)); got != tc.want {
 				t.Errorf("matchParts(%q, %q) = %v, want %v", tc.pattern, tc.name, got, tc.want)
 			}
@@ -136,8 +139,8 @@ func TestMayMatchBeneath(t *testing.T) {
 		{pattern: "src/a.ts", dir: "lib", want: false},
 	} {
 		t.Run(tc.pattern+" "+tc.dir, func(t *testing.T) {
-			p, err := parsePattern("include", tc.pattern, projectDir)
-			must(t, err)
+			p, err := parsePattern("include", tc.pattern, testenv.ProjectDir)
+			testenv.Must(t, err)
 			if got := mayMatchBeneath(p.parts, pathParts(tc.dir)); got != tc.want {
 				t.Errorf("mayMatchBeneath(%q, %q) = %v, want %v", tc.pattern, tc.dir, got, tc.want)
 			}
@@ -163,7 +166,7 @@ func TestParsePattern(t *testing.T) {
 		{pattern: "src/../../x", err: `include "src/../../x" is outside /project`},
 	} {
 		t.Run(tc.pattern, func(t *testing.T) {
-			p, err := parsePattern("include", tc.pattern, projectDir)
+			p, err := parsePattern("include", tc.pattern, testenv.ProjectDir)
 			if failedWith(t, err, tc.err) {
 				return
 			}
@@ -213,7 +216,7 @@ func TestWalkTree(t *testing.T) {
 		name    string
 		include []string
 		exclude []string
-		change  func(sel *selection)
+		change  func(sel *Selection)
 		want    []string
 		err     string
 	}{
@@ -336,7 +339,7 @@ func TestWalkTree(t *testing.T) {
 			// the prefix of the pattern that selects inner.txt.
 			name:    "a directory between a recorded one and a deeper prefix's files",
 			include: []string{"**/open.txt", "modes/wide/inner.txt"},
-			change:  func(sel *selection) { sel.ModeMask = 0o7777 },
+			change:  func(sel *Selection) { sel.ModeMask = 0o7777 },
 			want: []string{
 				"dir modes 755",
 				"file modes/open.txt 666 open",
@@ -357,7 +360,7 @@ func TestWalkTree(t *testing.T) {
 		{
 			name:    "mode mask keeping every bit",
 			include: []string{"modes"},
-			change:  func(sel *selection) { sel.ModeMask = 0o7777 },
+			change:  func(sel *Selection) { sel.ModeMask = 0o7777 },
 			want: []string{
 				"file modes/open.txt 666 open",
 				"file modes/setuid 4755 setuid",
@@ -373,7 +376,7 @@ func TestWalkTree(t *testing.T) {
 		{
 			name:    "no files, allowed",
 			include: []string{"*.go"},
-			change:  func(sel *selection) { sel.AllowNoFiles = true },
+			change:  func(sel *Selection) { sel.AllowNoFiles = true },
 		},
 		{
 			name:    "everything excluded",
@@ -399,44 +402,44 @@ func TestWalkTree(t *testing.T) {
 		{
 			name:    "file count at the limit",
 			include: []string{"limits/**/*.txt"},
-			change:  func(sel *selection) { sel.MaxFileCount = 3 },
+			change:  func(sel *Selection) { sel.MaxFileCount = 3 },
 			want:    limitsTree,
 		},
 		{
 			name:    "too many files",
 			include: []string{"limits/**/*.txt"},
-			change:  func(sel *selection) { sel.MaxFileCount = 2 },
+			change:  func(sel *Selection) { sel.MaxFileCount = 2 },
 			err:     "more than max_file_count=2 files in /project match; exclude some, or raise the limit",
 		},
 		{
 			name:    "file size at the limit",
 			include: []string{"limits/**/*.txt"},
-			change:  func(sel *selection) { sel.MaxFileSize = 3 },
+			change:  func(sel *Selection) { sel.MaxFileSize = 3 },
 			want:    limitsTree,
 		},
 		{
 			name:    "file too big",
 			include: []string{"limits/**/*.txt"},
-			change:  func(sel *selection) { sel.MaxFileSize = 2 },
+			change:  func(sel *Selection) { sel.MaxFileSize = 2 },
 			err:     "/project/limits/three.txt is 3 bytes, more than max_file_size=2",
 		},
 		{
 			name:    "total size at the limit",
 			include: []string{"limits/**/*.txt"},
-			change:  func(sel *selection) { sel.MaxTotalSize = 6 },
+			change:  func(sel *Selection) { sel.MaxTotalSize = 6 },
 			want:    limitsTree,
 		},
 		{
 			name:    "total too big",
 			include: []string{"limits/**/*.txt"},
-			change:  func(sel *selection) { sel.MaxTotalSize = 5 },
+			change:  func(sel *Selection) { sel.MaxTotalSize = 5 },
 			err:     "the files in /project that match total more than max_total_size=5 bytes",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fsys := project(t, files)
+			fsys := testenv.Project(t, files)
 			for name, mode := range modes {
-				must(t, fsys.Chmod(filepath.Join(projectDir, name), mode))
+				testenv.Must(t, fsys.Chmod(filepath.Join(testenv.ProjectDir, name), mode))
 			}
 			got, err := walkFiles(fsys, testSelection(t, tc.include, tc.exclude, tc.change))
 			checkTree(t, got, err, tc.want, tc.err)
@@ -450,39 +453,39 @@ func TestWalkTreeFileGrew(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		at     int // the time a.txt is opened at which it grows: 1 as it is hashed, 2 as it is stored
-		change func(sel *selection)
+		change func(sel *Selection)
 		err    string
 	}{
 		{
 			name:   "past max_file_size as hashed",
 			at:     1,
-			change: func(sel *selection) { sel.MaxFileSize = 3 },
+			change: func(sel *Selection) { sel.MaxFileSize = 3 },
 			err:    "/project/a.txt grew to more than max_file_size=3 bytes as it was read",
 		},
 		{
 			name:   "past max_file_size as stored",
 			at:     2,
-			change: func(sel *selection) { sel.MaxFileSize = 3 },
+			change: func(sel *Selection) { sel.MaxFileSize = 3 },
 			err:    "/project/a.txt grew to more than max_file_size=3 bytes as it was read",
 		},
 		{
 			name:   "past max_total_size",
 			at:     1,
-			change: func(sel *selection) { sel.MaxTotalSize = 3 },
+			change: func(sel *Selection) { sel.MaxTotalSize = 3 },
 			err:    "the files in /project that match total more than max_total_size=3 bytes",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fsys := &editedFs{
-				Fs:   project(t, map[string]string{"a.txt": "a", "b.txt": "b"}),
-				name: "/project/a.txt",
-				edit: "grown",
-				at:   tc.at,
+			fsys := &testenv.EditedFs{
+				Fs:   testenv.Project(t, map[string]string{"a.txt": "a", "b.txt": "b"}),
+				File: "/project/a.txt",
+				Edit: "grown",
+				At:   tc.at,
 			}
-			c := newTestCache(t)
-			_, err := c.putFiles(fsys, projectDir, testSelection(t, []string{"*.txt"}, nil, tc.change))
+			c, dir := newTestCache(t)
+			_, err := StoreFiles(c, fsys, testenv.ProjectDir, testSelection(t, []string{"*.txt"}, nil, tc.change))
 			failedWith(t, err, tc.err)
-			if n := countBlobs(t, c); n != 0 {
+			if n := countBlobs(t, dir); n != 0 {
 				t.Errorf("the cache holds %d blobs, want none", n)
 			}
 		})
@@ -572,13 +575,13 @@ func TestWalkTreeReadsOnlyWhatItNeeds(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fsys := &touchFs{Fs: project(t, files)}
+			fsys := &touchFs{Fs: testenv.Project(t, files)}
 			_, err := walkFiles(fsys, testSelection(t, tc.include, tc.exclude, nil))
-			must(t, err)
+			testenv.Must(t, err)
 			var touched []string
 			for _, name := range fsys.touched {
-				rel, err := filepath.Rel(projectDir, name)
-				must(t, err)
+				rel, err := filepath.Rel(testenv.ProjectDir, name)
+				testenv.Must(t, err)
 				touched = append(touched, rel)
 			}
 			slices.Sort(touched)
@@ -630,7 +633,7 @@ func TestWalkTreeLinks(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fsys, _ := diskProject(t, map[string]string{
+			fsys, _ := testenv.DiskProject(t, map[string]string{
 				"site/index.html":  "hi",
 				"shared/lib.js":    "lib",
 				"shared/x/y.txt":   "y",
@@ -651,9 +654,9 @@ func TestWalkTreeLinks(t *testing.T) {
 // project is from a linked $PWD.
 func TestWalkTreeThroughLinkedDir(t *testing.T) {
 	root := t.TempDir()
-	must(t, os.MkdirAll(filepath.Join(root, "real"), 0o755))
-	must(t, os.WriteFile(filepath.Join(root, "real", "a.txt"), []byte("a"), 0o644))
-	must(t, os.Symlink("real", filepath.Join(root, "project")))
+	testenv.Must(t, os.MkdirAll(filepath.Join(root, "real"), 0o755))
+	testenv.Must(t, os.WriteFile(filepath.Join(root, "real", "a.txt"), []byte("a"), 0o644))
+	testenv.Must(t, os.Symlink("real", filepath.Join(root, "project")))
 	fsys := afero.NewBasePathFs(afero.NewOsFs(), root)
 
 	got, err := walkFiles(fsys, testSelection(t, []string{"*.txt"}, nil, nil))

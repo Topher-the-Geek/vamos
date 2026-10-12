@@ -1,16 +1,16 @@
-package internal
+package run
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
-	"os"
-	"path/filepath"
 	"slices"
 	"time"
 
+	"github.com/Topher-the-Geek/vamos/internal/cache"
+	"github.com/Topher-the-Geek/vamos/internal/fileset"
+	"github.com/Topher-the-Geek/vamos/internal/graph"
 	"github.com/containerd/platforms"
 	"github.com/opencontainers/go-digest"
 	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
@@ -32,17 +32,10 @@ type tagRecord struct {
 	Instances map[string]digest.Digest `json:"instances,omitempty"` // each platform's image, by platform, once chosen
 }
 
-// tagPath returns where the record of the tag ref is kept.
-func (c *cache) tagPath(ref reference.NamedTagged) string {
-	return filepath.Join(c.dir, "tags", digest.FromString(ref.String()).Encoded())
-}
-
-// tag returns the record of the tag ref, or nil if there is none.
-func (c *cache) tag(ref reference.NamedTagged) (*tagRecord, error) {
-	data, err := os.ReadFile(c.tagPath(ref))
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
-	} else if err != nil {
+// tagRecordOf returns the record of the tag ref, or nil if there is none.
+func tagRecordOf(c *cache.Cache, ref reference.NamedTagged) (*tagRecord, error) {
+	data, err := c.Tag(ref.String())
+	if err != nil || data == nil {
 		return nil, err
 	}
 	var record tagRecord
@@ -52,41 +45,45 @@ func (c *cache) tag(ref reference.NamedTagged) (*tagRecord, error) {
 	return &record, nil
 }
 
-// setTag records what the tag ref names, replacing any earlier record.
-func (c *cache) setTag(ref reference.NamedTagged, record *tagRecord) error {
+// setTagRecord records what the tag ref names, replacing any earlier record.
+func setTagRecord(c *cache.Cache, ref reference.NamedTagged, record *tagRecord) error {
 	data, err := json.Marshal(record)
 	if err != nil {
 		return err
 	}
-	f, err := c.create()
-	if err != nil {
-		return err
-	}
-	defer f.discard()
-	if _, err := f.Write(data); err != nil {
-		return err
-	}
-	return f.commit(c.tagPath(ref))
+	return c.SetTag(ref.String(), data)
 }
 
 // puller pulls the images of a build's pulls, each tag resolved once in the build, so that one tag gives every
 // platform's image from the same index, even if the tag moves meanwhile.
 type puller struct {
 	store         storage.Store
-	cache         *cache
+	cache         *cache.Cache
 	systemContext *types.SystemContext
 	tags          map[string]*tagRecord // resolved in this build, by tag
 	again         map[string]bool       // tags to resolve again, rather than as the build cache records them
 }
 
-// pull fetches the image of p, for its configuration's platform, into the store, unless it is there already.
-func (pl *puller) pull(ctx context.Context, p *pullSpec, platform *platformValue) (builtImage, error) {
-	image := p.image.String()
-	instance, err := pl.instance(ctx, p.image, platform)
+// pull fetches the image of p, for its platform, into the store, unless it is there already.
+func (pl *puller) pull(ctx context.Context, p *graph.Pull) (builtImage, error) {
+	image := p.Image
+	named, err := reference.ParseNamed(image)
+	if err != nil {
+		return builtImage{}, fmt.Errorf("image %q: %w", image, err)
+	}
+	tagged, ok := named.(reference.NamedTagged)
+	if !ok {
+		return builtImage{}, fmt.Errorf("image %q has no tag", image)
+	}
+	platform, err := graph.ParsePlatform(p.Platform)
+	if err != nil {
+		return builtImage{}, fmt.Errorf("image %q: %w", image, err)
+	}
+	instance, err := pl.instance(ctx, tagged, platform)
 	if err != nil {
 		return builtImage{}, pullError(image, err)
 	}
-	digested, err := reference.WithDigest(reference.TrimNamed(p.image), instance)
+	digested, err := reference.WithDigest(reference.TrimNamed(tagged), instance)
 	if err != nil {
 		return builtImage{}, fmt.Errorf("image %q: %w", image, err)
 	}
@@ -122,9 +119,9 @@ func (pl *puller) pull(ctx context.Context, p *pullSpec, platform *platformValue
 	if err != nil {
 		return builtImage{}, fmt.Errorf("image %q: %w", image, err)
 	}
-	if !platforms.NewMatcher(platform.spec).Match(got) {
+	if !platforms.NewMatcher(platform).Match(got) {
 		return builtImage{}, fmt.Errorf("image %q is for %s, not %s, and its tag names that image alone, "+
-			"not an index of images for several platforms", image, platforms.Format(got), platform)
+			"not an index of images for several platforms", image, platforms.Format(got), platforms.Format(platform))
 	}
 	// Files built on the image are stamped with its creation time: a time that is the same on
 	// every machine, and that moves forward only when the image does.
@@ -147,12 +144,12 @@ func pullError(image string, err error) error {
 // instance returns the digest of the image that the tag ref names for platform: the tag's own, if it names an
 // image, or else the one for platform in the index it names. The record keeps the manifest the tag names, so
 // that choosing another platform's image later needs no registry either.
-func (pl *puller) instance(ctx context.Context, ref reference.NamedTagged, platform *platformValue) (
+func (pl *puller) instance(ctx context.Context, ref reference.NamedTagged, platform imgspecv1.Platform) (
 	digest.Digest, error) {
 	record := pl.tags[ref.String()]
 	var err error
 	if record == nil && !pl.again[ref.String()] {
-		if record, err = pl.cache.tag(ref); err != nil {
+		if record, err = tagRecordOf(pl.cache, ref); err != nil {
 			return "", err
 		}
 	}
@@ -168,7 +165,7 @@ func (pl *puller) instance(ctx context.Context, ref reference.NamedTagged, platf
 		record = &tagRecord{Digest: d, MIMEType: mimeType, Manifest: data}
 	}
 	pl.tags[ref.String()] = record
-	if d, ok := record.Instances[platform.String()]; ok {
+	if d, ok := record.Instances[platforms.Format(platform)]; ok {
 		return d, nil
 	}
 
@@ -185,8 +182,8 @@ func (pl *puller) instance(ctx context.Context, ref reference.NamedTagged, platf
 	if record.Instances == nil {
 		record.Instances = map[string]digest.Digest{}
 	}
-	record.Instances[platform.String()] = d
-	if err := pl.cache.setTag(ref, record); err != nil {
+	record.Instances[platforms.Format(platform)] = d
+	if err := setTagRecord(pl.cache, ref, record); err != nil {
 		return "", fmt.Errorf("saving to the build cache: %w", err)
 	}
 	return d, nil
@@ -232,12 +229,12 @@ func (pl *puller) manifest(ctx context.Context, ref reference.Named) ([]byte, st
 }
 
 // chooseInstance returns the digest of the image for platform in the index data.
-func chooseInstance(data []byte, mimeType string, platform *platformValue) (digest.Digest, error) {
+func chooseInstance(data []byte, mimeType string, platform imgspecv1.Platform) (digest.Digest, error) {
 	list, err := manifest.ListFromBlob(data, mimeType)
 	if err != nil {
 		return "", err
 	}
-	matcher := platforms.NewMatcher(platform.spec)
+	matcher := platforms.NewMatcher(platform)
 	var found []string
 	for _, d := range list.Instances() {
 		instance, err := list.Instance(d)
@@ -254,21 +251,22 @@ func chooseInstance(data []byte, mimeType string, platform *platformValue) (dige
 		found = append(found, platforms.Format(platforms.Normalize(*p)))
 	}
 	slices.Sort(found)
-	return "", fmt.Errorf("its index has no image for %s; it has %s", platform, quoteNames(slices.Compact(found)))
+	return "", fmt.Errorf("its index has no image for %s; it has %s", platforms.Format(platform),
+		fileset.QuoteNames(slices.Compact(found)))
 }
 
 // forPlatform returns a copy of sys for images of platform, so that buildah expects that platform rather than
 // the host's.
-func forPlatform(sys *types.SystemContext, platform *platformValue) *types.SystemContext {
+func forPlatform(sys *types.SystemContext, platform imgspecv1.Platform) *types.SystemContext {
 	c := *sys
-	c.OSChoice = platform.spec.OS
-	c.ArchitectureChoice = platform.spec.Architecture
-	c.VariantChoice = platform.spec.Variant
+	c.OSChoice = platform.OS
+	c.ArchitectureChoice = platform.Architecture
+	c.VariantChoice = platform.Variant
 	return &c
 }
 
-// hostPlatform is the platform of the machine vamos runs on, whose programs need no emulator.
-var hostPlatform = platforms.Normalize(platforms.DefaultSpec())
+// HostPlatform is the platform of the machine vamos runs on, whose programs need no emulator.
+var HostPlatform = platforms.Normalize(platforms.DefaultSpec())
 
 // imagePlatform returns the platform that the image with ID id in store says it is for.
 func imagePlatform(ctx context.Context, store storage.Store, id string) (imgspecv1.Platform, error) {

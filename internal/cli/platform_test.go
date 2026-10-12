@@ -1,4 +1,4 @@
-package internal
+package cli
 
 import (
 	"fmt"
@@ -25,7 +25,7 @@ import (
 )
 
 // native is the platform the tests run on, as vamos names it.
-var native = platforms.Format(hostPlatform)
+var native = platforms.Format(platforms.Normalize(platforms.DefaultSpec()))
 
 // foreign returns a platform that isn't the host's, whose programs run here only under emulation.
 func foreign() string {
@@ -155,7 +155,7 @@ func TestPlatforms(t *testing.T) {
 
 	for i, platform := range []string{native, foreign()} {
 		out := filepath.Join(dir, fmt.Sprintf("machine-%d.tar", i))
-		r := vamos(t, fsys, "write", "machine", out, "--platform", platform, "-C", projectDir)
+		r := vamos(t, fsys, "save", "machine", out, "--platform", platform, "-C", projectDir)
 		requireEmulation(t, r)
 		img := readImage(t, out)
 		assertPlatform(t, img, platform)
@@ -176,7 +176,7 @@ func TestCrossPlatformTasks(t *testing.T) {
 
 	for i, platform := range []string{native, foreign()} {
 		out := filepath.Join(dir, fmt.Sprintf("files-%d.tar", i))
-		r := vamos(t, fsys, "write", "files", out, "--platform", platform, "-C", projectDir).succeeds(t)
+		r := vamos(t, fsys, "save", "files", out, "--platform", platform, "-C", projectDir).succeeds(t)
 		want := map[string]string{`task "cross"`: "building", `task "shared"`: "building", `layer "files"`: "building"}
 		if platform != native {
 			want[`task "shared"`] = "cached" // it reads neither platform, so the host's build serves
@@ -203,7 +203,7 @@ func TestPlatformFailures(t *testing.T) {
 				fmt.Sprintf(`layer(name="app", base=dep("busybox", platform="%s"))`, foreign()),
 		})
 		out := t.TempDir()
-		vamos(t, fsys, "write", "app", filepath.Join(out, "app.tar"), "-C", projectDir).failsWith(t, false,
+		vamos(t, fsys, "save", "app", filepath.Join(out, "app.tar"), "-C", projectDir).failsWith(t, false,
 			fmt.Sprintf(`layer "app": its base busybox is for %s, not %s; a layer's base must be for its platform`,
 				foreign(), native))
 		assertNoFiles(t, out)
@@ -318,7 +318,7 @@ func TestPullTag(t *testing.T) {
 	write := func(name, platform string) v1.Image {
 		t.Helper()
 		out := filepath.Join(dir, strings.ReplaceAll(name, "/", "-"))
-		vamos(t, fsys, "write", "app", out, "--platform", platform, "--tls-verify=false", "-C", projectDir).
+		vamos(t, fsys, "save", "app", out, "--platform", platform, "--tls-verify=false", "-C", projectDir).
 			succeeds(t)
 		return readImage(t, out)
 	}

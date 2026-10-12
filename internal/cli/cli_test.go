@@ -1,4 +1,4 @@
-package internal
+package cli
 
 import (
 	"os"
@@ -39,9 +39,14 @@ func TestCommandLineMistakes(t *testing.T) {
 			want: []string{`missing image name after target "app"`, "vamos load server app:dev"},
 		},
 		{
-			name: "write without file",
-			args: []string{"write", "app"},
-			want: []string{`missing output file after target "app"`, "vamos write server app.tar"},
+			name: "save without file",
+			args: []string{"save", "app"},
+			want: []string{`missing output file after target "app"`, "vamos save server app.tar"},
+		},
+		{
+			name: "export without folder",
+			args: []string{"export", "app"},
+			want: []string{`missing folder after target "app"`, "vamos export codegen out"},
 		},
 		{
 			name: "push with two images",
@@ -49,8 +54,8 @@ func TestCommandLineMistakes(t *testing.T) {
 			want: []string{"expected a target and one image name, got 3 arguments: app app:1 app:2"},
 		},
 		{
-			name: "write with two files",
-			args: []string{"write", "app", "a.tar", "b.tar"},
+			name: "save with two files",
+			args: []string{"save", "app", "a.tar", "b.tar"},
 			want: []string{"expected a target and one output file, got 3 arguments"},
 		},
 		{
@@ -65,7 +70,7 @@ func TestCommandLineMistakes(t *testing.T) {
 		},
 		{
 			name: "tag without value",
-			args: []string{"write", "app", "app.tar", "--tag"},
+			args: []string{"save", "app", "app.tar", "--tag"},
 			want: []string{"flag needs an argument: --tag"},
 		},
 		{
@@ -84,6 +89,16 @@ func TestCommandLineMistakes(t *testing.T) {
 			want: []string{`invalid argument "maybe"`, "--tls-verify"},
 		},
 		{
+			name: "push-from not a side",
+			args: []string{"push", "app", "app", "--push-from=remote"},
+			want: []string{`invalid argument "remote" for "--push-from" flag: want "executor" or "client"`},
+		},
+		{
+			name: "replace on save",
+			args: []string{"save", "app", "app.tar", "--replace"},
+			want: []string{"unknown flag: --replace"},
+		},
+		{
 			name: "build without targets",
 			args: []string{"build"},
 			want: []string{"missing target name", "vamos build packages"},
@@ -100,7 +115,7 @@ func TestCommandLineMistakes(t *testing.T) {
 		},
 		{
 			name: "timestamp not a time",
-			args: []string{"write", "app", "app.tar", "--timestamp", "yesterday"},
+			args: []string{"save", "app", "app.tar", "--timestamp", "yesterday"},
 			want: []string{`invalid argument "yesterday"`, "--timestamp", "want Unix seconds"},
 		},
 		{
@@ -172,7 +187,7 @@ func TestNoCommandShowsHelp(t *testing.T) {
 	if r.err != nil {
 		t.Fatal(r.err)
 	}
-	for _, want := range []string{"build", "push", "load", "write", "prune"} {
+	for _, want := range []string{"build", "push", "load", "save", "export", "prune"} {
 		if !strings.Contains(r.stdout, want) {
 			t.Errorf("help = %q, want it to list %q", r.stdout, want)
 		}
@@ -213,8 +228,8 @@ func TestInvalidImageNames(t *testing.T) {
 			want: []string{"must not include a digest"},
 		},
 		{
-			name: "invalid write tag",
-			args: []string{"write", "app", out, "-t", "Bad Tag"},
+			name: "invalid save tag",
+			args: []string{"save", "app", out, "-t", "Bad Tag"},
 			want: []string{`invalid image name "Bad Tag"`},
 		},
 	}
@@ -763,6 +778,39 @@ func TestBuildFileMistakes(t *testing.T) {
 			build: "",
 			want:  []string{`/project/BUILD has no target "app"; it declares none`},
 		},
+		// A NUL byte can't reach a build's graph, so each is reported where the BUILD file gives it.
+		{
+			name:  "NUL in a name",
+			build: pullBusybox + `layer(name="a\x00b", base="busybox")`,
+			want:  []string{"/project/BUILD:2:6:", `layer: name "a\x00b" must not contain a NUL byte`},
+		},
+		{
+			name:  "NUL in argv",
+			build: pullBusybox + `layer(name="app", base="busybox", steps=[run(["echo", "a\x00"])])`,
+			want:  []string{"/project/BUILD:2:45:", "run: argv[1] must not contain a NUL byte"},
+		},
+		{
+			name:  "NUL in a command",
+			build: pullBusybox + `layer(name="app", base="busybox", command=["a\x00"])`,
+			want:  []string{"/project/BUILD:2:6:", "layer: command[0] must not contain a NUL byte"},
+		},
+		{
+			name:  "NUL in a path",
+			build: pullBusybox + `layer(name="app", base="busybox", steps=[workdir("/a\x00")])`,
+			want:  []string{"/project/BUILD:2:49:", `workdir: path "/a\x00" must not contain a NUL byte`},
+		},
+		{
+			name: "NUL in an owner",
+			build: pullBusybox + withGlob +
+				`layer(name="app", base="busybox", steps=[add("code", "/app", owner="a\x00")])`,
+			files: map[string]string{"app.sh": "echo hi"},
+			want:  []string{"/project/BUILD:3:45:", `add: owner "a\x00" must not contain a NUL byte`},
+		},
+		{
+			name:  "NUL in a task's source",
+			build: pullBusybox + `task(name="app", base="busybox", source="/a\x00", include=["."])`,
+			want:  []string{"/project/BUILD:2:5:", `task: source "/a\x00" must not contain a NUL byte`},
+		},
 		{
 			name:  "fail in BUILD",
 			build: `fail("unsupported platform")`,
@@ -787,7 +835,7 @@ layer(name="app", base="busybox", steps=[add("code", "/app")])
 				files[name] = content
 			}
 			out := t.TempDir()
-			vamos(t, project(t, files), "write", "app", filepath.Join(out, "app.tar"), "-C", projectDir).
+			vamos(t, project(t, files), "save", "app", filepath.Join(out, "app.tar"), "-C", projectDir).
 				failsWith(t, false, tt.want...)
 			assertNoFiles(t, out)
 		})
@@ -798,11 +846,11 @@ func TestWriteDestinationMistakes(t *testing.T) {
 	dir := t.TempDir()
 	t.Run("missing directory", func(t *testing.T) {
 		path := filepath.Join(dir, "nope", "app.tar")
-		vamos(t, project(t, validBuild), "write", "app", path, "-C", projectDir).
+		vamos(t, project(t, validBuild), "save", "app", path, "-C", projectDir).
 			failsWith(t, false, "cannot write "+path+": directory "+filepath.Join(dir, "nope")+" does not exist")
 	})
 	t.Run("path is a directory", func(t *testing.T) {
-		vamos(t, project(t, validBuild), "write", "app", dir, "-C", projectDir).
+		vamos(t, project(t, validBuild), "save", "app", dir, "-C", projectDir).
 			failsWith(t, false, "cannot write "+dir+": it is a directory")
 	})
 	t.Run("parent is a file", func(t *testing.T) {
@@ -810,7 +858,7 @@ func TestWriteDestinationMistakes(t *testing.T) {
 		if err := os.WriteFile(file, nil, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		vamos(t, project(t, validBuild), "write", "app", filepath.Join(file, "app.tar"), "-C", projectDir).
+		vamos(t, project(t, validBuild), "save", "app", filepath.Join(file, "app.tar"), "-C", projectDir).
 			failsWith(t, false, file+" is not a directory")
 	})
 }
@@ -829,7 +877,7 @@ func TestSymlinkSource(t *testing.T) {
 	}, map[string]string{"lib": "../shared"})
 	out := t.TempDir()
 
-	vamos(t, fsys, "write", "app", filepath.Join(out, "app.tar"), "-C", projectDir).
+	vamos(t, fsys, "save", "app", filepath.Join(out, "app.tar"), "-C", projectDir).
 		failsWith(t, false, "/project/BUILD:1:5:", `include "lib" is a symbolic link`)
 	assertNoFiles(t, out)
 }
@@ -848,7 +896,7 @@ func TestSymlinkSourceParent(t *testing.T) {
 			}, map[string]string{parent: external})
 			out := t.TempDir()
 
-			vamos(t, fsys, "write", "app", filepath.Join(out, "app.tar"), "-C", projectDir).
+			vamos(t, fsys, "save", "app", filepath.Join(out, "app.tar"), "-C", projectDir).
 				failsWith(t, false, "/project/BUILD:1:5:",
 					`include "`+src+`" has symbolic link parent "`+filepath.Join(projectDir, parent)+`"`)
 			assertNoFiles(t, out)
