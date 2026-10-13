@@ -27,6 +27,10 @@ func TestImportRules(t *testing.T) {
 			internal: []string{},
 		},
 		{
+			pkg:      "tracing",
+			internal: []string{},
+		},
+		{
 			pkg:      "fileset",
 			internal: []string{"cache"},
 			not:      []string{starlark, buildah, storage},

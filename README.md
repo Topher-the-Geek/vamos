@@ -74,6 +74,28 @@ the pulled images it is built on, which is also the image's creation time. `--ti
 to stamp targets that run with, in Unix seconds or as `2026-01-01T00:00:00Z`; it isn't an input, so targets
 that are reused keep the time they were built with.
 
+### Traces
+
+`--trace <file.json>` writes a trace of a command that builds (`build`, `push`, `load`, `save` or `export`), which
+[Perfetto](https://ui.perfetto.dev) opens. The page reads the file in the browser, without uploading it.
+
+```
+vamos load server app:dev --trace trace.json
+```
+
+The trace shows where the time went:
+
+- **The client:** loading the `BUILD` files, with each glob it reads, then the build and sending the image.
+- **The executor:**
+  - a track for each pull and target, holding each step, the commit or the files a task keeps, and the build
+    cache's lookup and write
+  - a span for each blob copied, or an instant for each skipped as already present
+- **Arrows:** from each glob, pull and target to the steps that use what it made.
+
+Each span records what it read and made, such as files and bytes, digests and image IDs. A trace is written even
+when the command fails, replacing an earlier file at that path. It may not be `save`'s tarball, or within
+`export`'s folder.
+
 ## BUILD files
 
 A `BUILD` file declares named targets. `pull()` fetches an image from a registry, `glob()` names a set of

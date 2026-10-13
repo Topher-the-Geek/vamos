@@ -1,8 +1,10 @@
 package run
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path"
@@ -11,7 +13,9 @@ import (
 
 	"github.com/Topher-the-Geek/vamos/internal/cache"
 	"github.com/Topher-the-Geek/vamos/internal/graph"
+	"github.com/Topher-the-Geek/vamos/internal/tracing"
 
+	"github.com/containerd/platforms"
 	"go.podman.io/buildah"
 )
 
@@ -50,9 +54,17 @@ func (st *targetState) expandPath(param, p string) (string, error) {
 	return path.Clean(expanded), nil
 }
 
-// apply performs the step in on the target being built. files is the tree of its source, stored in the cache, or
-// nil if it has none.
-func (st *targetState) apply(in graph.Step, files *cache.Blob) error {
+// tracedApply applies the step in, as a span of ctx's trace, named as the BUILD file wrote the step.
+func (st *targetState) tracedApply(ctx context.Context, in graph.Step, files *cache.Blob) (err error) {
+	ctx, span := tracing.Start(ctx, in.Display, "op", in.Op)
+	defer func() { span.EndWith(err) }()
+	return st.apply(ctx, in, files)
+}
+
+// apply performs the step in on the target being built, recording what it did in ctx's span. files is the tree of
+// its source, stored in the cache, or nil if it has none.
+func (st *targetState) apply(ctx context.Context, in graph.Step, files *cache.Blob) error {
+	span := tracing.Current(ctx)
 	switch in.Op {
 	case graph.OpAdd:
 		if files == nil {
@@ -62,7 +74,10 @@ func (st *targetState) apply(in graph.Step, files *cache.Blob) error {
 		if err != nil {
 			return err
 		}
-		return st.addSource(*in.From, *files, dest, chown(in.Owner, in.Group))
+		span.Set("from", st.graph.Node(*in.From).Label, "tree", files.Digest.String(), "dest", dest,
+			"owner", chown(in.Owner, in.Group))
+		span.Use(graph.FlowKey(*in.From))
+		return st.addSource(ctx, *in.From, *files, dest, chown(in.Owner, in.Group))
 
 	case graph.OpRun:
 		// Variables in the image's config are passed too; these override them.
@@ -70,23 +85,42 @@ func (st *targetState) apply(in graph.Step, files *cache.Blob) error {
 		for _, name := range slices.Sorted(maps.Keys(st.buildEnv)) {
 			env = append(env, name+"="+st.buildEnv[name])
 		}
+		stdout := st.log.Writer(cache.StreamStdout, st.output(st.ref, cache.StreamStdout))
+		stderr := st.log.Writer(cache.StreamStderr, st.output(st.ref, cache.StreamStderr))
+		if tracing.Enabled(ctx) {
+			span.Set("argv", in.Argv)
+			if p := builderPlatform(st.builder); !platforms.NewMatcher(HostPlatform).Match(p) {
+				span.Set("emulated", platforms.Format(p))
+			}
+			var outCount, errCount countingWriter
+			defer func() { span.Set("stdout bytes", outCount.n, "stderr bytes", errCount.n) }()
+			stdout, stderr = io.MultiWriter(&outCount, stdout), io.MultiWriter(&errCount, stderr)
+		}
 		return st.builder.Run(in.Argv, buildah.RunOptions{
 			Isolation: st.isolation,
 			Terminal:  buildah.WithoutTerminal,
 			Env:       env,
-			Stdout:    st.log.Writer(cache.StreamStdout, st.output(st.ref, cache.StreamStdout)),
-			Stderr:    st.log.Writer(cache.StreamStderr, st.output(st.ref, cache.StreamStderr)),
+			Stdout:    stdout,
+			Stderr:    stderr,
 		})
 
 	case graph.OpEnv, graph.OpBuildEnv:
 		// As in a Dockerfile's ENV, every value refers to the variables as they were before the call.
 		// They are set in the order actionEntry gives, so that targets with the same key make the same image.
 		lookup := st.lookup()
+		var values []string // for the span, if traced
+		traced := tracing.Enabled(ctx)
+		if traced {
+			defer func() { span.Set("values", values) }()
+		}
 		for _, v := range slices.Sorted(slices.Values(in.Vars)) {
 			name, value, _ := strings.Cut(v, "=")
 			value, err := graph.ExpandVars(value, lookup)
 			if err != nil {
 				return err // newEnv checks the syntax, so this can't happen
+			}
+			if traced {
+				values = append(values, name+"="+value)
 			}
 			if in.Op == graph.OpBuildEnv {
 				st.buildEnv[name] = value
@@ -102,6 +136,7 @@ func (st *targetState) apply(in graph.Step, files *cache.Blob) error {
 		if err != nil {
 			return err
 		}
+		span.Set("dir", dir)
 		// As a Dockerfile's WORKDIR does, a new directory belongs to the image's user, so later runs can write
 		// to it. buildah works within the container's root, so a link in the image can't lead outside it.
 		mode := os.FileMode(0o755)
@@ -112,6 +147,16 @@ func (st *targetState) apply(in graph.Step, files *cache.Blob) error {
 		return nil
 	}
 	return fmt.Errorf("unknown step %q", in.Op)
+}
+
+// countingWriter counts the bytes written to it, and discards them.
+type countingWriter struct {
+	n int64
+}
+
+func (w *countingWriter) Write(data []byte) (int, error) {
+	w.n += int64(len(data))
+	return len(data), nil
 }
 
 // actionEntry returns the step in's part of its target's action, but for the tree of its files.

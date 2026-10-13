@@ -11,13 +11,17 @@ import (
 	"github.com/Topher-the-Geek/vamos/internal/cache"
 	"github.com/Topher-the-Geek/vamos/internal/fileset"
 	"github.com/Topher-the-Geek/vamos/internal/graph"
+	"github.com/Topher-the-Geek/vamos/internal/tracing"
 	"github.com/containerd/platforms"
 	"github.com/opencontainers/go-digest"
 	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
-	"go.podman.io/buildah"
+	containersconfig "go.podman.io/common/pkg/config"
+	"go.podman.io/common/pkg/retry"
+	imagecopy "go.podman.io/image/v5/copy"
 	"go.podman.io/image/v5/docker"
 	"go.podman.io/image/v5/docker/reference"
 	"go.podman.io/image/v5/manifest"
+	"go.podman.io/image/v5/signature"
 	is "go.podman.io/image/v5/storage"
 	"go.podman.io/image/v5/types"
 	"go.podman.io/storage"
@@ -64,6 +68,18 @@ type puller struct {
 	again         map[string]bool       // tags to resolve again, rather than as the build cache records them
 }
 
+// tracedPull pulls the image of n, the pull ref, as a span of ctx's trace, on a track of its own.
+func (pl *puller) tracedPull(ctx context.Context, ref graph.Ref, n *graph.Node) (_ builtImage, err error) {
+	ctx, span := tracing.StartTrack(ctx, n.Desc, n.Desc, "image", n.Pull.Image, "platform", n.Pull.Platform)
+	defer func() { span.EndWith(err) }()
+	img, err := pl.pull(ctx, n.Pull)
+	if err == nil {
+		span.Set("image ID", img.id, "epoch", img.epoch.UTC().Format(time.RFC3339))
+		span.Produce(graph.FlowKey(ref))
+	}
+	return img, err
+}
+
 // pull fetches the image of p, for its platform, into the store, unless it is there already.
 func (pl *puller) pull(ctx context.Context, p *graph.Pull) (builtImage, error) {
 	image := p.Image
@@ -87,29 +103,21 @@ func (pl *puller) pull(ctx context.Context, p *graph.Pull) (builtImage, error) {
 	if err != nil {
 		return builtImage{}, fmt.Errorf("image %q: %w", image, err)
 	}
-	// Look for the image pulled before, by its manifest's digest, since buildah.Pull asks the registry about an
+	tracing.Current(ctx).Set("instance", instance.String())
+	// Look for the image pulled before, by its manifest's digest, since copying it asks the registry about an
 	// image even if the store has it. A pulled image is named by digest, since a tag can name only one
 	// platform's image in the store, but one pulled before by its tag may have only that name.
 	var img *storage.Image
 	images, err := pl.store.ImagesByDigest(instance)
 	if err == nil && len(images) > 0 {
 		img = images[0]
+		tracing.Current(ctx).Set("already present", true)
 	} else if err == nil || errors.Is(err, storage.ErrImageUnknown) {
-		var id string
-		id, err = buildah.Pull(ctx, digested.String(), buildah.PullOptions{
-			Store:         pl.store,
-			SystemContext: forPlatform(pl.systemContext, platform),
-			PullPolicy:    buildah.PullIfMissing,
-		})
+		img, err = pl.fetch(ctx, digested, platform)
 		if err != nil {
 			// With the tag's record cached, this is the first request to reach the registry.
 			return builtImage{}, pullError(image, err)
 		}
-		// buildah.Pull can't be cancelled, so check for an interrupt after it.
-		if err := ctx.Err(); err != nil {
-			return builtImage{}, err
-		}
-		img, err = pl.store.Image(id)
 	}
 	if err != nil {
 		return builtImage{}, fmt.Errorf("image %q: %w", image, err)
@@ -130,6 +138,60 @@ func (pl *puller) pull(ctx context.Context, p *graph.Pull) (builtImage, error) {
 		epoch = time.Unix(0, 0)
 	}
 	return builtImage{id: id, epoch: epoch}, nil
+}
+
+// fetch copies the image that digested names from its registry into the store, named by digest, and returns it.
+// It copies the image itself, rather than with buildah.Pull, so that a trace shows the blobs it copies.
+func (pl *puller) fetch(ctx context.Context, digested reference.Canonical, platform imgspecv1.Platform) (
+	*storage.Image, error) {
+	src, err := docker.NewReference(digested)
+	if err != nil {
+		return nil, err
+	}
+	dest, err := is.Transport.NewStoreReference(pl.store, digested, "")
+	if err != nil {
+		return nil, err
+	}
+	// The system's policy decides which images may be pulled, as it would for buildah.
+	policy, err := signature.DefaultPolicy(pl.systemContext)
+	if err != nil {
+		return nil, err
+	}
+	policyContext, err := signature.NewPolicyContext(policy)
+	if err != nil {
+		return nil, err
+	}
+	defer policyContext.Destroy()
+	retries, err := pullRetries()
+	if err != nil {
+		return nil, err
+	}
+	sys := forPlatform(pl.systemContext, platform)
+	err = retry.IfNecessary(ctx, func() error {
+		_, err := tracedCopy(ctx, policyContext, dest, src, &imagecopy.Options{SourceCtx: sys, DestinationCtx: sys})
+		return err
+	}, retries)
+	if err != nil {
+		return nil, err
+	}
+	return is.Transport.GetStoreImage(pl.store, dest)
+}
+
+// pullRetries returns how to retry a pull after an error that may not happen again, such as a connection reset:
+// as containers.conf's retry and retry_delay say, as for buildah and podman, backing off exponentially from a
+// second unless retry_delay is set.
+func pullRetries() (*retry.Options, error) {
+	conf, err := containersconfig.Default()
+	if err != nil {
+		return nil, err
+	}
+	options := &retry.Options{MaxRetry: int(conf.Engine.Retry)}
+	if conf.Engine.RetryDelay != "" {
+		if options.Delay, err = time.ParseDuration(conf.Engine.RetryDelay); err != nil {
+			return nil, fmt.Errorf("containers.conf's retry_delay: %w", err)
+		}
+	}
+	return options, nil
 }
 
 // pullError describes err, from reaching the registry for image, with a hint if the registry has no such image or
@@ -153,6 +215,7 @@ func (pl *puller) instance(ctx context.Context, ref reference.NamedTagged, platf
 			return "", err
 		}
 	}
+	tracing.Current(ctx).Set("tag recorded", record != nil)
 	if record == nil {
 		data, mimeType, err := pl.manifest(ctx, ref)
 		if err != nil {
@@ -165,6 +228,7 @@ func (pl *puller) instance(ctx context.Context, ref reference.NamedTagged, platf
 		record = &tagRecord{Digest: d, MIMEType: mimeType, Manifest: data}
 	}
 	pl.tags[ref.String()] = record
+	tracing.Current(ctx).Set("manifest", record.Digest.String())
 	if d, ok := record.Instances[platforms.Format(platform)]; ok {
 		return d, nil
 	}
@@ -213,7 +277,9 @@ func (pl *puller) recordedManifest(ctx context.Context, ref reference.NamedTagge
 const manifestTimeout = time.Minute
 
 // manifest fetches the manifest that ref names from its registry.
-func (pl *puller) manifest(ctx context.Context, ref reference.Named) ([]byte, string, error) {
+func (pl *puller) manifest(ctx context.Context, ref reference.Named) (_ []byte, _ string, err error) {
+	ctx, span := tracing.Start(ctx, "resolve "+reference.FamiliarString(ref), "registry", reference.Domain(ref))
+	defer func() { span.EndWith(err) }()
 	ctx, cancel := context.WithTimeout(ctx, manifestTimeout)
 	defer cancel()
 	imageRef, err := docker.NewReference(ref)
@@ -225,7 +291,11 @@ func (pl *puller) manifest(ctx context.Context, ref reference.Named) ([]byte, st
 		return nil, "", err
 	}
 	defer src.Close()
-	return src.GetManifest(ctx, nil)
+	data, mimeType, err := src.GetManifest(ctx, nil)
+	if err == nil {
+		span.Set("media type", mimeType, "digest", digest.FromBytes(data).String())
+	}
+	return data, mimeType, err
 }
 
 // chooseInstance returns the digest of the image for platform in the index data.

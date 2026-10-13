@@ -483,7 +483,7 @@ func TestWalkTreeFileGrew(t *testing.T) {
 				At:   tc.at,
 			}
 			c, dir := newTestCache(t)
-			_, err := StoreFiles(c, fsys, testenv.ProjectDir, testSelection(t, []string{"*.txt"}, nil, tc.change))
+			_, _, err := storeFiles(c, fsys, testenv.ProjectDir, testSelection(t, []string{"*.txt"}, nil, tc.change))
 			failedWith(t, err, tc.err)
 			if n := countBlobs(t, dir); n != 0 {
 				t.Errorf("the cache holds %d blobs, want none", n)

@@ -177,25 +177,57 @@ func (t *Tree) Digest() Blob {
 	return Blob{Digest: digest.FromBytes(data), Size: int64(len(data))}
 }
 
-// PutFile stores the file name in fsys as a blob. It hashes the file first, and copies it only if
-// the cache lacks that content, so a file the cache already holds is read once and not written.
+// Count is how many of each type of entry a tree has, and the size of its files.
+type Count struct {
+	Files, Dirs, Links int
+	Bytes              int64
+}
+
+// Args returns c as a trace's arguments: a list of keys and values.
+func (c Count) Args() []any {
+	return []any{"files", c.Files, "dirs", c.Dirs, "links", c.Links, "bytes", c.Bytes}
+}
+
+// Count counts t's entries, and the bytes of its files.
+func (t *Tree) Count() Count {
+	var c Count
+	for _, e := range t.Entries {
+		switch e.Type {
+		case EntryDir:
+			c.Dirs++
+		case EntryLink:
+			c.Links++
+		case EntryFile:
+			c.Files++
+			if e.Blob != nil {
+				c.Bytes += e.Blob.Size
+			}
+		}
+	}
+	return c
+}
+
+// PutFile stores the file name in fsys as a blob, and reports whether the cache lacked its content. It hashes the
+// file first, and copies it only if the cache lacks that content, so a file the cache already holds is read once
+// and not written.
 // The blob returned is always the content the cache holds, even if the file changes as it is read.
 // It fails with ErrOverLimit, storing nothing, if the file holds more than limit bytes, and reads at most
 // one byte past the limit, so a file that grows as it is read can't fill the cache.
-func (c *Cache) PutFile(fsys afero.Fs, name string, limit int64) (Blob, error) {
+func (c *Cache) PutFile(fsys afero.Fs, name string, limit int64) (Blob, bool, error) {
 	b, err := HashFile(fsys, name, limit)
 	if err != nil {
-		return Blob{}, err
+		return Blob{}, false, err
 	}
 	if c.Has(b) == nil {
-		return b, nil
+		return b, false, nil
 	}
 	f, err := fsys.Open(name)
 	if err != nil {
-		return Blob{}, err
+		return Blob{}, false, err
 	}
 	defer f.Close()
-	return c.put(f, limit)
+	b, err = c.put(f, limit)
+	return b, err == nil, err
 }
 
 // HashFile returns the blob that the file name in fsys would be stored as, storing nothing. It fails with

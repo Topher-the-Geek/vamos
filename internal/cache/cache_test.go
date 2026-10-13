@@ -19,7 +19,7 @@ func TestPutFileChanged(t *testing.T) {
 	fsys := &testenv.EditedFs{Fs: afero.NewMemMapFs(), File: "/a.txt", Edit: "new"}
 	testenv.Must(t, afero.WriteFile(fsys.Fs, "/a.txt", []byte("old"), 0o644))
 	c := newTestCache(t)
-	b, err := c.PutFile(fsys, "/a.txt", 100<<20)
+	b, _, err := c.PutFile(fsys, "/a.txt", 100<<20)
 	testenv.Must(t, err)
 	data, err := c.ReadBytes(b)
 	testenv.Must(t, err)
@@ -34,7 +34,7 @@ func TestPutFileEndless(t *testing.T) {
 	fsys := &endlessFs{Fs: afero.NewMemMapFs()}
 	testenv.Must(t, afero.WriteFile(fsys.Fs, "/log", nil, 0o644))
 	c := newTestCache(t)
-	if _, err := c.PutFile(fsys, "/log", 10); !errors.Is(err, ErrOverLimit) {
+	if _, _, err := c.PutFile(fsys, "/log", 10); !errors.Is(err, ErrOverLimit) {
 		t.Errorf("putFile = %v, want %v", err, ErrOverLimit)
 	}
 	if n := countBlobs(t, c); n != 0 {

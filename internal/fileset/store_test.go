@@ -30,17 +30,30 @@ func TestCacheTreeRoundTrip(t *testing.T) {
 
 	c, cacheDir := newTestCache(t)
 	sel := testSelection(t, []string{"app", "top.txt"}, nil, func(sel *Selection) { sel.ModeMask = 0o7777 })
-	stored, err := Store(c, fsys, dir, sel)
+	stored, stats, err := Store(c, fsys, dir, sel)
 	testenv.Must(t, err)
 	// One blob for each distinct file, and one for the tree.
 	if got, want := countBlobs(t, cacheDir), 5; got != want {
 		t.Errorf("cache holds %d blobs, want %d", got, want)
 	}
+	// app/copy.js has the content of app/main.js, stored just before it.
+	want := Stats{Count: cache.Count{Files: 5, Dirs: 1, Links: 1, Bytes: 21}, NewFiles: 4, NewBytes: 17}
+	if stats != want {
+		t.Errorf("stats = %+v, want %+v", stats, want)
+	}
+	_, stats, err = Store(c, fsys, dir, sel)
+	testenv.Must(t, err)
+	if want.NewFiles, want.NewBytes = 0, 0; stats != want {
+		t.Errorf("stats of storing the files again = %+v, want %+v", stats, want)
+	}
+	if _, hashed, err := Hash(fsys, dir, sel); err != nil || hashed != want {
+		t.Errorf("Hash's stats = %+v, %v; want %+v", hashed, err, want)
+	}
 
 	out := t.TempDir()
 	_, err = c.Checkout(stored, out)
 	testenv.Must(t, err)
-	again, err := StoreFiles(c, afero.NewOsFs(), out, sel)
+	again, _, err := storeFiles(c, afero.NewOsFs(), out, sel)
 	testenv.Must(t, err)
 	if again.Digest() != stored {
 		want, err := c.ReadTree(stored)
@@ -106,10 +119,10 @@ func TestTreeDigest(t *testing.T) {
 			fsys, _ := testenv.DiskProject(t, map[string]string{"a.txt": "a", "sub/b.txt": "b"},
 				map[string]string{"sub/link": "b.txt"})
 			c, _ := newTestCache(t)
-			before, err := StoreFiles(c, fsys, testenv.ProjectDir, testSelection(t, []string{"."}, nil, nil))
+			before, _, err := storeFiles(c, fsys, testenv.ProjectDir, testSelection(t, []string{"."}, nil, nil))
 			testenv.Must(t, err)
 			testenv.Must(t, tc.change(fsys, testenv.ProjectDir))
-			after, err := StoreFiles(c, fsys, testenv.ProjectDir, testSelection(t, []string{"."}, nil, nil))
+			after, _, err := storeFiles(c, fsys, testenv.ProjectDir, testSelection(t, []string{"."}, nil, nil))
 			testenv.Must(t, err)
 			if same := before.Digest() == after.Digest(); same != tc.same {
 				t.Errorf("digest unchanged = %v, want %v", same, tc.same)

@@ -1,6 +1,7 @@
 package load
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -13,6 +14,7 @@ import (
 	"github.com/Topher-the-Geek/vamos/internal/cache"
 	"github.com/Topher-the-Geek/vamos/internal/fileset"
 	"github.com/Topher-the-Geek/vamos/internal/graph"
+	"github.com/Topher-the-Geek/vamos/internal/tracing"
 
 	"github.com/containerd/platforms"
 	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
@@ -1036,19 +1038,30 @@ func (w *workspace) declaration(l string) *declaration {
 // readGlobs reads the files of each glob in g, whose files are globs, by node, with store, which returns their tree,
 // setting the trees of g's Source nodes. A glob's files are read once, before anything is built, so that every
 // target that adds them gets the same files, as the build cache stored them, even if they change during the build.
+// Each glob is a span of ctx's trace, which those that add its files point back to.
 func (w *workspace) readGlobs(
-	g *graph.Graph, globs map[graph.Ref]*fileSet, store func(dir string, sel *fileset.Selection) (cache.Blob, error),
+	ctx context.Context, g *graph.Graph, globs map[graph.Ref]*fileSet,
+	store func(dir string, sel *fileset.Selection) (cache.Blob, fileset.Stats, error),
 ) error {
 	for _, ref := range slices.Sorted(maps.Keys(globs)) {
 		set := globs[ref]
-		tree, err := store(set.dir, set.sel)
+		_, span := tracing.Start(ctx, g.Node(ref).Desc,
+			"dir", set.dir,
+			"include", set.sel.Include,
+			"exclude", set.sel.Exclude)
+		tree, stats, err := store(set.dir, set.sel)
 		if err != nil {
 			err = fmt.Errorf("%s: glob: %w", w.declaration(set.label).pos, err)
 			if set.configuring != "" {
 				err = fmt.Errorf("%w (configuring %s)", err, set.configuring)
 			}
+			span.EndWith(err)
 			return err
 		}
+		span.Set(stats.Args()...)
+		span.Set("tree", tree.Digest.String(), "tree bytes", tree.Size)
+		span.Produce(graph.FlowKey(ref))
+		span.End()
 		g.Node(ref).Source.Tree = tree
 	}
 	return nil

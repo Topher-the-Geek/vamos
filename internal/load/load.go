@@ -10,6 +10,7 @@ import (
 	"github.com/Topher-the-Geek/vamos/internal/cache"
 	"github.com/Topher-the-Geek/vamos/internal/fileset"
 	"github.com/Topher-the-Geek/vamos/internal/graph"
+	"github.com/Topher-the-Geek/vamos/internal/tracing"
 
 	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/spf13/afero"
@@ -36,27 +37,42 @@ type Request struct {
 	// platform, with why, so that an index sends only its manifest for that platform. Its error is returned as
 	// it is.
 	DestPlatform func(context.Context) (imgspecv1.Platform, string, error)
-	// Store reads the files that a glob selects within dir in fsys, as it returns their tree: into the build
-	// cache, for a build. It is called only once the targets are configured, so that a mistake in a BUILD file
-	// touches nothing.
-	Store func(fsys afero.Fs, dir string, sel *fileset.Selection) (cache.Blob, error)
+	// Store reads the files that a glob selects within dir in fsys, as it returns their tree, with their stats:
+	// into the build cache, for a build. It is called only once the targets are configured, so that a mistake in a
+	// BUILD file touches nothing.
+	Store func(fsys afero.Fs, dir string, sel *fileset.Selection) (cache.Blob, fileset.Stats, error)
 }
 
 // Load evaluates the BUILD files of the workspace holding req.Dir, as the targets req names need them,
 // configures those targets, reads the files of the globs they add with req.Store, and returns their graph,
-// checked. Every mistake in a BUILD file or the command line is reported here, saying where.
-func Load(ctx context.Context, fsys afero.Fs, req Request) (*graph.Graph, error) {
+// checked. Every mistake in a BUILD file or the command line is reported here, saying where. Loading is one span of
+// ctx's trace, and reading each glob another, within it.
+func Load(ctx context.Context, fsys afero.Fs, req Request) (_ *graph.Graph, err error) {
+	ctx, span := tracing.Start(ctx, "load", "targets", req.Targets)
+	defer func() { span.EndWith(err) }()
+	g, w, err := load(ctx, fsys, req)
+	if w != nil {
+		span.Set("workspace", w.root, "BUILD files", len(w.packages))
+	}
+	if g != nil {
+		span.Set("nodes", len(g.Nodes))
+	}
+	return g, err
+}
+
+// load is Load, also returning the workspace, once opened.
+func load(ctx context.Context, fsys afero.Fs, req Request) (*graph.Graph, *workspace, error) {
 	dir, err := filepath.Abs(req.Dir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	w, err := openWorkspace(fsys, dir, req.ExecPlatform)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if req.Platform != "" {
 		if w.platform, err = parsePlatform(req.Platform); err != nil {
-			return nil, fmt.Errorf("--platform %s: %w", req.Platform, err)
+			return nil, w, fmt.Errorf("--platform %s: %w", req.Platform, err)
 		}
 	}
 
@@ -65,39 +81,39 @@ func Load(ctx context.Context, fsys afero.Fs, req Request) (*graph.Graph, error)
 	case WantImage:
 		root, err := w.imageRoot(ctx, req)
 		if err != nil {
-			return nil, err
+			return nil, w, err
 		}
 		roots = []confLabel{root}
 	case WantFiles:
 		l, err := w.filesTarget(req.Targets[0])
 		if err != nil {
-			return nil, err
+			return nil, w, err
 		}
 		c, err := w.commandConfigOf(l, "task", req, false)
 		if err != nil {
-			return nil, err
+			return nil, w, err
 		}
 		roots = []confLabel{{l, c}}
 	default:
 		if roots, err = w.buildRoots(req); err != nil {
-			return nil, err
+			return nil, w, err
 		}
 	}
 
 	g, globs, err := w.configure(roots)
 	if err != nil {
-		return nil, err
+		return nil, w, err
 	}
-	err = w.readGlobs(g, globs, func(dir string, sel *fileset.Selection) (cache.Blob, error) {
+	err = w.readGlobs(ctx, g, globs, func(dir string, sel *fileset.Selection) (cache.Blob, fileset.Stats, error) {
 		return req.Store(w.fs, dir, sel)
 	})
 	if err != nil {
-		return nil, err
+		return nil, w, err
 	}
 	if err := g.Validate(); err != nil {
-		return nil, err // a bug: every mistake in a BUILD file is reported before this
+		return nil, w, err // a bug: every mistake in a BUILD file is reported before this
 	}
-	return g, nil
+	return g, w, nil
 }
 
 // imageRoot returns the target whose image req sends, in the configuration the command line gives it: the one

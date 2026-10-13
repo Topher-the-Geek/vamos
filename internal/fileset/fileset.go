@@ -420,33 +420,58 @@ func (w *treeWalk) mode(info fs.FileInfo) uint32 {
 	return cache.ChmodBits(info) & uint32(w.sel.ModeMask)
 }
 
-// Hash returns the blob that the tree of the files sel selects within dir in fsys would be stored as, storing
-// nothing.
-func Hash(fsys afero.Fs, dir string, sel *Selection) (cache.Blob, error) {
+// Stats describes the files of a selection, as read and stored.
+type Stats struct {
+	cache.Count
+	NewFiles int   // files whose content the cache lacked, and so stored
+	NewBytes int64 // their size
+}
+
+// Args returns s as a trace's arguments: a list of keys and values.
+func (s Stats) Args() []any {
+	return append(s.Count.Args(), "new files", s.NewFiles, "new bytes", s.NewBytes)
+}
+
+// Hash returns the blob that the tree of the files sel selects within dir in fsys would be stored as, and their
+// stats, storing nothing.
+func Hash(fsys afero.Fs, dir string, sel *Selection) (cache.Blob, Stats, error) {
 	t, err := Walk(fsys, dir, sel, func(name string, limit int64) (cache.Blob, error) {
 		return cache.HashFile(fsys, name, limit)
 	})
 	if err != nil {
-		return cache.Blob{}, err
+		return cache.Blob{}, Stats{}, err
 	}
-	return t.Digest(), nil
+	return t.Digest(), Stats{Count: t.Count()}, nil
 }
 
-// StoreFiles stores the files that sel selects within dir in fsys in c, and returns the tree that
-// describes them, without storing it.
-func StoreFiles(c *cache.Cache, fsys afero.Fs, dir string, sel *Selection) (*cache.Tree, error) {
-	return Walk(fsys, dir, sel, func(name string, limit int64) (cache.Blob, error) {
-		return c.PutFile(fsys, name, limit)
+// storeFiles stores the files that sel selects within dir in fsys in c, and returns the tree that describes them,
+// without storing it, and their stats.
+func storeFiles(c *cache.Cache, fsys afero.Fs, dir string, sel *Selection) (*cache.Tree, Stats, error) {
+	var stats Stats
+	t, err := Walk(fsys, dir, sel, func(name string, limit int64) (cache.Blob, error) {
+		b, stored, err := c.PutFile(fsys, name, limit)
+		if stored {
+			stats.NewFiles++
+			stats.NewBytes += b.Size
+		}
+		return b, err
 	})
+	if err != nil {
+		return nil, Stats{}, err
+	}
+	stats.Count = t.Count()
+	return t, stats, nil
 }
 
-// Store stores the files that sel selects within dir in fsys in c, and then the tree that describes them.
-func Store(c *cache.Cache, fsys afero.Fs, dir string, sel *Selection) (cache.Blob, error) {
-	t, err := StoreFiles(c, fsys, dir, sel)
+// Store stores the files that sel selects within dir in fsys in c, and then the tree that describes them, and
+// returns the tree's blob and the files' stats.
+func Store(c *cache.Cache, fsys afero.Fs, dir string, sel *Selection) (cache.Blob, Stats, error) {
+	t, stats, err := storeFiles(c, fsys, dir, sel)
 	if err != nil {
-		return cache.Blob{}, err
+		return cache.Blob{}, Stats{}, err
 	}
-	return c.PutBytes(t.Encode())
+	b, err := c.PutBytes(t.Encode())
+	return b, stats, err
 }
 
 // checkInclude reports whether the prefix of the include pattern p, the path its files are beneath, is

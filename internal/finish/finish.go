@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/Topher-the-Geek/vamos/internal/run"
+	"github.com/Topher-the-Geek/vamos/internal/tracing"
 
 	"github.com/containerd/platforms"
 	dockerclient "github.com/moby/moby/client"
@@ -34,24 +35,35 @@ const (
 )
 
 // Push pushes the image or index of res to the registry name, from the side from says, returning the image's ID
-// there, or the index's digest. sys describes the client's registry settings.
+// there, or the index's digest. sys describes the client's registry settings. The executor sends the spans of
+// its part, if ctx is traced, to ev.
 func Push(ctx context.Context, ex run.Executor, res run.Result, name reference.Named, from PushFrom,
-	sys *types.SystemContext) (string, error) {
+	sys *types.SystemContext, ev run.Events) (string, error) {
 	if from == FromClient {
 		ref, err := docker.NewReference(name)
 		if err != nil {
 			return "", err
 		}
-		return ex.Export(ctx, res, ref, sys)
+		return copyTo(ctx, ex, res, ref, sys, ev)
 	}
-	return ex.Push(ctx, res, name)
+	return ex.Push(ctx, run.PushRequest{Result: res, Dest: name, Trace: tracing.Call(ctx)}, ev)
+}
+
+// copyTo has ex copy res to ref, a destination on the client that sys describes, sending the spans of its part, if
+// ctx is traced, to ev.
+func copyTo(
+	ctx context.Context, ex run.Executor, res run.Result, ref types.ImageReference, sys *types.SystemContext,
+	ev run.Events,
+) (string, error) {
+	return ex.Export(ctx, run.ExportRequest{Result: res, Dest: ref, System: sys, Trace: tracing.Call(ctx)}, ev)
 }
 
 // Save writes the image of res to a tarball at path, which `docker load` imports, recording name in it unless
 // name is nil, and returns its image ID there. It writes a temporary file beside path, created only once res is
-// built, and renames it into place, so that an existing file is replaced only by a complete image.
+// built, and renames it into place, so that an existing file is replaced only by a complete image. The executor
+// sends the spans of its part, if ctx is traced, to ev.
 func Save(ctx context.Context, ex run.Executor, res run.Result, path string, name reference.NamedTagged,
-	sys *types.SystemContext) (_ string, err error) {
+	sys *types.SystemContext, ev run.Events) (_ string, err error) {
 	tmp, err := createTempBeside(path)
 	if err != nil {
 		return "", err
@@ -66,7 +78,7 @@ func Save(ctx context.Context, ex run.Executor, res run.Result, path string, nam
 	if err != nil {
 		return "", err
 	}
-	id, err := ex.Export(ctx, res, ref, sys)
+	id, err := copyTo(ctx, ex, res, ref, sys, ev)
 	if err != nil {
 		return "", err
 	}
@@ -79,9 +91,9 @@ func Save(ctx context.Context, ex run.Executor, res run.Result, path string, nam
 // LoadDocker loads the image of res into the Docker daemon at $DOCKER_HOST, or the local socket, named name, and
 // returns its image ID. It writes a tarball and sends it with the Docker client rather than use the
 // docker-daemon transport, which can't reach a daemon over plain HTTP on tcp://, and ignores $DOCKER_CERT_PATH
-// and $DOCKER_TLS_VERIFY.
+// and $DOCKER_TLS_VERIFY. The executor sends the spans of its part, if ctx is traced, to ev.
 func LoadDocker(ctx context.Context, ex run.Executor, res run.Result, name reference.NamedTagged,
-	sys *types.SystemContext) (string, error) {
+	sys *types.SystemContext, ev run.Events) (string, error) {
 	tmp, err := os.CreateTemp("", "vamos-load-*.tar")
 	if err != nil {
 		return "", err
@@ -94,7 +106,7 @@ func LoadDocker(ctx context.Context, ex run.Executor, res run.Result, name refer
 	if err != nil {
 		return "", err
 	}
-	id, err := ex.Export(ctx, res, ref, sys)
+	id, err := copyTo(ctx, ex, res, ref, sys, ev)
 	if err != nil {
 		return "", err
 	}
@@ -145,7 +157,12 @@ func DockerPlatform(ctx context.Context) (imgspecv1.Platform, string, error) {
 }
 
 // loadIntoDocker sends the image tarball in f to the Docker daemon, like `docker load`.
-func loadIntoDocker(ctx context.Context, f *os.File) error {
+func loadIntoDocker(ctx context.Context, f *os.File) (err error) {
+	_, span := tracing.Start(ctx, "docker load")
+	defer func() { span.EndWith(err) }()
+	if info, err := f.Stat(); err == nil {
+		span.Set("bytes", info.Size())
+	}
 	client, err := newDockerClient()
 	if err != nil {
 		return err
@@ -158,6 +175,28 @@ func loadIntoDocker(ctx context.Context, f *os.File) error {
 	defer res.Close()
 	// The daemon reports failures in the response's stream of messages.
 	return jsonmessage.DisplayStream(res, io.Discard)
+}
+
+// WriteFile writes a file at path with write, through a temporary file beside it, renamed into place once
+// complete, so that a failure leaves an existing file as it was.
+func WriteFile(path string, write func(io.Writer) error) (err error) {
+	tmp, err := createTempBeside(path)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			tmp.Close()
+			os.Remove(tmp.Name())
+		}
+	}()
+	if err := write(tmp); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }
 
 // CheckSaveDest reports clearly if a file can't be written at path, before anything is built.

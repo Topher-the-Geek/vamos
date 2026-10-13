@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/Topher-the-Geek/vamos/internal/cache"
 	"github.com/Topher-the-Geek/vamos/internal/graph"
+	"github.com/Topher-the-Geek/vamos/internal/tracing"
 
 	"github.com/containerd/platforms"
 	"github.com/opencontainers/go-digest"
@@ -34,14 +36,17 @@ import (
 type Executor interface {
 	// ExecPlatform returns the platform that run() steps run on without emulation.
 	ExecPlatform(ctx context.Context) (imgspecv1.Platform, error)
+	// Clock returns the time by the executor's clock, so that the client can place the executor's spans in a
+	// trace by its own.
+	Clock(ctx context.Context) (time.Time, error)
 	// Run runs the graph req names, reporting progress to ev, and returns a result for each of its roots.
 	Run(ctx context.Context, req Request, ev Events) ([]Result, error)
-	// Push copies a result's image or index from the executor to a registry, using the executor's credentials,
-	// and returns its image ID there, or an index's digest.
-	Push(ctx context.Context, res Result, dest reference.Named) (string, error)
-	// Export copies a result's image or index to dest, a destination on the client, which sys describes, and
-	// returns its image ID there, or an index's digest.
-	Export(ctx context.Context, res Result, dest types.ImageReference, sys *types.SystemContext) (string, error)
+	// Push copies a result's image or index from the executor to a registry, as req says, using the executor's
+	// credentials, and returns its image ID there, or an index's digest.
+	Push(ctx context.Context, req PushRequest, ev Events) (string, error)
+	// Export copies a result's image or index to a destination on the client, as req says, and returns its image
+	// ID there, or an index's digest.
+	Export(ctx context.Context, req ExportRequest, ev Events) (string, error)
 }
 
 // Request asks an executor to run a graph.
@@ -49,6 +54,25 @@ type Request struct {
 	Graph     cache.Blob // the encoded graph, in the build cache
 	Rebuild   bool       // run the roots again, and resolve their pulls' tags again
 	Timestamp time.Time  // the earliest time that targets which run stamp their files with
+	// Trace, if set, asks for the spans of a trace of the run, sent to the run's Events.
+	Trace *tracing.CallContext
+}
+
+// PushRequest asks an executor to push a result to a registry.
+type PushRequest struct {
+	Result Result
+	Dest   reference.Named
+	// Trace, if set, asks for the spans of a trace of the push, sent to the push's Events.
+	Trace *tracing.CallContext
+}
+
+// ExportRequest asks an executor to copy a result to a destination on the client.
+type ExportRequest struct {
+	Result Result
+	Dest   types.ImageReference
+	System *types.SystemContext // describes Dest
+	// Trace, if set, asks for the spans of a trace of the export, sent to the export's Events.
+	Trace *tracing.CallContext
 }
 
 // Events receives a run's progress. Its methods may be called from several goroutines.
@@ -58,6 +82,57 @@ type Events interface {
 	// Output passes on what node's run() steps print, or printed when its cached result was made, to stream:
 	// cache.StreamStdout or cache.StreamStderr. data is valid only during the call.
 	Output(node graph.Ref, stream byte, data []byte)
+	// Spans passes on spans of a trace that the client asked for, in batches, as they end.
+	Spans(spans []tracing.Span)
+}
+
+// executorProcess names the executor's spans' process in a trace.
+const executorProcess = "executor"
+
+// spanBatchSize is how many spans an executor gathers before sending them, so that a remote one needn't send a
+// message for each.
+const spanBatchSize = 256
+
+// forCall returns a context whose spans, if call asks for them, go to ev, in batches, and a function that sends
+// what is left of them, which the call must run, last, before it returns.
+func forCall(ctx context.Context, call *tracing.CallContext, ev Events) (context.Context, func()) {
+	if call == nil {
+		return ctx, func() {}
+	}
+	b := &spanBatch{ev: ev}
+	return tracing.ForCall(ctx, call, b.add, executorProcess), b.flush
+}
+
+// spanBatch gathers spans to send to events.
+type spanBatch struct {
+	ev    Events
+	mu    sync.Mutex
+	spans []tracing.Span
+}
+
+// add gathers s, sending the batch once it is full.
+func (b *spanBatch) add(s tracing.Span) {
+	b.mu.Lock()
+	b.spans = append(b.spans, s)
+	var full []tracing.Span
+	if len(b.spans) >= spanBatchSize {
+		full, b.spans = b.spans, nil
+	}
+	b.mu.Unlock()
+	if full != nil {
+		b.ev.Spans(full)
+	}
+}
+
+// flush sends the spans gathered and not yet sent.
+func (b *spanBatch) flush() {
+	b.mu.Lock()
+	rest := b.spans
+	b.spans = nil
+	b.mu.Unlock()
+	if len(rest) > 0 {
+		b.ev.Spans(rest)
+	}
 }
 
 // Result is what a root made. Exactly one of Image, Index and Files is set, unless the root is a task without
@@ -132,10 +207,19 @@ func (l *Local) ExecPlatform(context.Context) (imgspecv1.Platform, error) {
 	return HostPlatform, nil
 }
 
+// Clock returns the time, by the clock the client shares.
+func (l *Local) Clock(context.Context) (time.Time, error) {
+	return time.Now(), nil
+}
+
 // Run runs the graph req names with buildah: its pulls first, then its layers, tasks and indexes in order. Each
 // layer's and task's result is kept in the build cache, and reused instead of running the target again whenever
 // a later build gives it the same inputs, unless it is a root and req.Rebuild is set.
-func (l *Local) Run(ctx context.Context, req Request, ev Events) ([]Result, error) {
+func (l *Local) Run(ctx context.Context, req Request, ev Events) (_ []Result, err error) {
+	ctx, flush := forCall(ctx, req.Trace, ev)
+	defer flush() // after the span ends
+	ctx, span := tracing.StartTrack(ctx, "run", "run", "graph", req.Graph.Digest.String(), "rebuild", req.Rebuild)
+	defer func() { span.EndWith(err) }()
 	if err := l.open(); err != nil {
 		return nil, err
 	}
@@ -185,7 +269,7 @@ func (l *Local) Run(ctx context.Context, req Request, ev Events) ([]Result, erro
 			// The tag may name a newer image now.
 			ev.Status(graph.Ref(i), "pulling again")
 		}
-		if images[graph.Ref(i)], err = pl.pull(ctx, n.Pull); err != nil {
+		if images[graph.Ref(i)], err = pl.tracedPull(ctx, graph.Ref(i), &g.Nodes[i]); err != nil {
 			return nil, fmt.Errorf("%s: %w", n.Desc, err)
 		}
 	}
@@ -246,8 +330,10 @@ func (l *Local) Run(ctx context.Context, req Request, ev Events) ([]Result, erro
 }
 
 // runIndex makes the result of the index ref: its manifests' images, each checked to be for its platform.
-func (r *targetRunner) runIndex(ctx context.Context, ref graph.Ref) error {
+func (r *targetRunner) runIndex(ctx context.Context, ref graph.Ref) (err error) {
 	n := r.graph.Node(ref)
+	ctx, span := tracing.StartTrack(ctx, n.Desc, n.Desc)
+	defer func() { span.EndWith(err) }()
 	var manifests []Manifest
 	for _, m := range n.Index.Manifests {
 		id := r.images[m].id
@@ -261,22 +347,36 @@ func (r *targetRunner) runIndex(ctx context.Context, ref graph.Ref) error {
 				platforms.Format(got), want)
 		}
 		manifests = append(manifests, Manifest{Image: id, Platform: want})
+		span.Set(want, id)
 	}
 	r.indexes[ref] = manifests
 	return nil
 }
 
-// Push copies the image or index of res to the registry dest.
-func (l *Local) Push(ctx context.Context, res Result, dest reference.Named) (string, error) {
-	ref, err := docker.NewReference(dest)
+// Push copies the image or index of req.Result to the registry req.Dest.
+func (l *Local) Push(ctx context.Context, req PushRequest, ev Events) (_ string, err error) {
+	ctx, flush := forCall(ctx, req.Trace, ev)
+	defer flush() // after the span ends
+	ctx, span := tracing.StartTrack(ctx, "push", "push to "+req.Dest.String())
+	defer func() { span.EndWith(err) }()
+	ref, err := docker.NewReference(req.Dest)
 	if err != nil {
 		return "", err
 	}
-	return l.Export(ctx, res, ref, l.systemContext)
+	return l.export(ctx, req.Result, ref, l.systemContext)
 }
 
-// Export copies the image or index of res from the container store to dest.
-func (l *Local) Export(ctx context.Context, res Result, dest types.ImageReference, sys *types.SystemContext) (
+// Export copies the image or index of req.Result from the container store to req.Dest.
+func (l *Local) Export(ctx context.Context, req ExportRequest, ev Events) (_ string, err error) {
+	ctx, flush := forCall(ctx, req.Trace, ev)
+	defer flush() // after the span ends
+	ctx, span := tracing.StartTrack(ctx, "export", "export to "+req.Dest.Transport().Name())
+	defer func() { span.EndWith(err) }()
+	return l.export(ctx, req.Result, req.Dest, req.System)
+}
+
+// export is Export, as part of ctx's trace.
+func (l *Local) export(ctx context.Context, res Result, dest types.ImageReference, sys *types.SystemContext) (
 	string, error) {
 	if err := l.open(); err != nil {
 		return "", err
@@ -305,7 +405,7 @@ func (l *Local) exportImage(ctx context.Context, id string, dest types.ImageRefe
 	}
 	defer policyContext.Destroy()
 
-	written, err := imagecopy.Image(ctx, policyContext, dest, src, &imagecopy.Options{DestinationCtx: sys})
+	written, err := tracedCopy(ctx, policyContext, dest, src, &imagecopy.Options{DestinationCtx: sys})
 	if err != nil {
 		return "", err
 	}
@@ -360,7 +460,7 @@ func (l *Local) exportIndex(
 		if err != nil {
 			return "", err
 		}
-		written, err := imagecopy.Image(ctx, policyContext, layoutRef, src, &imagecopy.Options{
+		written, err := tracedCopy(ctx, policyContext, layoutRef, src, &imagecopy.Options{
 			ForceManifestMIMEType: imgspecv1.MediaTypeImageManifest,
 		})
 		if err != nil {
@@ -385,7 +485,7 @@ func (l *Local) exportIndex(
 	if err != nil {
 		return "", err
 	}
-	written, err := imagecopy.Image(ctx, policyContext, dest, src, &imagecopy.Options{
+	written, err := tracedCopy(ctx, policyContext, dest, src, &imagecopy.Options{
 		DestinationCtx:     sys,
 		ImageListSelection: imagecopy.CopyAllImages,
 	})

@@ -44,6 +44,9 @@ store and registries; finish runs on the client, except for `push`, which runs o
   cache from each target's key to its latest result. Layers' images stay in the container store.
 - `internal/fileset/` — the selection of a glob's or task's files: include and exclude patterns, mode mask and
   limits, and the walk that reads only the folders they could match into a tree for the cache.
+- `internal/tracing/` — traces, for `--trace`: spans, plain data so that an executor can send them to the client,
+  the recorder that a context carries, estimating an executor's clock offset, and writing Chrome's JSON trace
+  format for Perfetto. It uses no other package of vamos.
 - `internal/testenv/` — what several packages' tests share: projects to build, and `RequireBuildah`.
 - `examples/` — sample `BUILD` projects: `typescript-mcp/` (TypeScript) and `fastmcp/` (Python), each an MCP server
   with an echo tool; `strawberry-react/`, a workspace whose UI package uses the backend's GraphQL schema, built
@@ -167,6 +170,15 @@ S=examples/strawberry-react
   --replace -C $S
 ```
 
+```
+# 9. A trace, queried with Perfetto's trace processor, which the devcontainer has. Expect the slowest spans, then
+#    arrows from what each glob, pull or target made to the steps that use it: none if every target was reused.
+./vamos load server vamos-example -C examples/typescript-mcp --trace "$TMP/trace.json" \
+  && echo "select name, dur/1000000 as ms from slice order by dur desc limit 10;
+           select s1.name, s2.name from flow join slice s1 on slice_out = s1.id join slice s2 on slice_in = s2.id;" \
+  | trace_processor_shell -q /dev/stdin "$TMP/trace.json"
+```
+
 `push` has no manual check here: the tests already push to a real (in-process) registry, from the executor
 and from the client.
 
@@ -249,8 +261,10 @@ Errors are a feature here, and every user mistake should have a test for its mes
 - Only `pull()` reaches registries: layers use `PullNever` on image IDs (or `scratch`). A pull resolves its tag
   once and records the manifest it names, and each platform's image in it, in the build cache (`tagRecord`, kept by
   `prune`), so later builds don't reach the registry until `--rebuild`. Pulled images are named by digest in the
-  store, since a tag can name only one image there, and every platform's would need it. Find a pulled image with
-  `ImagesByDigest` before calling `buildah.Pull`, which asks the registry even when the store has the image:
+  store, since a tag can name only one image there, and every platform's would need it. A pull copies the image
+  with `copy.Image` (`puller.fetch`), not `buildah.Pull`, so that a trace shows its blobs, and retries as buildah
+  would. Find a pulled image with `ImagesByDigest` first, since copying asks the registry even when the store has
+  the image:
   Docker Hub allows 100 anonymous pulls an hour, and then stalls requests, so a test run would hang
   (`TestPullTag` counts requests). Every layer is
   cached: committed to local storage and named `localhost/vamos-cache:<image ID>`, so that tools removing
@@ -286,6 +300,24 @@ Errors are a feature here, and every user mistake should have a test for its mes
   make must be reported while configuring, with where; `Graph.Validate` failing means a bug.
 - `--tls-verify=false` lets a registry use plain HTTP, both for pushing and for pulling the base image.
   Without the flag, `registries.conf` decides, so leave `DockerInsecureSkipTLSVerify` unset.
+- Traces: spans come from `tracing.Start` and its kin, through the context, and cost nothing without `--trace`.
+  - **Crossing the boundary.** The executor gets a `tracing.CallContext` in the request of each call that does work
+    (`Run`, `Push`, `Export`), never a Go context, since a remote one couldn't get that. It sends its spans back
+    through `Events.Spans` in batches as they end (`spanBatch`), the last as the call returns, never to `os.Stdout`.
+    Work done only for a span's arguments goes behind `tracing.Enabled`.
+  - **Clocks.** The client places the executor's spans by its own clock, from `Executor.Clock`
+    (`tracing.EstimateOffset`).
+  - **Nesting and tracks.** Spans on a track must nest, so each pull and target starts its own
+    (`tracing.StartTrack`). Blobs are async, since containers/image copies several at once.
+  - **Blob events.** containers/image's events don't pair up: a skipped blob has no start, a failed copy leaves
+    starts with no end, and a config is reported as copied even when the registry has it. `blobTracker` handles
+    each.
+  - **Arrows.** A span either produces or uses one thing (`graph.FlowKey`), since Perfetto binds a slice to one
+    arrow's end.
+  - **Times.** They are written as microseconds since the trace's start, with a fraction, which Perfetto reads to
+    the nanosecond. Whole microseconds would let a short last step escape its target.
+  - **Testing.** `TestTracePerfetto` checks that Perfetto's importer agrees with the tests' reading of a trace. It
+    is skipped without `trace_processor_shell`, which the devcontainer has.
 
 ## Dependencies
 

@@ -20,6 +20,7 @@ import (
 	"github.com/Topher-the-Geek/vamos/internal/graph"
 	"github.com/Topher-the-Geek/vamos/internal/load"
 	"github.com/Topher-the-Geek/vamos/internal/run"
+	"github.com/Topher-the-Geek/vamos/internal/tracing"
 
 	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sirupsen/logrus"
@@ -37,6 +38,8 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 	var timestamp timestampFlag
 	var sets []string
 	var platform string
+	var tracePath string
+	var session *traceSession // of the command's trace, if --trace is given
 
 	root := &cobra.Command{
 		Use:   "vamos",
@@ -91,7 +94,7 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 	// runGraph loads the graph that req asks for, stores it, and the files of its globs, in the build cache, and has
 	// the executor run it, printing its progress, with rebuild for the targets named. It returns the build cache, in
 	// which the executor leaves tasks' files.
-	runGraph := func(cmd *cobra.Command, ex run.Executor, req load.Request, rebuild bool) (
+	runGraph := func(cmd *cobra.Command, ex run.Executor, req load.Request, rebuild bool, events *eventPrinter) (
 		[]run.Result, *cache.Cache, error) {
 		// The build cache is opened only once the targets are configured, so that a mistake in a BUILD file touches
 		// nothing.
@@ -107,14 +110,15 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 			c, err = cache.Open(dir)
 			return c, err
 		}
-		req.Store = func(fsys afero.Fs, dir string, sel *fileset.Selection) (cache.Blob, error) {
+		req.Store = func(fsys afero.Fs, dir string, sel *fileset.Selection) (cache.Blob, fileset.Stats, error) {
 			c, err := openBuildCache()
 			if err != nil {
-				return cache.Blob{}, err
+				return cache.Blob{}, fileset.Stats{}, err
 			}
 			return fileset.Store(c, fsys, dir, sel)
 		}
-		g, err := load.Load(cmd.Context(), fsys, req)
+		ctx := cmd.Context()
+		g, err := load.Load(ctx, fsys, req)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -122,14 +126,59 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 		if err != nil {
 			return nil, nil, err
 		}
+		_, span := tracing.Start(ctx, "store graph")
 		stored, err := c.PutBytes(graph.Encode(g))
+		span.Set("graph", stored.Digest.String(), "bytes", stored.Size)
+		span.EndWith(err)
 		if err != nil {
 			return nil, nil, fmt.Errorf("saving to the build cache: %w", err)
 		}
 		runReq := run.Request{Graph: stored, Rebuild: rebuild, Timestamp: time.Time(timestamp)}
-		events := &eventPrinter{graph: g, stdout: cmd.OutOrStdout(), stderr: cmd.ErrOrStderr()}
-		results, err := ex.Run(cmd.Context(), runReq, events)
+		events.graph = g
+		var runSpan *tracing.Active
+		if session != nil {
+			// Place the executor's spans by this clock, which the executor's may not agree with.
+			offset, clockErr := tracing.EstimateOffset(ctx, time.Now, ex.Clock)
+			if clockErr != nil {
+				return nil, nil, clockErr
+			}
+			session.setOffset(offset)
+			ctx, runSpan = tracing.Start(ctx, "run",
+				"clock offset", offset.Offset.String(), "clock uncertainty", offset.Uncertainty.String())
+			runReq.Trace = tracing.Call(ctx)
+		}
+		results, err := ex.Run(ctx, runReq, events)
+		runSpan.EndWith(err)
 		return results, c, err
+	}
+
+	// traced runs the command cmd, given args, with run, tracing it to the file that --trace names, if given, as
+	// well as the executor's part, which it sends to the command's events. output is the command's own output,
+	// a folder if outputDir, which the trace mustn't overwrite, or "" if it writes no file.
+	traced := func(cmd *cobra.Command, args []string, output string, outputDir bool, run func() error) error {
+		if tracePath == "" {
+			return run()
+		}
+		var err error
+		if session, err = newTraceSession(tracePath, output, outputDir); err != nil {
+			return err
+		}
+		ctx := tracing.WithRecorder(cmd.Context(), session.recorder, "")
+		command := strings.Join(append([]string{cmd.CommandPath()}, args...), " ")
+		ctx, span := tracing.StartTrack(ctx, clientProcess, command)
+		cmd.SetContext(ctx)
+		err = run()
+		span.EndWith(err)
+		return session.finishTrace(err, tracePath, cmd.ErrOrStderr())
+	}
+	// newEvents returns what prints a run's progress, and passes the executor's spans on to the trace.
+	newEvents := func(cmd *cobra.Command) *eventPrinter {
+		return &eventPrinter{stdout: cmd.OutOrStdout(), stderr: cmd.ErrOrStderr(), trace: session}
+	}
+	// addTraceFlag adds --trace to cmd, a command that builds.
+	addTraceFlag := func(cmd *cobra.Command) {
+		cmd.Flags().StringVar(&tracePath, "trace", "",
+			"write a trace of the command, which Perfetto (ui.perfetto.dev) opens, to `file.json`")
 	}
 
 	// executor returns the executor to build with, which the caller must close.
@@ -142,8 +191,8 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 		return ex, sys, err
 	}
 
-	// build builds the image of the target named target and sends it to dest.
-	build := func(cmd *cobra.Command, target string, dest destination) error {
+	// buildImage builds the image of the target named target and sends it to dest.
+	buildImage := func(cmd *cobra.Command, target string, dest destination) error {
 		ex, sys, err := executor(cmd)
 		if err != nil {
 			return err
@@ -163,12 +212,16 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 				return p, why, nil
 			}
 		}
-		results, _, err := runGraph(cmd, ex, req, false)
+		events := newEvents(cmd)
+		results, _, err := runGraph(cmd, ex, req, false, events)
 		if err != nil {
 			return err
 		}
 		res := results[0]
-		imageId, err := dest.send(cmd.Context(), ex, res, sys)
+		ctx, span := tracing.Start(cmd.Context(), dest.action)
+		imageId, err := dest.send(ctx, ex, res, sys, events)
+		span.Set("result", imageId)
+		span.EndWith(err)
 		if err != nil {
 			return fmt.Errorf("%s: %w", dest.action, err)
 		}
@@ -179,6 +232,13 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 			fmt.Fprintf(cmd.OutOrStdout(), "Image built! %s %s\n", dest.label, imageId)
 		}
 		return nil
+	}
+
+	// build builds the image of the target that args name first and sends it to dest, tracing it if asked.
+	build := func(cmd *cobra.Command, args []string, dest destination) error {
+		return traced(cmd, args, dest.output, false, func() error {
+			return buildImage(cmd, args[0], dest)
+		})
 	}
 
 	pushFrom := pushFromFlag(finish.FromExecutor)
@@ -196,11 +256,11 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 				return err
 			}
 			label := reference.FamiliarString(name)
-			return build(cmd, args[0], destination{
+			return build(cmd, args, destination{
 				send: func(
-					ctx context.Context, ex run.Executor, res run.Result, sys *types.SystemContext,
+					ctx context.Context, ex run.Executor, res run.Result, sys *types.SystemContext, ev run.Events,
 				) (string, error) {
-					return finish.Push(ctx, ex, res, name, finish.PushFrom(pushFrom), sys)
+					return finish.Push(ctx, ex, res, name, finish.PushFrom(pushFrom), sys, ev)
 				},
 				action: "pushing to " + label,
 				label:  label,
@@ -219,11 +279,11 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return build(cmd, args[0], destination{
+			return build(cmd, args, destination{
 				send: func(
-					ctx context.Context, ex run.Executor, res run.Result, sys *types.SystemContext,
+					ctx context.Context, ex run.Executor, res run.Result, sys *types.SystemContext, ev run.Events,
 				) (string, error) {
-					return finish.LoadDocker(ctx, ex, res, name, sys)
+					return finish.LoadDocker(ctx, ex, res, name, sys, ev)
 				},
 				platform: finish.DockerPlatform,
 				action:   "loading into Docker",
@@ -255,12 +315,13 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 				if err := finish.CheckSaveDest(path); err != nil {
 					return err
 				}
-				return build(cmd, args[0], destination{
+				return build(cmd, args, destination{
 					send: func(
-						ctx context.Context, ex run.Executor, res run.Result, sys *types.SystemContext,
+						ctx context.Context, ex run.Executor, res run.Result, sys *types.SystemContext, ev run.Events,
 					) (string, error) {
-						return finish.Save(ctx, ex, res, path, name, sys)
+						return finish.Save(ctx, ex, res, path, name, sys, ev)
 					},
+					output:   path,
 					platform: finish.SavePlatform,
 					action:   "writing " + args[1],
 					label:    args[1],
@@ -276,6 +337,33 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 	writeCmd.Deprecated = `use "vamos save"`
 
 	var replace bool
+	// exportFiles builds the task that args name first and writes its files to dir, as action describes.
+	exportFiles := func(cmd *cobra.Command, args []string, dir, action string) error {
+		ex, _, err := executor(cmd)
+		if err != nil {
+			return err
+		}
+		defer ex.Close()
+		execPlatform, err := ex.ExecPlatform(cmd.Context())
+		if err != nil {
+			return err
+		}
+		results, c, err := runGraph(cmd, ex, request(args[:1], load.WantFiles, execPlatform), false,
+			newEvents(cmd))
+		if err != nil {
+			return err
+		}
+		res := results[0]
+		warn := func(err error) { fmt.Fprintf(cmd.ErrOrStderr(), "vamos: warning: %v\n", err) }
+		_, span := tracing.Start(cmd.Context(), action, "files", res.Files.Digest.String())
+		err = finish.Export(cmd.Context(), c, res, dir, replace, warn)
+		span.EndWith(err)
+		if err != nil {
+			return fmt.Errorf("%s: %w", action, err)
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "Files exported! %s %s\n", args[1], res.Files.Digest)
+		return nil
+	}
 	exportCmd := &cobra.Command{
 		Use:   "export <task> <folder>",
 		Short: "Build a task and write its files to a folder",
@@ -295,26 +383,7 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 			if err := finish.CheckExportDest(dir, replace); err != nil {
 				return fmt.Errorf("%s: %w", action, err)
 			}
-			ex, _, err := executor(cmd)
-			if err != nil {
-				return err
-			}
-			defer ex.Close()
-			execPlatform, err := ex.ExecPlatform(cmd.Context())
-			if err != nil {
-				return err
-			}
-			results, c, err := runGraph(cmd, ex, request(args[:1], load.WantFiles, execPlatform), false)
-			if err != nil {
-				return err
-			}
-			res := results[0]
-			warn := func(err error) { fmt.Fprintf(cmd.ErrOrStderr(), "vamos: warning: %v\n", err) }
-			if err := finish.Export(cmd.Context(), c, res, dir, replace, warn); err != nil {
-				return fmt.Errorf("%s: %w", action, err)
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Files exported! %s %s\n", args[1], res.Files.Digest)
-			return nil
+			return traced(cmd, args, dir, true, func() error { return exportFiles(cmd, args, dir, action) })
 		},
 	}
 	exportCmd.Flags().BoolVar(&replace, "replace", false, "replace the folder if it holds anything")
@@ -330,17 +399,19 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 		Example: "  vamos build packages //backend:test\n  vamos build compile --rebuild",
 		Args:    atLeastOne("target name", "vamos build packages"),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ex, _, err := executor(cmd)
-			if err != nil {
+			return traced(cmd, args, "", false, func() error {
+				ex, _, err := executor(cmd)
+				if err != nil {
+					return err
+				}
+				defer ex.Close()
+				execPlatform, err := ex.ExecPlatform(cmd.Context())
+				if err != nil {
+					return err
+				}
+				_, _, err = runGraph(cmd, ex, request(args, load.WantBuild, execPlatform), rebuild, newEvents(cmd))
 				return err
-			}
-			defer ex.Close()
-			execPlatform, err := ex.ExecPlatform(cmd.Context())
-			if err != nil {
-				return err
-			}
-			_, _, err = runGraph(cmd, ex, request(args, load.WantBuild, execPlatform), rebuild)
-			return err
+			})
 		},
 	}
 	buildCmd.Flags().BoolVar(&rebuild, "rebuild", false,
@@ -383,16 +454,27 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 
 	pushCmd.Flags().Var(&pushFrom, "push-from", "which side pushes the image, with its credentials: executor or client")
 
+	for _, cmd := range []*cobra.Command{buildCmd, pushCmd, loadCmd, saveCmd, writeCmd, exportCmd} {
+		addTraceFlag(cmd)
+	}
+
 	root.AddCommand(buildCmd, pushCmd, loadCmd, saveCmd, writeCmd, exportCmd, pruneCmd, graphCmd)
 	return root
 }
 
 // eventPrinter prints the progress of a run: each status as a line naming its target, and what targets print, to
-// stdout and stderr.
+// stdout and stderr. It passes the executor's spans on to the command's trace, if it has one.
 type eventPrinter struct {
 	mu             sync.Mutex
 	graph          *graph.Graph
 	stdout, stderr io.Writer
+	trace          *traceSession
+}
+
+func (p *eventPrinter) Spans(spans []tracing.Span) {
+	if p.trace != nil {
+		p.trace.addRemote(spans)
+	}
 }
 
 func (p *eventPrinter) Status(node graph.Ref, status string) {
@@ -414,13 +496,17 @@ func (p *eventPrinter) Output(node graph.Ref, stream byte, data []byte) {
 // destination says where build sends an image.
 type destination struct {
 	// send sends res, once it is built, to the destination, returning its image ID there, or an index's digest.
-	send func(ctx context.Context, ex run.Executor, res run.Result, sys *types.SystemContext) (string, error)
+	// ev receives the spans of the executor's part, if traced.
+	send func(
+		ctx context.Context, ex run.Executor, res run.Result, sys *types.SystemContext, ev run.Events,
+	) (string, error)
 	// platform, if not nil, says the destination takes one image, and for which platform, with why, so that
 	// an index sends only its manifest for that platform. Otherwise the destination takes the whole index.
 	platform func(ctx context.Context) (imgspecv1.Platform, string, error)
 
 	action string // describes sending the image, e.g. "pushing to app:latest"
 	label  string // names the destination after "Image built!"
+	output string // the file it writes on the client, if any, which a trace mustn't overwrite
 }
 
 // targetAnd requires a target and one more positional argument, described by what and example.

@@ -35,6 +35,11 @@ type Graph struct {
 // by construction.
 type Ref int
 
+// FlowKey names what the node ref makes, in a trace, so that the spans that make and use it are joined.
+func FlowKey(ref Ref) string {
+	return fmt.Sprintf("node %d", ref)
+}
+
 // Scratch is the empty image, as a base.
 const Scratch Ref = -1
 
