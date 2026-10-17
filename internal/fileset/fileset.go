@@ -1,6 +1,3 @@
-// Package fileset selects files, by include and exclude patterns, a mode mask and limits, and walks only the
-// folders the patterns could match to store them in the build cache as a tree: a glob's, from the project, or a
-// task's output, from its container.
 package fileset
 
 import (
@@ -18,8 +15,9 @@ import (
 	"github.com/spf13/afero"
 )
 
-// Defaults of a selection. The limits catch a pattern that reaches much further than meant, such as into
-// node_modules, before all of its files are read.
+// Defaults of a selection.
+// The limits catch a pattern that reaches much further than meant,
+// such as into node_modules, before all of its files are read.
 const (
 	defaultModeMask     = 0o755
 	defaultMaxFileCount = 10_000
@@ -27,9 +25,9 @@ const (
 	defaultMaxTotalSize = 1 << 30   // 1 GiB
 )
 
-// Selection says which files a glob() or a task's output holds: those within a directory that its include
-// patterns match, less those its exclude patterns match. It is part of a task's action, so its fields are
-// encoded as the action is.
+// Selection says which files a glob() or a task's output holds:
+// those within a directory that its include patterns match, less those its exclude patterns match.
+// It is part of a task's action, so its fields are encoded as the action is.
 type Selection struct {
 	Include      []string `json:"include"`           // cleaned patterns
 	Exclude      []string `json:"exclude,omitempty"` // cleaned patterns
@@ -42,8 +40,9 @@ type Selection struct {
 	include, exclude []pattern // parsed by compile
 }
 
-// pattern is an include or exclude pattern, relative to its selection's directory. Its parts are matched
-// against a path's parts with path.Match, but for "**", which matches any number of parts, even none.
+// pattern is an include or exclude pattern, relative to its selection's directory.
+// Its parts are matched against a path's parts with path.Match,
+// but for "**", which matches any number of parts, even none.
 type pattern struct {
 	text   string   // cleaned, for messages
 	parts  []string // a path without wildcards ends in "**", so that it also matches everything beneath it
@@ -79,8 +78,9 @@ func (sel *Selection) Compile(dir string) error {
 	if sel.exclude, err = parsePatterns("exclude", sel.Exclude, dir); err != nil {
 		return err
 	}
-	// Keep the cleaned patterns, sorted and once each, so that a task's key is the same however they were
-	// written and in whatever order: neither changes which files they select.
+	// Keep the cleaned patterns, sorted and once each,
+	// so that a task's key is the same however they were written and in whatever order:
+	// neither changes which files they select.
 	sel.Include, sel.Exclude = patternTexts(sel.include), patternTexts(sel.exclude)
 	return nil
 }
@@ -163,8 +163,8 @@ func matchParts(pattern, name []string) bool {
 	return len(name) == 0
 }
 
-// mayMatchBeneath reports whether the parts of a pattern could match a path beneath the directory with the
-// given parts, so that the walk needs to read it.
+// mayMatchBeneath reports whether the parts of a pattern could match a path beneath the directory with the given parts,
+// so that the walk needs to read it.
 func mayMatchBeneath(pattern, dir []string) bool {
 	for ; len(dir) > 0; pattern, dir = pattern[1:], dir[1:] {
 		if len(pattern) == 0 {
@@ -193,9 +193,8 @@ func (sel *Selection) excluded(parts []string) bool {
 	return slices.ContainsFunc(sel.exclude, func(p pattern) bool { return matchParts(p.parts, parts) })
 }
 
-// excludedWithin reports whether an exclude pattern matches the path with the given parts or a directory
-// that holds it. The walk skips an excluded directory and all it holds, so a walk that starts beneath one
-// must skip it too.
+// excludedWithin reports whether an exclude pattern matches the path with the given parts or a directory that holds it.
+// The walk skips an excluded directory and all it holds, so a walk that starts beneath one must skip it too.
 func (sel *Selection) excludedWithin(parts []string) bool {
 	for i := range parts {
 		if sel.excluded(parts[:i+1]) {
@@ -206,8 +205,8 @@ func (sel *Selection) excludedWithin(parts []string) bool {
 }
 
 // matchPrefix returns the outermost prefix of the include patterns that match the path with the given parts,
-// or false if none does. The prefixes of patterns that match one path all hold it, so each holds the others or
-// is within them.
+// or false if none does.
+// The prefixes of patterns that match one path all hold it, so each holds the others or is within them.
 func (sel *Selection) matchPrefix(parts []string) (string, bool) {
 	prefix, matched := "", false
 	for _, p := range sel.include {
@@ -230,15 +229,18 @@ type treeWalk struct {
 	total    int64 // size of the files selected
 }
 
-// Walk describes the files that sel selects within dir in fsys as a tree, passing each file's name to file
-// for its blob, with the most bytes the limits leave for it. file fails with ErrOverLimit if the file holds
-// more. It starts at each include pattern's prefix, and reads only directories that some include
-// pattern could match within and no exclude pattern matches. Directories beneath a prefix that hold selected
-// files are recorded too, with their modes, but not those at or above it, which the image keeps as they are.
+// Walk describes the files that sel selects within dir in fsys as a tree,
+// passing each file's name to file for its blob, with the most bytes the limits leave for it.
+// file fails with ErrOverLimit if the file holds more.
+// It starts at each include pattern's prefix,
+// and reads only directories that some include pattern could match within and no exclude pattern matches.
+// Directories beneath a prefix that hold selected files are recorded too, with their modes,
+// but not those at or above it, which the image keeps as they are.
 //
-// The walk doesn't follow links within dir: they are recorded as links, as Docker's COPY does, so they can't
-// bring in files from outside it. checkInclude refuses links on the way to each prefix. dir itself may be a
-// link, as a project reached through a linked $PWD is.
+// The walk doesn't follow links within dir: they are recorded as links, as Docker's COPY does,
+// so they can't bring in files from outside it.
+// checkInclude refuses links on the way to each prefix.
+// dir itself may be a link, as a project reached through a linked $PWD is.
 func Walk(
 	fsys afero.Fs, dir string, sel *Selection, file func(name string, limit int64) (cache.Blob, error),
 ) (*cache.Tree, error) {
@@ -256,8 +258,8 @@ func Walk(
 		}
 		prefixes = append(prefixes, p.prefix)
 	}
-	// Walk from the outermost prefixes, since the walk from each reaches any prefix beneath it. Shorter
-	// paths come first, as "." must, though names such as "-x" sort before it.
+	// Walk from the outermost prefixes, since the walk from each reaches any prefix beneath it.
+	// Shorter paths come first, as "." must, though names such as "-x" sort before it.
 	slices.SortFunc(prefixes, func(a, b string) int {
 		return cmp.Or(cmp.Compare(len(a), len(b)), strings.Compare(a, b))
 	})
@@ -350,8 +352,7 @@ func (w *treeWalk) visit(rel string, info fs.FileInfo) error {
 	case !info.Mode().IsRegular():
 		return fmt.Errorf("%s is not a regular file, directory or symbolic link", src)
 	default:
-		// Check the size before reading the file, and read no more than the limits allow, in case it grew
-		// meanwhile.
+		// Check the size before reading the file, and read no more than the limits allow, in case it grew meanwhile.
 		if info.Size() > w.sel.MaxFileSize {
 			return fmt.Errorf("%s is %d bytes, more than max_file_size=%d", src, info.Size(), w.sel.MaxFileSize)
 		}
@@ -372,8 +373,9 @@ func (w *treeWalk) visit(rel string, info fs.FileInfo) error {
 		entry.Type, entry.Mode, entry.Blob = cache.EntryFile, w.mode(info), &b
 	}
 	w.entries = append(w.entries, entry)
-	// Record the directories that hold the file beneath the prefix, which were read on the way to it. Go on past
-	// those already recorded: a file matched by a pattern with a deeper prefix recorded only those beneath it.
+	// Record the directories that hold the file beneath the prefix, which were read on the way to it.
+	// Go on past those already recorded:
+	// a file matched by a pattern with a deeper prefix recorded only those beneath it.
 	for d := path.Dir(rel); d != prefix && within(d, prefix); d = path.Dir(d) {
 		if mode, ok := w.dirModes[d]; ok {
 			delete(w.dirModes, d)
@@ -383,10 +385,10 @@ func (w *treeWalk) visit(rel string, info fs.FileInfo) error {
 	return nil
 }
 
-// recordBetween records the directories between each recorded directory and the entries within it. A recorded
-// directory is copied with all it holds, so those between must be recorded too, with their modes, even when
-// they are at or above the prefix of the pattern that selected the entries: otherwise they would be copied as
-// the temporary directories that hold the entries when they are checked out.
+// recordBetween records the directories between each recorded directory and the entries within it.
+// A recorded directory is copied with all it holds, so those between must be recorded too, with their modes,
+// even when they are at or above the prefix of the pattern that selected the entries:
+// otherwise they would be copied as the temporary directories that hold the entries when they are checked out.
 func (w *treeWalk) recordBetween() {
 	recorded := map[string]bool{}
 	for _, e := range w.entries {
@@ -432,8 +434,8 @@ func (s Stats) Args() []any {
 	return append(s.Count.Args(), "new files", s.NewFiles, "new bytes", s.NewBytes)
 }
 
-// Hash returns the blob that the tree of the files sel selects within dir in fsys would be stored as, and their
-// stats, storing nothing.
+// Hash returns the blob that the tree of the files sel selects within dir in fsys would be stored as,
+// and their stats, storing nothing.
 func Hash(fsys afero.Fs, dir string, sel *Selection) (cache.Blob, Stats, error) {
 	t, err := Walk(fsys, dir, sel, func(name string, limit int64) (cache.Blob, error) {
 		return cache.HashFile(fsys, name, limit)
@@ -444,8 +446,8 @@ func Hash(fsys afero.Fs, dir string, sel *Selection) (cache.Blob, Stats, error) 
 	return t.Digest(), Stats{Count: t.Count()}, nil
 }
 
-// storeFiles stores the files that sel selects within dir in fsys in c, and returns the tree that describes them,
-// without storing it, and their stats.
+// storeFiles stores the files that sel selects within dir in fsys in c,
+// and returns the tree that describes them, without storing it, and their stats.
 func storeFiles(c *cache.Cache, fsys afero.Fs, dir string, sel *Selection) (*cache.Tree, Stats, error) {
 	var stats Stats
 	t, err := Walk(fsys, dir, sel, func(name string, limit int64) (cache.Blob, error) {
@@ -463,8 +465,8 @@ func storeFiles(c *cache.Cache, fsys afero.Fs, dir string, sel *Selection) (*cac
 	return t, stats, nil
 }
 
-// Store stores the files that sel selects within dir in fsys in c, and then the tree that describes them, and
-// returns the tree's blob and the files' stats.
+// Store stores the files that sel selects within dir in fsys in c,
+// and then the tree that describes them, and returns the tree's blob and the files' stats.
 func Store(c *cache.Cache, fsys afero.Fs, dir string, sel *Selection) (cache.Blob, Stats, error) {
 	t, stats, err := storeFiles(c, fsys, dir, sel)
 	if err != nil {
@@ -474,9 +476,9 @@ func Store(c *cache.Cache, fsys afero.Fs, dir string, sel *Selection) (cache.Blo
 	return b, stats, err
 }
 
-// checkInclude reports whether the prefix of the include pattern p, the path its files are beneath, is
-// within dir, reached without following symbolic links. The prefix must exist, which catches a misspelled
-// path, but the pattern needn't match anything.
+// checkInclude reports whether the prefix of the include pattern p,
+// the path its files are beneath, is within dir, reached without following symbolic links.
+// The prefix must exist, which catches a misspelled path, but the pattern needn't match anything.
 func checkInclude(fsys afero.Fs, dir string, p pattern) error {
 	if p.prefix == "." {
 		// dir itself was already found, and may be reached through a link, as from a linked $PWD.
@@ -531,8 +533,7 @@ func QuoteNames(names []string) string {
 	return strings.Join(quoted, ", ")
 }
 
-// lstat describes the file at path in fsys without following a final symbolic link,
-// if fsys supports links.
+// lstat describes the file at path in fsys without following a final symbolic link, if fsys supports links.
 func lstat(fsys afero.Fs, path string) (fs.FileInfo, bool, error) {
 	if l, ok := fsys.(afero.Lstater); ok {
 		return l.LstatIfPossible(path)

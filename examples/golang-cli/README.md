@@ -2,13 +2,35 @@
 
 A Go command, `echo`, built into an image of the binary alone, for amd64 and arm64.
 
-The `build` task cross-compiles: its base is the `golang` image for the platform vamos runs on, so the
-compiler runs natively, while `GOOS` and `GOARCH` come from the platform the image is for. Since it reads
-`ctx.os` and `ctx.arch`, each platform's binary is its own build. The image itself is a layer on `scratch` that only adds
-the binary, so building it for another platform needs no emulator.
+The `build` task cross-compiles: its base is the `golang` image for the platform vamos runs on,
+so the compiler runs natively, while `GOOS` and `GOARCH` come from the platform the image is for.
+Since it reads `ctx.os` and `ctx.arch`, each platform's binary is its own build.
+The image itself is a layer on `scratch` that only adds the binary,
+so building it for another platform needs no emulator.
 
-The `build` task takes a `mode` parameter, which the layer and the index pass on: `release`, the default, strips
-the binary's symbols, and `debug` turns off optimizations for a debugger.
+The `build` task takes a `mode` parameter, which the layer and the index pass on:
+`release`, the default, strips the binary's symbols, and `debug` turns off optimizations for a debugger.
+
+## Build graph
+
+```mermaid
+---
+config:
+  flowchart:
+    padding: 6
+---
+flowchart TD
+    golang[<div style="text-align:left"><i>pull golang</i><hr/>golang:1.25-alpine</div>]
+    source[<div style="text-align:left"><i>glob build-files</i><hr/>go.mod<br/>main.go</div>]
+    build[<div style="text-align:left"><i>task build</i><hr/>go build<br/>cross-compile<hr/>echo</div>]
+    layer[<div style="text-align:left"><i>layer layer</i><hr/>scratch<br/>/echo hola</div>]
+    echo[<div style="text-align:left"><i>index echo</i><hr/>linux/amd64<br/>linux/arm64</div>]
+
+    golang ==> build
+    source ==> build
+    build ==> layer
+    layer ==> echo
+```
 
 ## Develop
 
@@ -29,5 +51,5 @@ docker run --rm vamos-echo /echo -n hola            # hola, without a newline
 ./vamos push echo ghcr.io/me/echo:1.0 -C examples/golang-cli
 ```
 
-`echo` is an index of the image for each platform. `push` sends all of it, while `load` sends the image for the
-Docker daemon's platform.
+`echo` is an index of the image for each platform.
+`push` sends all of it, while `load` sends the image for the Docker daemon's platform.

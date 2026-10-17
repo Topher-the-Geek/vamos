@@ -26,8 +26,8 @@ func TestDisabled(t *testing.T) {
 	}
 }
 
-// TestSpans checks that spans record their parents, tracks and arguments, that only the first End counts, and that
-// a recorder that streams spans doesn't also keep them.
+// TestSpans checks that spans record their parents, tracks and arguments,
+// that only the first End counts, and that a recorder that streams spans doesn't also keep them.
 func TestSpans(t *testing.T) {
 	var streamed []Span
 	r := NewRecorder("executor", func(s Span) { streamed = append(streamed, s) })
@@ -126,8 +126,9 @@ func TestCall(t *testing.T) {
 	}
 }
 
-// TestEstimateOffset checks that an executor's clock that is off is corrected for, even when its spans would still
-// fall within the client's call to it, which a check of containment alone wouldn't catch.
+// TestEstimateOffset checks that an executor's clock that is off is corrected for,
+// even when its spans would still fall within the client's call to it,
+// which a check of containment alone wouldn't catch.
 func TestEstimateOffset(t *testing.T) {
 	base := time.Unix(1_800_000_000, 0)
 	for _, tt := range []struct {

@@ -13,9 +13,9 @@ import (
 	"go.podman.io/image/v5/types"
 )
 
-// TestBlobTracker checks the spans made from a copy's events, as containers/image sends them: a skipped blob has
-// no start, a blob being copied when the copy fails or is cancelled has no end, and the same blob can be copied
-// twice at once.
+// TestBlobTracker checks the spans made from a copy's events, as containers/image sends them:
+// a skipped blob has no start, a blob being copied when the copy fails or is cancelled has no end,
+// and the same blob can be copied twice at once.
 func TestBlobTracker(t *testing.T) {
 	a := types.BlobInfo{Digest: digest.FromString("a"), Size: 10, MediaType: "layer"}
 	b := types.BlobInfo{Digest: digest.FromString("b"), Size: -1}

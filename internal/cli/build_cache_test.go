@@ -20,9 +20,8 @@ import (
 	"go.podman.io/storage"
 )
 
-// cachedBuild is a BUILD file with a layer and a task whose results are cached, and a final layer
-// that uses both. Its targets print a value unique to the test, so that results cached by other
-// tests or earlier runs are never reused.
+// cachedBuild is a BUILD file with a layer and a task whose results are cached, and a final layer that uses both.
+// Its targets print a value unique to the test, so that results cached by other tests or earlier runs are never reused.
 func cachedBuild(nonce string) string {
 	return pullBusybox + fmt.Sprintf(`
 glob(name="input", include=["input.txt"])
@@ -55,9 +54,8 @@ func newNonce() string {
 	return fmt.Sprintf("%016x", rand.Uint64())
 }
 
-// TestCacheReuse checks that a second build reuses the cached results of every target, the last
-// layer included, says so, and prints what they printed when they ran, and that it sends the
-// same image.
+// TestCacheReuse checks that a second build reuses the cached results of every target, the last layer included,
+// says so, and prints what they printed when they ran, and that it sends the same image.
 func TestCacheReuse(t *testing.T) {
 	requireBuildah(t)
 	nonce := newNonce()
@@ -171,8 +169,8 @@ func TestCacheMisses(t *testing.T) {
 			want: map[string]string{`layer "deps"`: "cached", `task "size"`: "cached"},
 		},
 		{
-			// Variables have different names, so their order makes no difference. TestEnvOrder checks
-			// that it makes no difference to the image either.
+			// Variables have different names, so their order makes no difference.
+			// TestEnvOrder checks that it makes no difference to the image either.
 			name: "variables reordered",
 			change: func(t *testing.T, fsys afero.Fs, build string) string {
 				build = strings.Replace(build, `build_env(LANG="C", TZ="UTC")`, `build_env(TZ="UTC", LANG="C")`, 1)
@@ -214,8 +212,8 @@ func TestCacheMisses(t *testing.T) {
 	}
 }
 
-// TestCacheUnchangedOutput checks that when a task runs again but makes the same files, the
-// targets that use them are reused.
+// TestCacheUnchangedOutput checks that when a task runs again
+// but makes the same files, the targets that use them are reused.
 func TestCacheUnchangedOutput(t *testing.T) {
 	requireBuildah(t)
 	nonce := newNonce()
@@ -246,8 +244,8 @@ layer(name="app", base="sized")
 	assertTargets(t, r, map[string]string{`task "size"`: "building", `layer "sized"`: "cached"})
 }
 
-// TestCacheEmptyOutput checks that a glob and a task that select no files, as allow_no_files allows, build
-// and are reused.
+// TestCacheEmptyOutput checks that a glob and a task
+// that select no files, as allow_no_files allows, build and are reused.
 func TestCacheEmptyOutput(t *testing.T) {
 	requireBuildah(t)
 	nonce := newNonce()
@@ -275,9 +273,10 @@ layer(name="app", base="busybox", steps=[add("none", "/app"), add("empty", "/app
 	}
 }
 
-// TestCacheSourceEditedDuringBuild checks that a source file edited while a build reads it is
-// built as the cache stored it, and that the result is kept under the key of those files, so
-// that a later build of the file as it was doesn't reuse it.
+// TestCacheSourceEditedDuringBuild checks
+// that a source file edited while a build reads it is built as the cache stored it,
+// and that the result is kept under the key of those files,
+// so that a later build of the file as it was doesn't reuse it.
 func TestCacheSourceEditedDuringBuild(t *testing.T) {
 	requireBuildah(t)
 	nonce := newNonce()
@@ -305,8 +304,8 @@ layer(name="app", base="busybox", steps=[add("input", "/app"), run(["cat", "/app
 	}
 }
 
-// TestCacheGlobReadOnce checks that a glob's files are read once in a build, however many targets add
-// them, so that a file edited after they are read can't make the targets' files differ.
+// TestCacheGlobReadOnce checks that a glob's files are read once in a build, however many targets add them,
+// so that a file edited after they are read can't make the targets' files differ.
 func TestCacheGlobReadOnce(t *testing.T) {
 	requireBuildah(t)
 	nonce := newNonce()
@@ -327,8 +326,8 @@ layer(name="app", base="first", steps=[add("input", "/app"), run(["cat", "/app/i
 	}
 }
 
-// TestCacheEntryRemoved checks that a cached result whose image or files have been removed since
-// is reported and built again, rather than failing the build.
+// TestCacheEntryRemoved checks that a cached result whose image or files have been removed
+// since is reported and built again, rather than failing the build.
 func TestCacheEntryRemoved(t *testing.T) {
 	requireBuildah(t)
 	tests := []struct {
@@ -384,8 +383,8 @@ func TestCacheEntryRemoved(t *testing.T) {
 	}
 }
 
-// TestFailedTargetNotCached checks that a target that fails is run again by the next build, while
-// the targets before it are reused.
+// TestFailedTargetNotCached checks that a target that fails is run again by the next build,
+// while the targets before it are reused.
 func TestFailedTargetNotCached(t *testing.T) {
 	requireBuildah(t)
 	nonce := newNonce()
@@ -411,8 +410,7 @@ layer(name="app", base="broken")
 	}
 }
 
-// assertTargets fails the test unless r reports each target in want, such as `layer "app"`, as
-// "building" or "cached".
+// assertTargets fails the test unless r reports each target in want, such as `layer "app"`, as "building" or "cached".
 func assertTargets(t *testing.T, r result, want map[string]string) {
 	t.Helper()
 	for target, how := range want {
@@ -471,8 +469,8 @@ func newKeys(after, before map[string]bool) map[string]bool {
 	return added
 }
 
-// TestBuildTargets checks that `vamos build` runs only the named targets and the targets they use,
-// keeping the results in the cache for later builds.
+// TestBuildTargets checks that `vamos build` runs only the named targets
+// and the targets they use, keeping the results in the cache for later builds.
 func TestBuildTargets(t *testing.T) {
 	requireBuildah(t)
 	fsys := project(t, map[string]string{"BUILD": cachedBuild(newNonce()), "input.txt": "hello\n"})
@@ -499,8 +497,8 @@ func TestBuildTargets(t *testing.T) {
 	assertTargets(t, r, map[string]string{`layer "deps"`: "cached", `task "size"`: "cached"})
 }
 
-// TestRebuild checks that `vamos build --rebuild` runs the named targets again, reusing the targets
-// they use, and that later builds use the new result.
+// TestRebuild checks that `vamos build --rebuild` runs the named targets again, reusing the targets they use,
+// and that later builds use the new result.
 func TestRebuild(t *testing.T) {
 	requireBuildah(t)
 	fsys := project(t, map[string]string{
@@ -527,8 +525,9 @@ layer(name="app", base="deps")
 	}
 }
 
-// TestRebuildReproducible checks that running every target again, rather than reusing their cached
-// results, makes the same image: files are stamped with the base image's time, not the build's.
+// TestRebuildReproducible checks that running every target again,
+// rather than reusing their cached results, makes the same image:
+// files are stamped with the base image's time, not the build's.
 func TestRebuildReproducible(t *testing.T) {
 	requireBuildah(t)
 	fsys := project(t, map[string]string{"BUILD": cachedBuild(newNonce()), "input.txt": "hello\n"})
@@ -547,8 +546,9 @@ func TestRebuildReproducible(t *testing.T) {
 	}
 }
 
-// TestEnvOrder checks that the order of env()'s variables, which its target's key leaves out, makes no
-// difference to the image either, so that a target's cached result is the one it would make.
+// TestEnvOrder checks that the order of env()'s variables,
+// which its target's key leaves out, makes no difference to the image either,
+// so that a target's cached result is the one it would make.
 func TestEnvOrder(t *testing.T) {
 	requireBuildah(t)
 	build := cachedBuild(newNonce())
@@ -575,8 +575,8 @@ func TestRebuildPull(t *testing.T) {
 	}
 }
 
-// TestTimestamp checks that --timestamp stamps the files of targets that run, and that it is
-// left out of their keys: a later build reuses them, stamped as they were.
+// TestTimestamp checks that --timestamp stamps the files of targets that run,
+// and that it is left out of their keys: a later build reuses them, stamped as they were.
 func TestTimestamp(t *testing.T) {
 	requireBuildah(t)
 	fsys := project(t, map[string]string{"BUILD": cachedBuild(newNonce()), "input.txt": "hello\n"})
@@ -613,9 +613,9 @@ func TestTimestamp(t *testing.T) {
 	}
 }
 
-// TestTaskEpochInKey checks that a target's key covers the epoch of the tasks whose files it adds, not
-// only their files: a task run again with a later epoch makes the same files, but a layer adding them
-// must then be stamped with that epoch, as a build from an empty cache would be.
+// TestTaskEpochInKey checks that a target's key covers the epoch of the tasks whose files it adds,
+// not only their files: a task run again with a later epoch makes the same files,
+// but a layer adding them must then be stamped with that epoch, as a build from an empty cache would be.
 func TestTaskEpochInKey(t *testing.T) {
 	requireBuildah(t)
 	fsys := project(t, map[string]string{"BUILD": cachedBuild(newNonce()), "input.txt": "hello\n"})
@@ -640,8 +640,8 @@ func TestTaskEpochInKey(t *testing.T) {
 	}
 }
 
-// TestPrune checks that `vamos prune` removes every cached result, so that targets run again, and
-// leaves pulled images, and cached images that also have other names, in the container store.
+// TestPrune checks that `vamos prune` removes every cached result, so that targets run again,
+// and leaves pulled images, and cached images that also have other names, in the container store.
 // It empties the cache that every test, and every vamos on this machine, shares.
 func TestPrune(t *testing.T) {
 	requireBuildah(t)

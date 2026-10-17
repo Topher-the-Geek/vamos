@@ -1,4 +1,3 @@
-// Package cli is vamos's command line.
 package cli
 
 import (
@@ -91,13 +90,13 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 		}
 	}
 
-	// runGraph loads the graph that req asks for, stores it, and the files of its globs, in the build cache, and has
-	// the executor run it, printing its progress, with rebuild for the targets named. It returns the build cache, in
-	// which the executor leaves tasks' files.
+	// runGraph loads the graph that req asks for, stores it, and the files of its globs, in the build cache,
+	// and has the executor run it, printing its progress, with rebuild for the targets named.
+	// It returns the build cache, in which the executor leaves tasks' files.
 	runGraph := func(cmd *cobra.Command, ex run.Executor, req load.Request, rebuild bool, events *eventPrinter) (
 		[]run.Result, *cache.Cache, error) {
-		// The build cache is opened only once the targets are configured, so that a mistake in a BUILD file touches
-		// nothing.
+		// The build cache is opened only once the targets are configured,
+		// so that a mistake in a BUILD file touches nothing.
 		var c *cache.Cache
 		openBuildCache := func() (*cache.Cache, error) {
 			if c != nil {
@@ -152,9 +151,10 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 		return results, c, err
 	}
 
-	// traced runs the command cmd, given args, with run, tracing it to the file that --trace names, if given, as
-	// well as the executor's part, which it sends to the command's events. output is the command's own output,
-	// a folder if outputDir, which the trace mustn't overwrite, or "" if it writes no file.
+	// traced runs the command cmd, given args, with run, tracing it to the file that --trace names,
+	// if given, as well as the executor's part, which it sends to the command's events.
+	// output is the command's own output, a folder if outputDir,
+	// which the trace mustn't overwrite, or "" if it writes no file.
 	traced := func(cmd *cobra.Command, args []string, output string, outputDir bool, run func() error) error {
 		if tracePath == "" {
 			return run()
@@ -332,7 +332,8 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 		return save
 	}
 	saveCmd := saveCommand("save")
-	// write is save's earlier name, kept for a release. Cobra hides it, and warns that it is deprecated.
+	// write is save's earlier name, kept for a release.
+	// Cobra hides it, and warns that it is deprecated.
 	writeCmd := saveCommand("write")
 	writeCmd.Deprecated = `use "vamos save"`
 
@@ -462,8 +463,10 @@ func NewRootCommand(fsys afero.Fs) *cobra.Command {
 	return root
 }
 
-// eventPrinter prints the progress of a run: each status as a line naming its target, and what targets print, to
-// stdout and stderr. It passes the executor's spans on to the command's trace, if it has one.
+// eventPrinter prints the progress of a run: each status as a line naming its target,
+// and what targets print, to stdout and stderr.
+// It passes the executor's spans on to the command's trace, if it has one.
+// Set graph and trace before starting executor callbacks and keep them unchanged until callbacks stop.
 type eventPrinter struct {
 	mu             sync.Mutex
 	graph          *graph.Graph
@@ -471,18 +474,21 @@ type eventPrinter struct {
 	trace          *traceSession
 }
 
+// Spans forwards executor spans without taking the output lock; traceSession synchronizes its own state.
 func (p *eventPrinter) Spans(spans []tracing.Span) {
 	if p.trace != nil {
 		p.trace.addRemote(spans)
 	}
 }
 
+// Status serializes progress with step output, even when the configured writers are not concurrency-safe.
 func (p *eventPrinter) Status(node graph.Ref, status string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	fmt.Fprintf(p.stdout, "%s: %s\n", p.graph.Node(node).Desc, status)
 }
 
+// Output consumes the borrowed data before returning, under the same lock as Status.
 func (p *eventPrinter) Output(node graph.Ref, stream byte, data []byte) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -500,8 +506,9 @@ type destination struct {
 	send func(
 		ctx context.Context, ex run.Executor, res run.Result, sys *types.SystemContext, ev run.Events,
 	) (string, error)
-	// platform, if not nil, says the destination takes one image, and for which platform, with why, so that
-	// an index sends only its manifest for that platform. Otherwise the destination takes the whole index.
+	// platform, if not nil, says the destination takes one image, and for which platform, with why,
+	// so that an index sends only its manifest for that platform.
+	// Otherwise the destination takes the whole index.
 	platform func(ctx context.Context) (imgspecv1.Platform, string, error)
 
 	action string // describes sending the image, e.g. "pushing to app:latest"
@@ -594,8 +601,7 @@ func (f *timestampFlag) Type() string {
 	return "time"
 }
 
-// parseImageName parses a name such as "app" or "ghcr.io/me/app:1.0", adding
-// ":latest" when no tag is given.
+// parseImageName parses a name such as "app" or "ghcr.io/me/app:1.0", adding ":latest" when no tag is given.
 func parseImageName(name string) (reference.NamedTagged, error) {
 	named, err := reference.ParseNormalizedNamed(name)
 	if err != nil {
@@ -610,8 +616,7 @@ func parseImageName(name string) (reference.NamedTagged, error) {
 // newSystemContext returns the settings for reaching registries and the Docker daemon.
 func newSystemContext(cmd *cobra.Command, tlsVerify bool) (*types.SystemContext, error) {
 	sys := &types.SystemContext{}
-	// Unless --tls-verify is given, leave it to registries.conf, so that "insecure = true"
-	// entries there still apply.
+	// Unless --tls-verify is given, leave it to registries.conf, so that "insecure = true" entries there still apply.
 	if cmd.Flags().Changed("tls-verify") {
 		sys.DockerInsecureSkipTLSVerify = types.NewOptionalBool(!tlsVerify)
 	}

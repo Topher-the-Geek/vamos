@@ -16,11 +16,11 @@ import (
 	"github.com/spf13/afero"
 )
 
-// These tests check matching and the walk on their own, since they have more cases than builds could cover
-// quickly. The project is in memory, but for symbolic links, which afero.MemMapFs lacks.
+// These tests check matching and the walk on their own, since they have more cases than builds could cover quickly.
+// The project is in memory, but for symbolic links, which afero.MemMapFs lacks.
 
-// testSelection returns a selection of the files within projectDir that include matches and exclude doesn't,
-// with the defaults, less what change, if not nil, changes.
+// testSelection returns a selection of the files within projectDir that include matches
+// and exclude doesn't, with the defaults, less what change, if not nil, changes.
 func testSelection(t *testing.T, include, exclude []string, change func(sel *Selection)) *Selection {
 	t.Helper()
 	sel := DefaultSelection()
@@ -45,8 +45,8 @@ func failedWith(t *testing.T, err error, wantErr string) bool {
 	return true
 }
 
-// checkTree fails t unless the walk that returned got and err failed with wantErr, if set, or else made the
-// tree that describeTree describes as want.
+// checkTree fails t unless the walk that returned got and err failed with wantErr,
+// if set, or else made the tree that describeTree describes as want.
 func checkTree(t *testing.T, got *cache.Tree, err error, want []string, wantErr string) {
 	t.Helper()
 	if failedWith(t, err, wantErr) {
@@ -74,8 +74,8 @@ func describeTree(t *cache.Tree) []string {
 	return lines
 }
 
-// walkFiles walks sel within projectDir in fsys, giving each file a blob that holds its content in place of a
-// digest, so that describeTree shows which file each entry came from.
+// walkFiles walks sel within projectDir in fsys, giving each file a blob that holds its content in place of a digest,
+// so that describeTree shows which file each entry came from.
 func walkFiles(fsys afero.Fs, sel *Selection) (*cache.Tree, error) {
 	return Walk(fsys, testenv.ProjectDir, sel, func(name string, _ int64) (cache.Blob, error) {
 		data, err := afero.ReadFile(fsys, name)
@@ -292,8 +292,8 @@ func TestWalkTree(t *testing.T) {
 			want:    []string{"dir ui 755", "file ui/main.ts 644 ui", "file x.js 644 x"},
 		},
 		{
-			// The walk starts at "ui/node_modules/dep", beneath the excluded directory, but must skip it all
-			// the same, as it does when it starts above it.
+			// The walk starts at "ui/node_modules/dep", beneath the excluded directory,
+			// but must skip it all the same, as it does when it starts above it.
 			name:    "exclude a directory above a pattern's prefix",
 			include: []string{"ui/node_modules/dep/*.js", "src/a.ts"},
 			exclude: []string{"**/node_modules"},
@@ -335,8 +335,9 @@ func TestWalkTree(t *testing.T) {
 			want:    []string{"dir a 755", "file a/x.txt 644 x"},
 		},
 		{
-			// modes is copied with all it holds, so modes/wide must be in the tree, with its own mode, though it is
-			// the prefix of the pattern that selects inner.txt.
+			// modes is copied with all it holds,
+			// so modes/wide must be in the tree, with its own mode,
+			// though it is the prefix of the pattern that selects inner.txt.
 			name:    "a directory between a recorded one and a deeper prefix's files",
 			include: []string{"**/open.txt", "modes/wide/inner.txt"},
 			change:  func(sel *Selection) { sel.ModeMask = 0o7777 },
@@ -492,8 +493,8 @@ func TestWalkTreeFileGrew(t *testing.T) {
 	}
 }
 
-// TestSelectionKey checks that a selection's patterns are kept the same however they were written and in
-// whatever order, since neither changes the files they select, so a task's key doesn't change either.
+// TestSelectionKey checks that a selection's patterns are kept the same however they were written
+// and in whatever order, since neither changes the files they select, so a task's key doesn't change either.
 func TestSelectionKey(t *testing.T) {
 	a := testSelection(t, []string{"src/**", "./b/", "src/**"}, []string{"**/x", "a/../y"}, nil)
 	b := testSelection(t, []string{"b", "src/**"}, []string{"y", "**/x"}, nil)
@@ -527,8 +528,8 @@ func (f *touchFs) LstatIfPossible(name string) (fs.FileInfo, bool, error) {
 }
 
 // TestWalkTreeReadsOnlyWhatItNeeds checks that the walk reads only the directories that its include patterns
-// could match within and its exclude patterns don't match, so a project's other folders, such as a large
-// node_modules, cost nothing.
+// could match within and its exclude patterns don't match,
+// so a project's other folders, such as a large node_modules, cost nothing.
 func TestWalkTreeReadsOnlyWhatItNeeds(t *testing.T) {
 	files := map[string]string{
 		"src/a.ts":                  "a",
@@ -592,8 +593,8 @@ func TestWalkTreeReadsOnlyWhatItNeeds(t *testing.T) {
 	}
 }
 
-// TestWalkTreeLinks checks that the walk records links as links, never following them, and refuses a link on
-// the way to a pattern's prefix.
+// TestWalkTreeLinks checks that the walk records links as links, never following them,
+// and refuses a link on the way to a pattern's prefix.
 func TestWalkTreeLinks(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -650,8 +651,8 @@ func TestWalkTreeLinks(t *testing.T) {
 	}
 }
 
-// TestWalkTreeThroughLinkedDir checks that the directory walked may itself be reached through a link, as a
-// project is from a linked $PWD.
+// TestWalkTreeThroughLinkedDir checks that the directory walked may itself be reached through a link,
+// as a project is from a linked $PWD.
 func TestWalkTreeThroughLinkedDir(t *testing.T) {
 	root := t.TempDir()
 	testenv.Must(t, os.MkdirAll(filepath.Join(root, "real"), 0o755))

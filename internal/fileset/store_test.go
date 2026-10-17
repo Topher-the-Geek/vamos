@@ -12,8 +12,8 @@ import (
 	"github.com/spf13/afero"
 )
 
-// TestCacheTreeRoundTrip checks that a tree stored in the cache checks out as the same files,
-// modes and links, and that files with the same content are stored once.
+// TestCacheTreeRoundTrip checks that a tree stored in the cache checks out as the same files, modes and links,
+// and that files with the same content are stored once.
 func TestCacheTreeRoundTrip(t *testing.T) {
 	fsys, _ := testenv.DiskProject(t, map[string]string{
 		"app/main.js":   "same",

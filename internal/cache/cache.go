@@ -1,6 +1,3 @@
-// Package cache is the build cache: a content-addressed store of files, trees and logs, and an action cache from
-// each target's key to its latest result. It is what the client and an executor share, so a remote cache server
-// could stand in for it.
 package cache
 
 import (
@@ -22,10 +19,14 @@ import (
 	"github.com/spf13/afero"
 )
 
-// Cache is the local build cache. It has the two parts a remote cache server would hold, so one
-// server could later stand in for it: a content-addressed store of blobs, such as files, trees
-// of files and logs, and an action cache, which maps each target's key to its latest result.
+// Cache is the local build cache.
+// It has the two parts a remote cache server would hold, so one server could later stand in for it:
+// a content-addressed store of blobs, such as files, trees of files and logs,
+// and an action cache, which maps each target's key to its latest result.
 // The images of layers are kept in the container store instead, and results name them by digest.
+// Independent writes publish complete files, including across processes;
+// they do not deduplicate work or transact across records.
+// Clear must not overlap reads or writes that require the removed content.
 type Cache struct {
 	dir string // holds cas/sha256/<hex>, ac/<hex>, tags/<hex> and tmp/
 }
@@ -54,8 +55,8 @@ func (c *Cache) blobPath(d digest.Digest) string {
 // ErrOverLimit means that what was to be stored holds more bytes than allowed.
 var ErrOverLimit = errors.New("more bytes than allowed")
 
-// put stores what r holds as a blob, or fails with ErrOverLimit, storing nothing, if it holds more than limit
-// bytes. It reads at most one byte past the limit.
+// put stores what r holds as a blob, or fails with ErrOverLimit, storing nothing, if it holds more than limit bytes.
+// It reads at most one byte past the limit.
 func (c *Cache) put(r io.Reader, limit int64) (Blob, error) {
 	f, err := c.create()
 	if err != nil {
@@ -73,16 +74,18 @@ func (c *Cache) put(r io.Reader, limit int64) (Blob, error) {
 	return b, f.commit(c.blobPath(b.Digest))
 }
 
-// pendingFile is a file being written into the cache. It is written to a temporary file and
-// renamed into place once complete, so that it is never seen partly written, even by another
-// vamos process. Its digest and size are worked out as it is written.
+// pendingFile is a file being written into the cache.
+// It is written to a temporary file and renamed into place once complete,
+// so that it is never seen partly written, even by another vamos process.
+// Its digest and size are worked out as it is written.
 type pendingFile struct {
 	f        *os.File
 	digester digest.Digester
 	size     int64
 }
 
-// create starts writing a file into the cache. The caller commits or discards it.
+// create starts writing a file into the cache.
+// The caller commits or discards it.
 func (c *Cache) create() (*pendingFile, error) {
 	f, err := os.CreateTemp(filepath.Join(c.dir, "tmp"), "pending-")
 	if err != nil {
@@ -123,7 +126,9 @@ func (c *Cache) PutBytes(data []byte) (Blob, error) {
 	return c.put(bytes.NewReader(data), int64(len(data)))
 }
 
-// OpenBlob opens blob b for reading. An error wrapping fs.ErrNotExist means the cache lacks it.
+// OpenBlob opens blob b for reading.
+// The caller must close it.
+// An error wrapping fs.ErrNotExist means the cache lacks it.
 func (c *Cache) OpenBlob(b Blob) (*os.File, error) {
 	return os.Open(c.blobPath(b.Digest))
 }
@@ -139,9 +144,9 @@ func (c *Cache) ReadBytes(b Blob) ([]byte, error) {
 	return os.ReadFile(c.blobPath(b.Digest))
 }
 
-// Tree is a set of files, directories and symbolic links, kept in the cache as a blob that
-// names the blobs of its files. Modification times are left out, so that the same files give
-// the same tree wherever and whenever they are made.
+// Tree is a set of files, directories and symbolic links,
+// kept in the cache as a blob that names the blobs of its files.
+// Modification times are left out, so that the same files give the same tree wherever and whenever they are made.
 type Tree struct {
 	Entries []TreeEntry `json:"entries"` // sorted by path, so a directory comes before what it holds
 }
@@ -207,12 +212,12 @@ func (t *Tree) Count() Count {
 	return c
 }
 
-// PutFile stores the file name in fsys as a blob, and reports whether the cache lacked its content. It hashes the
-// file first, and copies it only if the cache lacks that content, so a file the cache already holds is read once
-// and not written.
+// PutFile stores the file name in fsys as a blob, and reports whether the cache lacked its content.
+// It hashes the file first, and copies it only if the cache lacks that content,
+// so a file the cache already holds is read once and not written.
 // The blob returned is always the content the cache holds, even if the file changes as it is read.
-// It fails with ErrOverLimit, storing nothing, if the file holds more than limit bytes, and reads at most
-// one byte past the limit, so a file that grows as it is read can't fill the cache.
+// It fails with ErrOverLimit, storing nothing, if the file holds more than limit bytes,
+// and reads at most one byte past the limit, so a file that grows as it is read can't fill the cache.
 func (c *Cache) PutFile(fsys afero.Fs, name string, limit int64) (Blob, bool, error) {
 	b, err := HashFile(fsys, name, limit)
 	if err != nil {
@@ -230,8 +235,8 @@ func (c *Cache) PutFile(fsys afero.Fs, name string, limit int64) (Blob, bool, er
 	return b, err == nil, err
 }
 
-// HashFile returns the blob that the file name in fsys would be stored as, storing nothing. It fails with
-// ErrOverLimit if the file holds more than limit bytes, and reads at most one byte past the limit.
+// HashFile returns the blob that the file name in fsys would be stored as, storing nothing.
+// It fails with ErrOverLimit if the file holds more than limit bytes, and reads at most one byte past the limit.
 func HashFile(fsys afero.Fs, name string, limit int64) (Blob, error) {
 	f, err := fsys.Open(name)
 	if err != nil {
@@ -278,11 +283,10 @@ func (c *Cache) CheckTree(b Blob) error {
 	return nil
 }
 
-// Checkout writes the files of the tree stored as blob b into dir on disk, which must exist, and
-// returns the tree.
-// Folders above an entry that the tree doesn't list are made with the usual mode. Entries that
-// would be written outside dir are refused: Walk never makes them, but the cache is a folder
-// on disk that anything running as root could change.
+// Checkout writes the files of the tree stored as blob b into dir on disk, which must exist, and returns the tree.
+// Folders above an entry that the tree doesn't list are made with the usual mode.
+// Entries that would be written outside dir are refused: Walk never makes them,
+// but the cache is a folder on disk that anything running as root could change.
 func (c *Cache) Checkout(b Blob, dir string) (*Tree, error) {
 	t, err := c.ReadTree(b)
 	if err != nil {
@@ -388,8 +392,9 @@ func fileModeOf(bits uint32) fs.FileMode {
 	return mode
 }
 
-// ActionResult is the latest result of a target. Everything it names is in the cache or, for
-// a layer's image, in the container store, so a result can be checked before it is reused.
+// ActionResult is the latest result of a target.
+// Everything it names is in the cache or, for a layer's image, in the container store,
+// so a result can be checked before it is reused.
 type ActionResult struct {
 	Image  digest.Digest `json:"image,omitempty"`  // a layer's image: its config's digest and store ID
 	Output *Blob         `json:"output,omitempty"` // a task's files, as a tree
@@ -418,8 +423,8 @@ func (c *Cache) Result(key digest.Digest) (*ActionResult, error) {
 	return &r, nil
 }
 
-// SetResult records r as the latest result for key, replacing any earlier one, so that the last
-// of two builds to finish wins.
+// SetResult records r as the latest result for key, replacing any earlier one,
+// so that the last of two builds to finish wins.
 func (c *Cache) SetResult(key digest.Digest, r *ActionResult) error {
 	data, err := json.Marshal(r)
 	if err != nil {
@@ -441,8 +446,8 @@ func (c *Cache) tagPath(name string) string {
 	return filepath.Join(c.dir, "tags", digest.FromString(name).Encoded())
 }
 
-// Tag returns the record of the tag name, such as an image's tag, or nil if there is none. Records are kept until
-// replaced, even by Clear.
+// Tag returns the record of the tag name, such as an image's tag, or nil if there is none.
+// Records are kept until replaced, even by Clear.
 func (c *Cache) Tag(name string) ([]byte, error) {
 	data, err := os.ReadFile(c.tagPath(name))
 	if errors.Is(err, fs.ErrNotExist) {
@@ -464,8 +469,8 @@ func (c *Cache) SetTag(name string, data []byte) error {
 	return f.commit(c.tagPath(name))
 }
 
-// Clear removes every result and blob from the cache, but not tag records, returning how many results and blobs
-// it held.
+// Clear removes every result and blob from the cache,
+// but not tag records, returning how many results and blobs it held.
 func (c *Cache) Clear() (results, blobs int, err error) {
 	resultEntries, _ := os.ReadDir(filepath.Join(c.dir, "ac"))
 	blobEntries, _ := os.ReadDir(filepath.Join(c.dir, "cas", "sha256"))
@@ -485,15 +490,19 @@ const (
 )
 
 // LogRecorder keeps what a target prints to stdout and stderr, in the order it was written,
-// so that a later build can replay it when it reuses the target's result. It writes the log to the
-// cache as it comes, so that a long one isn't held in memory.
+// so that a later build can replay it when it reuses the target's result.
+// It writes the log to the cache as it comes, so that a long one isn't held in memory.
+// Writers serialize log records but forward to their destination outside the lock;
+// that destination must handle any concurrent writes itself.
+// Stop writers before Save or Discard; Discard is not synchronized.
 type LogRecorder struct {
 	mu   sync.Mutex
 	file *pendingFile // records of a stream byte, a uvarint length and that many bytes
 	err  error        // the first error writing file
 }
 
-// NewLog starts recording a log. The caller saves or discards it.
+// NewLog starts recording a log.
+// The caller saves or discards it.
 func (c *Cache) NewLog() (*LogRecorder, error) {
 	f, err := c.create()
 	if err != nil {
@@ -514,8 +523,8 @@ type logWriter struct {
 	w      io.Writer
 }
 
-// Write records data and passes it on. An error recording it is kept for save to report, so that
-// the target's output still reaches the user.
+// Write records data and passes it on.
+// An error recording it is kept for save to report, so that the target's output still reaches the user.
 func (lw logWriter) Write(data []byte) (int, error) {
 	lw.l.mu.Lock()
 	if lw.l.err == nil {

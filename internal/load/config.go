@@ -16,8 +16,8 @@ import (
 	"go.starlark.net/syntax"
 )
 
-// param is a parameter that a target declares with params: a value that each use of the target may pass it, with
-// dep(), and that its functions read as ctx.<name>.
+// param is a parameter that a target declares with params:
+// a value that each use of the target may pass it, with dep(), and that its functions read as ctx.<name>.
 type param struct {
 	name   string
 	kind   paramKind
@@ -41,8 +41,8 @@ var paramKinds = []string{"string", "bool", "int", "list"}
 // reservedParams are the names that ctx has built in, which no parameter can have.
 var reservedParams = []string{"platform", "os", "arch", "variant", "exec_platform"}
 
-// canonical checks v as a value of p, the argument what, returning it in the one form that each value has, so that
-// equal values make the same configuration: a list is frozen.
+// canonical checks v as a value of p, the argument what, returning it in the one form that each value has,
+// so that equal values make the same configuration: a list is frozen.
 func (p *param) canonical(what string, v starlark.Value) (starlark.Value, error) {
 	switch p.kind {
 	case boolParam:
@@ -86,8 +86,8 @@ func (p *param) canonical(what string, v starlark.Value) (starlark.Value, error)
 	return list, nil
 }
 
-// parse returns the value of p that text, given with --set, names: true or false for a bool, and for a list its
-// strings separated by commas, or none if text is empty.
+// parse returns the value of p that text, given with --set, names: true or false for a bool,
+// and for a list its strings separated by commas, or none if text is empty.
 func (p *param) parse(text string) (starlark.Value, error) {
 	switch p.kind {
 	case boolParam:
@@ -116,8 +116,8 @@ func (p *param) parse(text string) (starlark.Value, error) {
 	return p.canonical(p.name, starlark.NewList(items))
 }
 
-// newParam returns the parameter that a default, def, or else a type, typ, declares, allowing only values, if
-// given. Its name is set by the params dict that holds it.
+// newParam returns the parameter that a default, def, or else a type, typ, declares, allowing only values, if given.
+// Its name is set by the params dict that holds it.
 func newParam(def starlark.Value, typ string, values *starlark.List) (*param, error) {
 	p := &param{}
 	if def != nil {
@@ -190,8 +190,8 @@ func (v *paramValue) String() string {
 	return "param(" + strings.Join(args, ", ") + ")"
 }
 
-// newParamBuiltin implements param(default, values, type), which declares a parameter in more detail than its
-// default alone does.
+// newParamBuiltin implements param(default, values, type),
+// which declares a parameter in more detail than its default alone does.
 func newParamBuiltin(
 	_ *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple,
 ) (starlark.Value, error) {
@@ -212,8 +212,8 @@ func newParamBuiltin(
 	return &paramValue{p}, nil
 }
 
-// parseParams returns the parameters that v, the params argument of a call to fnName, declares: a dict from
-// each one's name to its default, or to param().
+// parseParams returns the parameters that v, the params argument of a call to fnName, declares:
+// a dict from each one's name to its default, or to param().
 func parseParams(fnName string, v starlark.Value) ([]*param, error) {
 	if _, ok := v.(starlark.Callable); ok {
 		return nil, fmt.Errorf("%s: params is function, want a dict; params can't depend on ctx, "+
@@ -282,8 +282,8 @@ func paramHint(name string, params []*param) string {
 	return "; it declares none"
 }
 
-// config is a configuration of one target: its platform, and a value for each of its parameters. Equal
-// configurations are the same *config, as intern makes them, so a target in a configuration can be a map key.
+// config is a configuration of one target: its platform, and a value for each of its parameters.
+// Equal configurations are the same *config, as intern makes them, so a target in a configuration can be a map key.
 type config struct {
 	platform *platformValue
 	values   []starlark.Value // by parameter, in the order declared
@@ -311,10 +311,10 @@ func (w *workspace) intern(platform *platformValue, params []*param, values []st
 	return c
 }
 
-// commandConfig returns the configuration of the target l that the command line gives: the platform of
-// --platform, and the arguments of sets, its --set flags, each name=value, with defaults for the rest. If shared,
-// the flags are for several targets, so l ignores those naming parameters it lacks; checkSets reports any that no
-// target has.
+// commandConfig returns the configuration of the target l that the command line gives: the platform of --platform,
+// and the arguments of sets, its --set flags, each name=value, with defaults for the rest.
+// If shared, the flags are for several targets,
+// so l ignores those naming parameters it lacks; checkSets reports any that no target has.
 func (w *workspace) commandConfig(l string, sets []string, shared bool) (*config, error) {
 	d := w.declaration(l)
 	values := make([]starlark.Value, len(d.params))
@@ -353,8 +353,7 @@ func (w *workspace) commandConfig(l string, sets []string, shared bool) (*config
 	return w.intern(w.platform, d.params, values), nil
 }
 
-// checkSets checks that each of sets, the --set flags given for the targets labels, names a parameter of one of
-// them.
+// checkSets checks that each of sets, the --set flags given for the targets labels, names a parameter of one of them.
 func (w *workspace) checkSets(labels []string, sets []string) error {
 	for _, set := range sets {
 		name, _, _ := strings.Cut(set, "=")
@@ -366,8 +365,9 @@ func (w *workspace) checkSets(labels []string, sets []string) error {
 	return nil
 }
 
-// describeConfig lists what tells the target cl apart in messages, as name=value: its platform, if it isn't the
-// command's, and its arguments that aren't defaults. It returns "" if there are none.
+// describeConfig lists what tells the target cl apart in messages, as name=value:
+// its platform, if it isn't the command's, and its arguments that aren't defaults.
+// It returns "" if there are none.
 func (w *workspace) describeConfig(cl confLabel) string {
 	if cl.cfg == nil {
 		return ""
@@ -393,9 +393,10 @@ func (w *workspace) describeConfigured(cl confLabel) string {
 	return cl.label
 }
 
-// ctxValue is what a function giving an attribute of a target is given, as a Starlark value: the target's
-// configuration. ctx.<name> is the value of its parameter name, and ctx.platform, its parts ctx.os, ctx.arch and
-// ctx.variant, and ctx.exec_platform are built in.
+// ctxValue is what a function giving an attribute of a target is given, as a Starlark value:
+// the target's configuration.
+// ctx.<name> is the value of its parameter name,
+// and ctx.platform, its parts ctx.os, ctx.arch and ctx.variant, and ctx.exec_platform are built in.
 type ctxValue struct {
 	params []*param
 	cfg    *config
@@ -419,11 +420,12 @@ func (v *ctxValue) String() string {
 	return "ctx(" + strings.Join(fields, ", ") + ")"
 }
 
-// Attr returns the value of the parameter name, or of a built-in field. Starlark suggests one for a misspelled
-// name.
+// Attr returns the value of the parameter name, or of a built-in field.
+// Starlark suggests one for a misspelled name.
 func (v *ctxValue) Attr(name string) (starlark.Value, error) {
-	// Platforms are strings, such as "linux/arm64", so that comparing one with a string works: Starlark's ==
-	// is False for values of different types. Their parts are as Go's GOOS and GOARCH name them.
+	// Platforms are strings, such as "linux/arm64", so that comparing one with a string works:
+	// Starlark's == is False for values of different types.
+	// Their parts are as Go's GOOS and GOARCH name them.
 	switch name {
 	case "platform", "os", "arch", "variant":
 		if v.glob {
@@ -457,7 +459,8 @@ func (v *ctxValue) AttrNames() []string {
 	return append(slices.Clone(reservedParams), paramNames(v.params)...)
 }
 
-// platformValue is a platform, such as linux/arm64. Starlark sees it as a string, such as ctx.platform.
+// platformValue is a platform, such as linux/arm64.
+// Starlark sees it as a string, such as ctx.platform.
 type platformValue struct {
 	spec imgspecv1.Platform // normalized
 }
@@ -477,8 +480,8 @@ func parsePlatform(text string) (*platformValue, error) {
 
 func (v *platformValue) String() string { return platforms.Format(v.spec) }
 
-// execPlatformValue is EXEC_PLATFORM, which dep() takes as its platform to name a target for the platform
-// that build steps run on.
+// execPlatformValue is EXEC_PLATFORM,
+// which dep() takes as its platform to name a target for the platform that build steps run on.
 type execPlatformValue struct{}
 
 func (execPlatformValue) String() string        { return "EXEC_PLATFORM" }
@@ -487,8 +490,8 @@ func (execPlatformValue) Freeze()               {} // immutable
 func (execPlatformValue) Truth() starlark.Bool  { return true }
 func (execPlatformValue) Hash() (uint32, error) { return starlark.String("EXEC_PLATFORM").Hash() }
 
-// targetRef names a target that another uses, as a BUILD file gives it: by a label, and, if dep() gave it, with
-// arguments for its parameters, and its platform.
+// targetRef names a target that another uses, as a BUILD file gives it: by a label,
+// and, if dep() gave it, with arguments for its parameters, and its platform.
 type targetRef struct {
 	ref      string         // the label as given
 	pkg      string         // the package ref is relative to
@@ -504,9 +507,9 @@ type depArg struct {
 	value starlark.Value
 }
 
-// checkArgs checks the arguments that ref gives the target d declares, making their values canonical: each
-// must name one of its parameters, with a value it can have, and each parameter without a default needs one. The
-// values of arg()s are only known once the using target is configured, which checks them then.
+// checkArgs checks the arguments that ref gives the target d declares, making their values canonical:
+// each must name one of its parameters, with a value it can have, and each parameter without a default needs one.
+// The values of arg()s are only known once the using target is configured, which checks them then.
 func (d *declaration) checkArgs(ref *targetRef) error {
 	ref.args = slices.Clone(ref.args)
 	for i, a := range ref.args {
@@ -547,8 +550,8 @@ func (ref *targetRef) argValues() []*argValue {
 	return found
 }
 
-// depValue is the value of a call to dep(): a label, with arguments for the target it names, which base, add() and
-// an index accept wherever they accept a label.
+// depValue is the value of a call to dep(): a label, with arguments for the target it names,
+// which base, add() and an index accept wherever they accept a label.
 type depValue struct {
 	target targetRef
 }
@@ -574,10 +577,11 @@ func (v *depValue) String() string {
 	return b.String()
 }
 
-// newDep implements dep(label, platform, **args), which names the target label with arguments for its
-// parameters, and, if given, for a platform other than the using target's. Labels are relative to the package of
-// the BUILD file running, or of the target whose attribute a function of ctx is giving. The arguments are checked
-// here if the target is declared already.
+// newDep implements dep(label, platform, **args), which names the target label with arguments for its parameters,
+// and, if given, for a platform other than the using target's.
+// Labels are relative to the package of the BUILD file running,
+// or of the target whose attribute a function of ctx is giving.
+// The arguments are checked here if the target is declared already.
 func (w *workspace) newDep(
 	thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple,
 ) (starlark.Value, error) {
@@ -620,8 +624,8 @@ func (w *workspace) newDep(
 		}
 	}
 
-	// A target declared already is checked now, so that a mistake is reported here; resolve reports one that
-	// isn't, and checks the arguments of a dep() made as a .star file is loaded.
+	// A target declared already is checked now, so that a mistake is reported here;
+	// resolve reports one that isn't, and checks the arguments of a dep() made as a .star file is loaded.
 	if c.file != nil {
 		from, name, err := w.lookup(c.file, target.ref, target.pkg)
 		if err != nil {
@@ -636,8 +640,8 @@ func (w *workspace) newDep(
 	return &depValue{target: target}, nil
 }
 
-// argValue is the value of a call to arg(): the value of a parameter of the target using dep(), passed on as an
-// argument of dep().
+// argValue is the value of a call to arg():
+// the value of a parameter of the target using dep(), passed on as an argument of dep().
 type argValue struct {
 	name string
 	pos  syntax.Position // of the call, where a mistake in it is reported
@@ -649,8 +653,9 @@ func (v *argValue) Truth() starlark.Bool  { return true }
 func (v *argValue) Hash() (uint32, error) { return 0, errors.New("unhashable type: arg") }
 func (v *argValue) String() string        { return fmt.Sprintf("arg(%s)", starlark.String(v.name)) }
 
-// newArg implements arg(name). The target declaring the dep() that holds it checks name, since it isn't declared
-// yet: a call's arguments run before the call.
+// newArg implements arg(name).
+// The target declaring the dep() that holds it checks name,
+// since it isn't declared yet: a call's arguments run before the call.
 func newArg(
 	thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple,
 ) (starlark.Value, error) {
@@ -661,8 +666,8 @@ func newArg(
 	return &argValue{name: name, pos: thread.CallFrame(1).Pos}, nil
 }
 
-// argsIn returns the arg()s that v, an attribute of a target, passes on: in its dep()s, and those of its add()
-// steps, in order.
+// argsIn returns the arg()s that v, an attribute of a target, passes on:
+// in its dep()s, and those of its add() steps, in order.
 func argsIn(v starlark.Value) []*argValue {
 	return argsWithin(v, map[starlark.Value]bool{})
 }
@@ -700,8 +705,9 @@ func argsWithin(v starlark.Value, seen map[starlark.Value]bool) []*argValue {
 	return nil
 }
 
-// checkArgNames reports an arg() among values, attributes of the target, which declares params, that names a
-// parameter the target doesn't declare. It is reported where arg() is called.
+// checkArgNames reports an arg() among values, attributes of the target,
+// which declares params, that names a parameter the target doesn't declare.
+// It is reported where arg() is called.
 func checkArgNames(target string, params []*param, values ...starlark.Value) error {
 	for _, v := range values {
 		for _, av := range argsIn(v) {
@@ -723,9 +729,8 @@ type posError struct {
 func (e *posError) Error() string { return fmt.Sprintf("%s: %s", e.pos, e.err) }
 func (e *posError) Unwrap() error { return e.err }
 
-// edge returns the target that ref names from the target from, in its configuration: for the platform that ref
-// gives, or else from's, with the arguments that ref gives, its arg()s given from's values, and defaults for the
-// rest.
+// edge returns the target that ref names from the target from, in its configuration: for the platform that ref gives,
+// or else from's, with the arguments that ref gives, its arg()s given from's values, and defaults for the rest.
 func (w *workspace) edge(ref targetRef, from confLabel) (confLabel, error) {
 	if ref.label == scratch {
 		return confLabel{label: scratch}, nil
@@ -788,8 +793,9 @@ type configurer struct {
 	path    []string                  // labels of the targets being configured, outermost first, to report a cycle
 }
 
-// configure returns the graph that building roots needs: the targets, and those they use, each in the
-// configuration it is used in. It returns the files of each glob in it too, by node, for readGlobs to read.
+// configure returns the graph that building roots needs: the targets,
+// and those they use, each in the configuration it is used in.
+// It returns the files of each glob in it too, by node, for readGlobs to read.
 func (w *workspace) configure(roots []confLabel) (*graph.Graph, map[graph.Ref]*fileSet, error) {
 	cr := &configurer{
 		w:       w,
@@ -823,8 +829,8 @@ func (w *workspace) configure(roots []confLabel) (*graph.Graph, map[graph.Ref]*f
 	return l.g, l.sets, nil
 }
 
-// lowering turns the targets a configurer made into the nodes of a graph, each after the nodes it uses, in the
-// order the configurer made them.
+// lowering turns the targets a configurer made into the nodes of a graph,
+// each after the nodes it uses, in the order the configurer made them.
 type lowering struct {
 	w     *workspace
 	cr    *configurer
@@ -924,8 +930,9 @@ func (l *lowering) set(set *fileSet) (graph.Ref, error) {
 }
 
 // describe names the target cl, declared by kind, for messages, e.g. `layer "app"` or `task "//ui:build"`.
-// A target for another platform than the command's, or given arguments other than its defaults, is described
-// with them, e.g. `task "build" (platform=linux/arm64, mode="debug")`.
+// A target for another platform than the command's,
+// or given arguments other than its defaults, is described with them,
+// e.g. `task "build" (platform=linux/arm64, mode="debug")`.
 func (w *workspace) describe(kind string, cl confLabel) string {
 	name := fmt.Sprintf("%s %q", kind, w.display(cl.label))
 	if diffs := w.describeConfig(cl); diffs != "" {
@@ -971,8 +978,9 @@ func (w *workspace) chooseManifest(l string, manifests []confLabel, platform img
 		w.display(l), platforms.Format(platform), why, fileset.QuoteNames(found))
 }
 
-// enter records that the target l is being configured, reporting a cycle if it already is, in any
-// configuration: a target can't use itself, even in another configuration. The caller must call leave.
+// enter records that the target l is being configured, reporting a cycle if it already is, in any configuration:
+// a target can't use itself, even in another configuration.
+// The caller must call leave.
 func (cr *configurer) enter(l string) error {
 	if i := slices.Index(cr.path, l); i >= 0 {
 		var cycle []string
@@ -988,7 +996,8 @@ func (cr *configurer) enter(l string) error {
 // leave records that the target being configured last is done.
 func (cr *configurer) leave() { cr.path = cr.path[:len(cr.path)-1] }
 
-// image configures the pull, layer, task or index cl, and the targets it uses. Scratch needs none.
+// image configures the pull, layer, task or index cl, and the targets it uses.
+// Scratch needs none.
 func (cr *configurer) image(cl confLabel) error {
 	if cl.label == scratch {
 		return nil
@@ -1094,9 +1103,9 @@ func (cr *configurer) set(cl confLabel) (*fileSet, error) {
 	return set, nil
 }
 
-// template returns the template of the target that d declares, in the configuration of cl: the one made as
-// the BUILD file ran, or, if an attribute is a function of ctx, one made now, with what each function returns
-// in its place.
+// template returns the template of the target that d declares, in the configuration of cl:
+// the one made as the BUILD file ran,
+// or, if an attribute is a function of ctx, one made now, with what each function returns in its place.
 func (w *workspace) template(d *declaration, cl confLabel) (any, error) {
 	if d.static != nil {
 		return d.static, nil

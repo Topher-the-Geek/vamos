@@ -27,8 +27,8 @@ import (
 	"go.podman.io/storage"
 )
 
-// tagRecord is what a pull()'s tag named when vamos last resolved it, kept in the build cache so that later
-// builds pull the same images, without reaching the registry, until --rebuild resolves it again.
+// tagRecord is what a pull()'s tag named when vamos last resolved it, kept in the build cache
+// so that later builds pull the same images, without reaching the registry, until --rebuild resolves it again.
 type tagRecord struct {
 	Digest    digest.Digest            `json:"digest"`              // of the manifest it named: an index or an image
 	MIMEType  string                   `json:"mime_type,omitempty"` // the manifest's
@@ -58,8 +58,8 @@ func setTagRecord(c *cache.Cache, ref reference.NamedTagged, record *tagRecord) 
 	return c.SetTag(ref.String(), data)
 }
 
-// puller pulls the images of a build's pulls, each tag resolved once in the build, so that one tag gives every
-// platform's image from the same index, even if the tag moves meanwhile.
+// puller pulls the images of a build's pulls, each tag resolved once in the build,
+// so that one tag gives every platform's image from the same index, even if the tag moves meanwhile.
 type puller struct {
 	store         storage.Store
 	cache         *cache.Cache
@@ -104,9 +104,14 @@ func (pl *puller) pull(ctx context.Context, p *graph.Pull) (builtImage, error) {
 		return builtImage{}, fmt.Errorf("image %q: %w", image, err)
 	}
 	tracing.Current(ctx).Set("instance", instance.String())
-	// Look for the image pulled before, by its manifest's digest, since copying it asks the registry about an
-	// image even if the store has it. A pulled image is named by digest, since a tag can name only one
-	// platform's image in the store, but one pulled before by its tag may have only that name.
+	// Look for the image pulled before, by its manifest's digest,
+	// since copying it asks the registry about an image even if the store has it.
+	// A pulled image is named by digest, since a tag can name only one platform's image in the store,
+	// but one pulled before by its tag may have only that name.
+	// Keep this lookup: redundant copies can exhaust Docker Hub's anonymous pull allowance,
+	// making cached builds fail or spend time retrying registry requests.
+	// TestPullTag counts requests and requires none once the tag record and images are cached.
+	// Current limits: https://docs.docker.com/docker-hub/usage/pulls/
 	var img *storage.Image
 	images, err := pl.store.ImagesByDigest(instance)
 	if err == nil && len(images) > 0 {
@@ -131,8 +136,8 @@ func (pl *puller) pull(ctx context.Context, p *graph.Pull) (builtImage, error) {
 		return builtImage{}, fmt.Errorf("image %q is for %s, not %s, and its tag names that image alone, "+
 			"not an index of images for several platforms", image, platforms.Format(got), platforms.Format(platform))
 	}
-	// Files built on the image are stamped with its creation time: a time that is the same on
-	// every machine, and that moves forward only when the image does.
+	// Files built on the image are stamped with its creation time:
+	// a time that is the same on every machine, and that moves forward only when the image does.
 	epoch := img.Created
 	if epoch.IsZero() {
 		epoch = time.Unix(0, 0)
@@ -178,8 +183,8 @@ func (pl *puller) fetch(ctx context.Context, digested reference.Canonical, platf
 }
 
 // pullRetries returns how to retry a pull after an error that may not happen again, such as a connection reset:
-// as containers.conf's retry and retry_delay say, as for buildah and podman, backing off exponentially from a
-// second unless retry_delay is set.
+// as containers.conf's retry and retry_delay say, as for buildah and podman,
+// backing off exponentially from a second unless retry_delay is set.
 func pullRetries() (*retry.Options, error) {
 	conf, err := containersconfig.Default()
 	if err != nil {
@@ -194,8 +199,8 @@ func pullRetries() (*retry.Options, error) {
 	return options, nil
 }
 
-// pullError describes err, from reaching the registry for image, with a hint if the registry has no such image or
-// won't show it.
+// pullError describes err, from reaching the registry for image,
+// with a hint if the registry has no such image or won't show it.
 func pullError(image string, err error) error {
 	if imageUnavailable(err) {
 		return fmt.Errorf("image %q: %w (check the name, and log in if the image is private)", image, err)
@@ -203,9 +208,10 @@ func pullError(image string, err error) error {
 	return fmt.Errorf("image %q: %w", image, err)
 }
 
-// instance returns the digest of the image that the tag ref names for platform: the tag's own, if it names an
-// image, or else the one for platform in the index it names. The record keeps the manifest the tag names, so
-// that choosing another platform's image later needs no registry either.
+// instance returns the digest of the image that the tag ref names for platform:
+// the tag's own, if it names an image, or else the one for platform in the index it names.
+// The record keeps the manifest the tag names,
+// so that choosing another platform's image later needs no registry either.
 func (pl *puller) instance(ctx context.Context, ref reference.NamedTagged, platform imgspecv1.Platform) (
 	digest.Digest, error) {
 	record := pl.tags[ref.String()]
@@ -253,8 +259,8 @@ func (pl *puller) instance(ctx context.Context, ref reference.NamedTagged, platf
 	return d, nil
 }
 
-// recordedManifest returns the manifest that record says the tag ref named: as recorded, or else, by its
-// digest, which names what the tag did then, from the registry.
+// recordedManifest returns the manifest that record says the tag ref named: as recorded,
+// or else, by its digest, which names what the tag did then, from the registry.
 func (pl *puller) recordedManifest(ctx context.Context, ref reference.NamedTagged, record *tagRecord) (
 	[]byte, error) {
 	if record.Manifest != nil {
@@ -272,8 +278,8 @@ func (pl *puller) recordedManifest(ctx context.Context, ref reference.NamedTagge
 	return data, nil
 }
 
-// manifestTimeout limits fetching a manifest, which is small, so that a registry that stops answering is
-// reported rather than waited for.
+// manifestTimeout limits fetching a manifest, which is small,
+// so that a registry that stops answering is reported rather than waited for.
 const manifestTimeout = time.Minute
 
 // manifest fetches the manifest that ref names from its registry.
@@ -325,8 +331,8 @@ func chooseInstance(data []byte, mimeType string, platform imgspecv1.Platform) (
 		fileset.QuoteNames(slices.Compact(found)))
 }
 
-// forPlatform returns a copy of sys for images of platform, so that buildah expects that platform rather than
-// the host's.
+// forPlatform returns a copy of sys for images of platform,
+// so that buildah expects that platform rather than the host's.
 func forPlatform(sys *types.SystemContext, platform imgspecv1.Platform) *types.SystemContext {
 	c := *sys
 	c.OSChoice = platform.OS

@@ -29,15 +29,15 @@ type chromeEvent struct {
 // asyncCategory is the category of async spans, which their begin and end events share.
 const asyncCategory = "async"
 
-// WriteChrome writes spans to w as a trace in Chrome's JSON format, which Perfetto opens: each process's tracks as
-// threads, its spans as slices on them, and arrows from each span that produced something to those that used it.
-// Spans on a track that aren't async must nest, as they do when each is part of the one before that is still
-// going.
+// WriteChrome writes spans to w as a trace in Chrome's JSON format, which Perfetto opens:
+// each process's tracks as threads, its spans as slices on them,
+// and arrows from each span that produced something to those that used it.
+// Spans on a track that aren't async must nest, as they do when each is part of the one before that is still going.
 //
-// Times are microseconds since the first span's start, with nanoseconds as a fraction, which Perfetto reads
-// exactly. Whole microseconds would let a span that starts in its parent's last microsecond escape it, and
-// microseconds since 1970 have too many digits for a fraction to survive. The first span's start is given as the
-// trace's metadata.
+// Times are microseconds since the first span's start, with nanoseconds as a fraction, which Perfetto reads exactly.
+// Whole microseconds would let a span that starts in its parent's last microsecond escape it,
+// and microseconds since 1970 have too many digits for a fraction to survive.
+// The first span's start is given as the trace's metadata.
 func WriteChrome(w io.Writer, spans []Span) error {
 	spans = slices.Clone(spans)
 	// By start, and the longer first, so that a span comes before those within it that start at the same time.

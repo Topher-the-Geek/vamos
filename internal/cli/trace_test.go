@@ -201,8 +201,8 @@ func (s *traceSlice) arg(t *testing.T, key string) any {
 	return v
 }
 
-// traceBuild is a project whose layer adds a glob's files and a task's, with a value unique to the run, so that it
-// is built rather than reused from the build cache.
+// traceBuild is a project whose layer adds a glob's files and a task's, with a value unique to the run,
+// so that it is built rather than reused from the build cache.
 func traceBuild(nonce string) map[string]string {
 	return map[string]string{
 		"BUILD": pullBusybox + `
@@ -230,9 +230,10 @@ layer(
 	}
 }
 
-// TestTraceBuild checks the trace of a build: the client's load, holding its globs, the executor's run, and each
-// target on its own track, holding its steps, as the BUILD file wrote them, in order, with arrows from what each
-// target or glob made to the steps that use it. Built again, the targets are reused, which the trace says.
+// TestTraceBuild checks the trace of a build: the client's load, holding its globs, the executor's run,
+// and each target on its own track, holding its steps, as the BUILD file wrote them,
+// in order, with arrows from what each target or glob made to the steps that use it.
+// Built again, the targets are reused, which the trace says.
 func TestTraceBuild(t *testing.T) {
 	requireBuildah(t)
 	fsys := project(t, traceBuild(newNonce()))
@@ -334,8 +335,8 @@ func TestTraceBuild(t *testing.T) {
 	assertFlows(t, tr, nil) // nothing used what the cached targets made, since the layer wasn't built
 }
 
-// assertChildren fails the test unless the slices directly within s are named want, in order, each name ending in
-// "*" a prefix.
+// assertChildren fails the test unless the slices directly within s are named want,
+// in order, each name ending in "*" a prefix.
 func assertChildren(t *testing.T, s *traceSlice, want ...string) {
 	t.Helper()
 	got := s.childNames()
@@ -364,9 +365,10 @@ func assertFlows(t *testing.T, tr *trace, want []string) {
 	}
 }
 
-// TestTracePush checks the trace of pushes to a registry, from the executor and from the client: the executor's
-// copy is part of the client's span for sending the image, and has a span for each blob, whose bytes sent are what
-// the registry's manifest lists. Pushed again, every layer is skipped, as the registry has it.
+// TestTracePush checks the trace of pushes to a registry, from the executor and from the client:
+// the executor's copy is part of the client's span for sending the image,
+// and has a span for each blob, whose bytes sent are what the registry's manifest lists.
+// Pushed again, every layer is skipped, as the registry has it.
 func TestTracePush(t *testing.T) {
 	requireBuildah(t)
 	for _, tt := range []struct {
@@ -431,8 +433,9 @@ func TestTracePush(t *testing.T) {
 				}
 			}
 
-			// Pushed again, the layers are skipped. containers/image sends the config again, as it never looks
-			// for one at the destination, though a registry that has it takes nothing.
+			// Pushed again, the layers are skipped.
+			// containers/image sends the config again, as it never looks for one at the destination,
+			// though a registry that has it takes nothing.
 			tr = push()
 			if blobs := tr.all("executor", "blob *"); len(blobs) != 1 ||
 				blobs[0].arg(t, "source digest") != m.Config.Digest.String() {
@@ -488,8 +491,8 @@ func TestTracePull(t *testing.T) {
 	}
 }
 
-// TestTraceFailure checks that a failing build still writes its trace, which ends at the failing step, with its
-// error, and that the build's error is the one reported.
+// TestTraceFailure checks that a failing build still writes its trace,
+// which ends at the failing step, with its error, and that the build's error is the one reported.
 func TestTraceFailure(t *testing.T) {
 	requireBuildah(t)
 	fsys := project(t, map[string]string{
@@ -510,9 +513,10 @@ func TestTraceFailure(t *testing.T) {
 	}
 }
 
-// TestTraceDestinations checks the traces of commands that write their result on the client: save, whose
-// executor's copy to the tarball is within the client's span for writing it, and export, whose span says which tree
-// it wrote. Neither trace lands in the command's output.
+// TestTraceDestinations checks the traces of commands that write their result on the client:
+// save, whose executor's copy to the tarball is within the client's span for writing it,
+// and export, whose span says which tree it wrote.
+// Neither trace lands in the command's output.
 func TestTraceDestinations(t *testing.T) {
 	requireBuildah(t)
 	fsys := project(t, traceBuild(newNonce()))
@@ -558,8 +562,8 @@ func TestTraceDestinations(t *testing.T) {
 	}
 }
 
-// TestFinishTrace checks which error a traced command returns when its trace can't be written: that failure if the
-// command succeeded, or else the command's own, with the trace's failure only warned about.
+// TestFinishTrace checks which error a traced command returns when its trace can't be written:
+// that failure if the command succeeded, or else the command's own, with the trace's failure only warned about.
 func TestFinishTrace(t *testing.T) {
 	failed := errors.New("the build failed")
 	for _, tt := range []struct {
@@ -598,8 +602,8 @@ func TestFinishTrace(t *testing.T) {
 	}
 }
 
-// TestTraceMistakes checks that a trace that can't be written, or would overwrite the command's output, is reported
-// before anything is loaded or built, leaving no files.
+// TestTraceMistakes checks that a trace that can't be written,
+// or would overwrite the command's output, is reported before anything is loaded or built, leaving no files.
 func TestTraceMistakes(t *testing.T) {
 	// A BUILD file that fails to load, so that an error about the trace shows it was checked first.
 	fsys := project(t, map[string]string{"BUILD": "nope("})
@@ -662,9 +666,9 @@ func TestTraceMistakes(t *testing.T) {
 	}
 }
 
-// TestTracePerfetto checks that Perfetto's own importer reads a trace as vamos means it: the same slices, nested
-// the same way, the same arrows, and an async track for each blob. It needs trace_processor_shell, which the
-// devcontainer has.
+// TestTracePerfetto checks that Perfetto's own importer reads a trace as vamos means it:
+// the same slices, nested the same way, the same arrows, and an async track for each blob.
+// It needs trace_processor_shell, which the devcontainer has.
 func TestTracePerfetto(t *testing.T) {
 	requireBuildah(t)
 	shell, err := exec.LookPath("trace_processor_shell")

@@ -11,9 +11,10 @@ import (
 	"go.starlark.net/syntax"
 )
 
-// step is one action of a layer or task, made by a call to add(), run(), env(), build_env()
-// or workdir() in a BUILD file. A target applies its steps in the order listed. Its String
-// method describes it as the call that made it, for messages.
+// step is one action of a layer or task, made by a call to add(),
+// run(), env(), build_env() or workdir() in a BUILD file.
+// A target applies its steps in the order listed.
+// Its String method describes it as the call that made it, for messages.
 type step interface {
 	starlark.Value
 	// source returns the file set the step copies into the container, or nil if it has none.
@@ -73,8 +74,9 @@ func (s *runStep) lower() graph.Step {
 	return graph.Step{Op: graph.OpRun, Display: s.String(), Argv: s.argv}
 }
 
-// envStep sets environment variables for later runs. Those set by env() are kept in the image's
-// config too, for the image's own command and the images built on it; those set by build_env() are not.
+// envStep sets environment variables for later runs.
+// Those set by env() are kept in the image's config too, for the image's own command and the images built on it;
+// those set by build_env() are not.
 // Values refer to variables as $NAME or ${NAME}, which are expanded as the target reaches them.
 type envStep struct {
 	stepBase
@@ -96,8 +98,9 @@ func (s *envStep) lower() graph.Step {
 	return graph.Step{Op: s.op(), Display: s.String(), Vars: s.vars}
 }
 
-// workdirStep sets the working directory in the image's config, for later runs and the image's
-// own command, and in the images built on it. Like a Dockerfile's WORKDIR, it makes the directory.
+// workdirStep sets the working directory in the image's config, for later runs and the image's own command,
+// and in the images built on it.
+// Like a Dockerfile's WORKDIR, it makes the directory.
 type workdirStep struct {
 	stepBase
 	dir string // as given: absolute once its variables are expanded
@@ -137,9 +140,10 @@ func newRun(
 	return &runStep{argv: argv}, nil
 }
 
-// newEnv implements env(NAME="value", ...) and build_env(NAME="value", ...). Variables are given
-// by name, so that a dict of them can be passed as **vars. Values may refer to variables, as ExpandVars
-// describes.
+// newEnv implements env(NAME="value", ...)
+// and build_env(NAME="value", ...).
+// Variables are given by name, so that a dict of them can be passed as **vars.
+// Values may refer to variables, as ExpandVars describes.
 func newEnv(
 	_ *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple,
 ) (starlark.Value, error) {
@@ -208,8 +212,7 @@ func stepList(fnName string, list *starlark.List) ([]step, error) {
 	return out, nil
 }
 
-// functionHint explains, if v is a function, that a function of ctx must give a whole attribute, not
-// an element of one.
+// functionHint explains, if v is a function, that a function of ctx must give a whole attribute, not an element of one.
 func functionHint(v starlark.Value) string {
 	if _, ok := v.(starlark.Callable); ok {
 		return "; a function of ctx must give the whole list"
@@ -226,8 +229,8 @@ func reprStrings(ss []string) string {
 	return starlark.NewList(items).String()
 }
 
-// reprVars formats NAME=value pairs as Starlark keyword arguments, and those whose names aren't
-// identifiers as a dict passed as **vars.
+// reprVars formats NAME=value pairs as Starlark keyword arguments,
+// and those whose names aren't identifiers as a dict passed as **vars.
 func reprVars(vars []string) string {
 	var args, others []string
 	for _, v := range vars {

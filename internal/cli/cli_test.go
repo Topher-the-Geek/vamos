@@ -131,8 +131,7 @@ func TestCommandLineMistakes(t *testing.T) {
 	}
 }
 
-// TestBuildTargetMistakes checks that naming targets `vamos build` can't build is reported before
-// anything is built.
+// TestBuildTargetMistakes checks that naming targets `vamos build` can't build is reported before anything is built.
 func TestBuildTargetMistakes(t *testing.T) {
 	build := pullBusybox + `
 glob(name="code", include=["app.sh"])

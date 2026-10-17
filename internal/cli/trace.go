@@ -14,8 +14,11 @@ import (
 // clientProcess names the client's spans' process in a trace.
 const clientProcess = "vamos"
 
-// traceSession collects the spans of a command's trace, the client's and the executor's, for the file that --trace
-// names.
+// traceSession collects the spans of a command's trace, the client's and the executor's,
+// for the file that --trace names.
+// write takes mu before the recorder's lock; no recorder callback acquires mu.
+// It snapshots under those locks and writes the file after unlocking.
+// The owner must finish executor callbacks and client spans before write.
 type traceSession struct {
 	path     string // absolute
 	recorder *tracing.Recorder
@@ -25,9 +28,9 @@ type traceSession struct {
 	offset tracing.Offset // how far the executor's clock is ahead of the client's
 }
 
-// newTraceSession returns a session whose trace goes to path, checking that a file can be written there, and that
-// it isn't the command's own output: a file, or else a folder, if outputDir, which the trace mustn't be in. output
-// is "" if the command writes no file.
+// newTraceSession returns a session whose trace goes to path, checking that a file can be written there,
+// and that it isn't the command's own output: a file, or else a folder, if outputDir, which the trace mustn't be in.
+// output is "" if the command writes no file.
 func newTraceSession(path, output string, outputDir bool) (*traceSession, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -35,8 +38,9 @@ func newTraceSession(path, output string, outputDir bool) (*traceSession, error)
 	}
 	if output != "" {
 		if outputDir {
-			// Export replaces the folder at its path without following links in it, so a trace is in it if its
-			// path is, even through a link out of it, as well as if it is once links are resolved.
+			// Export replaces the folder at its path without following links in it,
+			// so a trace is in it if its path is, even through a link out of it,
+			// as well as if it is once links are resolved.
 			if within(output, abs) || within(resolve(output), resolve(abs)) {
 				return nil, fmt.Errorf("--trace %s: it is within the folder that export replaces", path)
 			}
@@ -56,8 +60,8 @@ func within(dir, p string) bool {
 	return err == nil && filepath.IsLocal(rel) // Rel gives "." for dir itself, which IsLocal accepts
 }
 
-// sameFile reports whether the absolute paths a and b name the same file, even through links, and even if neither
-// exists yet.
+// sameFile reports whether the absolute paths a and b name the same file, even through links,
+// and even if neither exists yet.
 func sameFile(a, b string) bool {
 	if resolve(a) == resolve(b) {
 		return true
@@ -99,8 +103,8 @@ func (t *traceSession) write() error {
 	})
 }
 
-// finishTrace writes the trace of a command that returned err, and returns the command's error: err, if it failed,
-// with a failure to write the trace only warned about, or else that failure.
+// finishTrace writes the trace of a command that returned err, and returns the command's error:
+// err, if it failed, with a failure to write the trace only warned about, or else that failure.
 func (t *traceSession) finishTrace(err error, display string, stderr io.Writer) error {
 	werr := t.write()
 	if werr == nil {

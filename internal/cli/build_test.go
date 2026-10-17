@@ -300,8 +300,8 @@ layer(name="app", base="busybox", steps=[add("code", "/app"), add("docs", "/app"
 	}
 }
 
-// TestGlobPatterns checks that a glob's patterns select files, at their paths relative to the BUILD file, with
-// the folders between their patterns' prefixes and them, and their modes masked.
+// TestGlobPatterns checks that a glob's patterns select files, at their paths relative to the BUILD file,
+// with the folders between their patterns' prefixes and them, and their modes masked.
 func TestGlobPatterns(t *testing.T) {
 	requireBuildah(t)
 	fsys := project(t, map[string]string{
@@ -407,8 +407,8 @@ func TestAddUnknownOwner(t *testing.T) {
 	assertNoNewImages(t, before)
 }
 
-// TestSelectionFailures checks the mistakes in a glob's or task's selection that are found as its files are
-// read, which stop the build, leaving no output.
+// TestSelectionFailures checks the mistakes in a glob's or task's selection that are found as its files are read,
+// which stop the build, leaving no output.
 func TestSelectionFailures(t *testing.T) {
 	requireBuildah(t)
 	tests := []struct {
@@ -458,8 +458,8 @@ func TestSelectionFailures(t *testing.T) {
 	}
 }
 
-// TestGlobErrorBeforeBuilding checks that a glob's files are read before any target runs, so a mistake in one is
-// reported before the targets that come before the one adding it are built.
+// TestGlobErrorBeforeBuilding checks that a glob's files are read before any target runs,
+// so a mistake in one is reported before the targets that come before the one adding it are built.
 func TestGlobErrorBeforeBuilding(t *testing.T) {
 	requireBuildah(t)
 	fsys := project(t, map[string]string{"BUILD": pullBusybox + fmt.Sprintf(`
@@ -671,10 +671,10 @@ layer(name="app", base="busybox", steps=[build_env(DIR="srv"), workdir("$DIR/app
 	assertNoNewImages(t, before)
 }
 
-// TestSteps checks that a layer applies its steps in order: that files added later replace
-// those added before, that env() and workdir() reach later runs and the image, as in a Dockerfile, that
-// build_env() reaches only the target's later runs, and that values, add()'s dest and workdir()'s path refer to
-// variables set before them.
+// TestSteps checks that a layer applies its steps in order: that files added later replace those added before,
+// that env() and workdir() reach later runs and the image, as in a Dockerfile,
+// that build_env() reaches only the target's later runs,
+// and that values, add()'s dest and workdir()'s path refer to variables set before them.
 func TestSteps(t *testing.T) {
 	requireBuildah(t)
 	fsys := project(t, map[string]string{
@@ -760,15 +760,16 @@ layer(
 	}
 }
 
-// TestWorkdirUser checks that, as in a Dockerfile, workdir() makes its directory for the image's user, so that
-// later runs, which run as that user, can write to it.
+// TestWorkdirUser checks that, as in a Dockerfile, workdir() makes its directory for the image's user,
+// so that later runs, which run as that user, can write to it.
 func TestWorkdirUser(t *testing.T) {
 	requireBuildah(t)
 	server := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))
 	t.Cleanup(server.Close)
 	host := strings.TrimPrefix(server.URL, "http://")
 
-	// busybox runs as root, so push it to the registry with a user that isn't. A pull() can be sent as it is.
+	// busybox runs as root, so push it to the registry with a user that isn't.
+	// A pull() can be sent as it is.
 	base := host + "/nonroot:v1"
 	fsys := project(t, map[string]string{"BUILD": pullBusybox})
 	vamos(t, fsys, "push", "busybox", base, "--tls-verify=false", "-C", projectDir).succeeds(t)
@@ -877,8 +878,8 @@ layer(
 	assertNoNewImages(t, before)
 }
 
-// TestTaskWithoutOutput checks that a task without source and include, such as one that runs tests, runs
-// and is cached like any other, and fails the build if a step fails.
+// TestTaskWithoutOutput checks that a task without source and include, such as one that runs tests,
+// runs and is cached like any other, and fails the build if a step fails.
 func TestTaskWithoutOutput(t *testing.T) {
 	requireBuildah(t)
 	nonce := newNonce()
@@ -903,8 +904,8 @@ task(name="broken", base="app", steps=[run(["false"])])
 	assertNoNewImages(t, before)
 }
 
-// TestTaskOutputModes checks that a task's output is selected by patterns, and that its files keep their
-// modes, less those its mode mask leaves out.
+// TestTaskOutputModes checks that a task's output is selected by patterns,
+// and that its files keep their modes, less those its mode mask leaves out.
 func TestTaskOutputModes(t *testing.T) {
 	requireBuildah(t)
 	fsys := project(t, map[string]string{
@@ -1070,7 +1071,8 @@ func TestTaskFailures(t *testing.T) {
 
 func TestPush(t *testing.T) {
 	requireBuildah(t)
-	// The executor pushes by default; the client pushes with --push-from=client. Locally both are this process.
+	// The executor pushes by default; the client pushes with --push-from=client.
+	// Locally both are this process.
 	for _, from := range []string{"executor", "client"} {
 		t.Run(from, func(t *testing.T) {
 			server := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))

@@ -20,9 +20,9 @@ import (
 // epoch is the time the test tree's files are stamped with: after 2262, which nanoseconds since 1970 can't hold.
 var epoch = time.Date(2300, 1, 1, 0, 0, 0, 0, time.UTC)
 
-// testTree stores a tree in a new cache, and returns the cache and a result naming it. Its files are a.txt, and
-// deep/x/y.txt, whose folders it doesn't list, and links to victim, a file outside the tree: by its absolute path,
-// and by a path leading out of the tree, and a link leading nowhere.
+// testTree stores a tree in a new cache, and returns the cache and a result naming it.
+// Its files are a.txt, and deep/x/y.txt, whose folders it doesn't list, and links to victim, a file outside the tree:
+// by its absolute path, and by a path leading out of the tree, and a link leading nowhere.
 func testTree(t *testing.T, victim string) (*cache.Cache, run.Result) {
 	t.Helper()
 	c, err := cache.Open(t.TempDir())
@@ -65,8 +65,8 @@ func assertNoStaging(t *testing.T, dir string) {
 	}
 }
 
-// TestExportLinks checks that an export sets the times, and owners, of links themselves, and leaves alone the
-// files they lead to, wherever they lead.
+// TestExportLinks checks that an export sets the times, and owners, of links themselves,
+// and leaves alone the files they lead to, wherever they lead.
 func TestExportLinks(t *testing.T) {
 	victim, old := newVictim(t)
 	before, err := os.Stat(victim)
@@ -119,8 +119,8 @@ func TestExportOwners(t *testing.T) {
 	}
 }
 
-// TestExportFolderFilledDuringBuild checks that files added to an empty folder after it was checked, as if during
-// the build, are kept, and the export refused, unless it replaces the folder.
+// TestExportFolderFilledDuringBuild checks that files added to an empty folder after it was checked,
+// as if during the build, are kept, and the export refused, unless it replaces the folder.
 func TestExportFolderFilledDuringBuild(t *testing.T) {
 	victim, _ := newVictim(t)
 	c, res := testTree(t, victim)
@@ -138,8 +138,8 @@ func TestExportFolderFilledDuringBuild(t *testing.T) {
 	assertNoStaging(t, dir)
 }
 
-// TestExportReplacesOnlyFolders checks that a file or link put in place of the folder is kept, and the export
-// refused, even with replace.
+// TestExportReplacesOnlyFolders checks that a file or link put in place of the folder is kept,
+// and the export refused, even with replace.
 func TestExportReplacesOnlyFolders(t *testing.T) {
 	victim, _ := newVictim(t)
 	for _, kind := range []string{"file", "link"} {
@@ -181,8 +181,8 @@ func TestExportReplace(t *testing.T) {
 	assertNoStaging(t, dir)
 }
 
-// TestExportCleanupFails checks that failing to remove what an export replaced is a warning, once the files are in
-// place.
+// TestExportCleanupFails checks that failing to remove what an export replaced is a warning,
+// once the files are in place.
 func TestExportCleanupFails(t *testing.T) {
 	removeAll = func(string) error { return errors.New("disk on fire") }
 	t.Cleanup(func() { removeAll = os.RemoveAll })
@@ -264,8 +264,8 @@ func TestExportSetuid(t *testing.T) {
 	}
 }
 
-// TestExportPutBackFails checks that if what was at the folder's place, a file, can't be put back after being
-// swapped with the staged files, it is kept where it went, and the error says where.
+// TestExportPutBackFails checks that if what was at the folder's place, a file,
+// can't be put back after being swapped with the staged files, it is kept where it went, and the error says where.
 func TestExportPutBackFails(t *testing.T) {
 	calls := 0
 	exchange = func(a, b string) error {
@@ -291,8 +291,8 @@ func TestExportPutBackFails(t *testing.T) {
 	}
 }
 
-// TestExportReplaceWithoutExchange checks that replace works on a filesystem that can't exchange two names in one
-// step, and still keeps a file put in place of the folder.
+// TestExportReplaceWithoutExchange checks that replace works on a filesystem that can't exchange two names in one step,
+// and still keeps a file put in place of the folder.
 func TestExportReplaceWithoutExchange(t *testing.T) {
 	exchange = func(string, string) error { return unix.EINVAL }
 	t.Cleanup(func() { exchange = defaultExchange })

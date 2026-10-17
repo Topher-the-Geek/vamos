@@ -113,9 +113,10 @@ func TestPlatformMistakes(t *testing.T) {
 	}
 }
 
-// platformBuild has a layer that runs a command for its platform, a task that runs on the exec platform but
-// reads the target platform, as a cross-compiler does, a task that runs there and reads neither, and a layer
-// on scratch that adds their files. nonce makes the targets unique to a test run.
+// platformBuild has a layer that runs a command for its platform,
+// a task that runs on the exec platform but reads the target platform, as a cross-compiler does,
+// a task that runs there and reads neither, and a layer on scratch that adds their files.
+// nonce makes the targets unique to a test run.
 func platformBuild(nonce string) string {
 	return pullBusybox + `
 layer(
@@ -165,9 +166,9 @@ func TestPlatforms(t *testing.T) {
 	}
 }
 
-// TestCrossPlatformTasks builds a layer on scratch for the host's platform and another, from tasks given a base on
-// the exec platform: they run natively, so need no emulator, and are shared by both platforms unless they read the
-// target's.
+// TestCrossPlatformTasks builds a layer on scratch for the host's platform
+// and another, from tasks given a base on the exec platform: they run natively,
+// so need no emulator, and are shared by both platforms unless they read the target's.
 func TestCrossPlatformTasks(t *testing.T) {
 	requireBuildah(t)
 	nonce := newNonce()
@@ -269,8 +270,8 @@ func randomImage(t *testing.T, platform string) v1.Image {
 	return img
 }
 
-// assertBase checks that img, a layer's image, is built on base: that it starts with base's layers. what
-// says which image base is, for the message.
+// assertBase checks that img, a layer's image, is built on base: that it starts with base's layers.
+// what says which image base is, for the message.
 func assertBase(t *testing.T, img, base v1.Image, what string) {
 	t.Helper()
 	got, want := layerDigests(t, img), layerDigests(t, base)
@@ -293,9 +294,10 @@ func layerDigests(t *testing.T, img v1.Image) []v1.Hash {
 	return digests
 }
 
-// TestPullTag checks that a pull's tag is resolved once and recorded: each platform's image comes from the
-// index it named then, even after the tag moves, and for a platform not built for before, until --rebuild resolves
-// it again. Pruning keeps the record and the pulled images, so builds after it don't reach the registry.
+// TestPullTag checks that a pull's tag is resolved once and recorded:
+// each platform's image comes from the index it named then, even after the tag moves,
+// and for a platform not built for before, until --rebuild resolves it again.
+// Pruning keeps the record and the pulled images, so builds after it don't reach the registry.
 func TestPullTag(t *testing.T) {
 	requireBuildah(t)
 	reg := registry.New(registry.Logger(log.New(io.Discard, "", 0)))

@@ -56,8 +56,9 @@ index(
     platforms = PLATFORMS,
 )
 
-# The UI's types are generated from this. The schema is the same on every platform, so it is exported once,
-# natively, however many platforms the UI is built for.
+# The UI's types are generated from this.
+# The schema is the same on every platform,
+# so it is exported once, natively, however many platforms the UI is built for.
 task(
     name = "schema",
     base = dep("layer", platform = EXEC_PLATFORM),
@@ -107,7 +108,8 @@ glob(
     ],
 )
 
-# Checks make no files. Run them with `vamos build //backend:lint //backend:test`.
+# Checks make no files.
+# Run them with `vamos build //backend:lint //backend:test`.
 task(
     name = "lint",
     base = "dev-packages",

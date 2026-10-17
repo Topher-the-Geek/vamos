@@ -1,5 +1,3 @@
-// Package tracing records what a build does, and how long each part takes, as spans, and writes them as a trace
-// that Perfetto opens. Spans are plain data, so that an executor can send them to the client.
 package tracing
 
 import (
@@ -23,9 +21,10 @@ type Span struct {
 	Async   bool           `json:"async,omitempty"`   // it may overlap others on its track, as blobs copied at once do
 	Instant bool           `json:"instant,omitempty"` // it took no time, as a blob skipped does
 	Args    map[string]any `json:"args,omitempty"`    // what it read, wrote and made
-	// Produces or Uses names what a span made or needed, so that the trace can draw an arrow from the span that
-	// made something to each that used it, even in another process. Perfetto binds a slice to one arrow's end
-	// alone, so a span has at most one of them.
+	// Produces or Uses names what a span made or needed,
+	// so that the trace can draw an arrow from the span that made something to each that used it,
+	// even in another process.
+	// Perfetto binds a slice to one arrow's end alone, so a span has at most one of them.
 	Produces string `json:"produces,omitempty"`
 	Uses     string `json:"uses,omitempty"`
 }
@@ -46,8 +45,10 @@ type Recorder struct {
 	spans []Span
 }
 
-// NewRecorder returns a recorder of the spans of process. If onEnd isn't nil, it passes each span to onEnd as it
-// ends instead of keeping it. onEnd may be called from several goroutines at once.
+// NewRecorder returns a recorder of the spans of process.
+// If onEnd isn't nil, it passes each span to onEnd as it ends instead of keeping it.
+// onEnd may be called from several goroutines at once.
+// The callback runs outside recorder and Active locks, and must not mutate the span's Args map.
 func NewRecorder(process string, onEnd func(Span)) *Recorder {
 	var b [4]byte
 	rand.Read(b[:])
@@ -55,6 +56,7 @@ func NewRecorder(process string, onEnd func(Span)) *Recorder {
 }
 
 // Spans returns the spans that have ended, in the order they ended, or none if the recorder passes them to onEnd.
+// The slice is copied, but Args maps are shared and must be treated as read-only.
 func (r *Recorder) Spans() []Span {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -90,8 +92,8 @@ type recording struct {
 
 type contextKey struct{}
 
-// WithRecorder returns a context whose spans r records, with spans started from it part of parent, which may be
-// a span in another process, or "".
+// WithRecorder returns a context whose spans r records, with spans started from it part of parent,
+// which may be a span in another process, or "".
 func WithRecorder(ctx context.Context, r *Recorder, parent string) context.Context {
 	return context.WithValue(ctx, contextKey{}, &recording{recorder: r, parent: parent})
 }
@@ -113,8 +115,8 @@ func Call(ctx context.Context) *CallContext {
 	return &CallContext{Parent: rec.parent}
 }
 
-// Current returns the span that spans started from ctx are part of, or nil if there is none in this process, so
-// that what it calls can record what it learns there.
+// Current returns the span that spans started from ctx are part of,
+// or nil if there is none in this process, so that what it calls can record what it learns there.
 func Current(ctx context.Context) *Active {
 	rec, _ := ctx.Value(contextKey{}).(*recording)
 	if rec == nil {
@@ -128,7 +130,8 @@ func Enabled(ctx context.Context) bool {
 	return ctx.Value(contextKey{}) != nil
 }
 
-// Active is a span that hasn't ended. Its methods may be called from several goroutines.
+// Active is a span that hasn't ended.
+// Its methods may be called from several goroutines.
 type Active struct {
 	recorder *Recorder
 	mu       sync.Mutex
@@ -145,14 +148,14 @@ func (a *Active) ID() string {
 }
 
 // Start starts a span named name, on the track of the span it is part of, with args, a list of keys and values.
-// It returns a context for spans that are part of it. With no recorder in ctx it does nothing, and returns ctx
-// and a nil span, whose methods do nothing.
+// It returns a context for spans that are part of it.
+// With no recorder in ctx it does nothing, and returns ctx and a nil span, whose methods do nothing.
 func Start(ctx context.Context, name string, args ...any) (context.Context, *Active) {
 	return start(ctx, "", name, false, args)
 }
 
-// StartTrack is like Start, but puts the span on the track named track, of its own, such as for a target, which
-// may run at the same time as others.
+// StartTrack is like Start, but puts the span on the track named track, of its own, such as for a target,
+// which may run at the same time as others.
 func StartTrack(ctx context.Context, track, name string, args ...any) (context.Context, *Active) {
 	return start(ctx, track, name, false, args)
 }
@@ -202,8 +205,9 @@ func start(ctx context.Context, track, name string, async bool, args []any) (con
 	return context.WithValue(ctx, contextKey{}, child), a
 }
 
-// Set records args, a list of keys and values, as what the span read, wrote or made. A nil value is left out, and
-// so is anything set once the span has ended.
+// Set records args, a list of keys and values, as what the span read, wrote or made.
+// A nil value is left out, and so is anything set once the span has ended.
+// Values are retained without a deep copy; callers must not mutate maps or slices stored as arguments.
 func (a *Active) Set(args ...any) {
 	if a == nil {
 		return
@@ -227,8 +231,8 @@ func (a *Active) SetError(err error) {
 	}
 }
 
-// Produce records that the span made what key names, which spans that use it name too. A span that uses
-// something can't also produce something.
+// Produce records that the span made what key names, which spans that use it name too.
+// A span that uses something can't also produce something.
 func (a *Active) Produce(key string) {
 	if a == nil {
 		return
@@ -240,7 +244,8 @@ func (a *Active) Produce(key string) {
 	}
 }
 
-// Use records that the span needed what key names. A span that produces something can't also use something.
+// Use records that the span needed what key names.
+// A span that produces something can't also use something.
 func (a *Active) Use(key string) {
 	if a == nil {
 		return
@@ -252,7 +257,8 @@ func (a *Active) Use(key string) {
 	}
 }
 
-// End ends the span now, and records it. Only its first End counts.
+// End ends the span now, and records it.
+// Only its first End counts.
 func (a *Active) End() {
 	if a != nil {
 		a.end(time.Now())

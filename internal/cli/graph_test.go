@@ -51,8 +51,8 @@ func TestGraphExamples(t *testing.T) {
 	}
 }
 
-// TestGraphConfigurations checks the graph of an index of a layer for two platforms, which adds a task in two
-// configurations, each for the exec platform, so that both platforms' layers share them.
+// TestGraphConfigurations checks the graph of an index of a layer for two platforms,
+// which adds a task in two configurations, each for the exec platform, so that both platforms' layers share them.
 func TestGraphConfigurations(t *testing.T) {
 	fsys := project(t, map[string]string{
 		"BUILD": pullBusybox + `

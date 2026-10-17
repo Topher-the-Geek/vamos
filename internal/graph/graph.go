@@ -1,5 +1,3 @@
-// Package graph is the build graph: what load makes of BUILD files and run builds, as plain data with no
-// Starlark, so that it can pass between a client and an executor.
 package graph
 
 import (
@@ -18,21 +16,21 @@ import (
 	"go.podman.io/image/v5/docker/reference"
 )
 
-// Version changes whenever what a graph means changes, so that a client and an executor of different
-// versions refuse each other's graphs rather than build something else.
+// Version changes whenever what a graph means changes,
+// so that a client and an executor of different versions refuse each other's graphs rather than build something else.
 const Version = 1
 
-// Graph is everything a build runs: each target in each configuration it's needed in, in an order where each
-// node comes after the nodes it uses. It holds no Starlark, so that what runs it needs nothing of the BUILD files
-// that made it.
+// Graph is everything a build runs:
+// each target in each configuration it's needed in, in an order where each node comes after the nodes it uses.
+// It holds no Starlark, so that what runs it needs nothing of the BUILD files that made it.
 type Graph struct {
 	Version int    `json:"version"`
 	Nodes   []Node `json:"nodes"`
 	Roots   []Ref  `json:"roots"` // the targets the command named, once an index is chosen from
 }
 
-// Ref names a node by its position in Graph.Nodes. A node refers only to nodes before it, so a graph is acyclic
-// by construction.
+// Ref names a node by its position in Graph.Nodes.
+// A node refers only to nodes before it, so a graph is acyclic by construction.
 type Ref int
 
 // FlowKey names what the node ref makes, in a trace, so that the spans that make and use it are joined.
@@ -93,7 +91,8 @@ type Index struct {
 	Manifests []Ref `json:"manifests"` // Pulls and Layers, in the order the index lists them
 }
 
-// Step is one step of a layer or task. Op says which, and which other fields it uses.
+// Step is one step of a layer or task.
+// Op says which, and which other fields it uses.
 type Step struct {
 	Op      string   `json:"op"`              // "add", "run", "env", "build_env" or "workdir"
 	Display string   `json:"display"`         // as the BUILD file wrote it, for messages: `run(["pnpm", "install"])`
@@ -170,8 +169,7 @@ func (n *Node) Kind() string {
 	return ""
 }
 
-// Encode returns g's canonical encoding: encoding/json writes fields in the order declared, and a graph holds
-// no maps.
+// Encode returns g's canonical encoding: encoding/json writes fields in the order declared, and a graph holds no maps.
 func Encode(g *Graph) []byte {
 	data, err := json.Marshal(g)
 	if err != nil {
@@ -192,9 +190,9 @@ func Decode(data []byte) (*Graph, error) {
 	return &g, nil
 }
 
-// Validate checks that g is a graph that can be run, and compiles its tasks' selections for matching. Load checks
-// every mistake a BUILD file can make first, with a message saying where, so an error here means a graph that
-// vamos didn't make, or a bug.
+// Validate checks that g is a graph that can be run, and compiles its tasks' selections for matching.
+// Load checks every mistake a BUILD file can make first, with a message saying where,
+// so an error here means a graph that vamos didn't make, or a bug.
 func (g *Graph) Validate() error {
 	if g.Version != Version {
 		return fmt.Errorf("invalid build graph: version %d, want %d", g.Version, Version)
@@ -341,8 +339,8 @@ func (g *Graph) validateNode(ref Ref) error {
 	return nil
 }
 
-// checkRef checks that ref, the field what of the node from, names a node of one of kinds before from, or else
-// Scratch if scratch.
+// checkRef checks that ref, the field what of the node from, names a node of one of kinds before from,
+// or else Scratch if scratch.
 func (g *Graph) checkRef(from Ref, what string, ref Ref, scratch bool, kinds ...string) error {
 	if ref == Scratch && scratch {
 		return nil
@@ -366,8 +364,8 @@ func (g *Graph) checkSteps(ref Ref, steps []Step) error {
 	return nil
 }
 
-// checkStep checks the step in of the layer or task ref: that it sets only the fields of its op, and that they
-// are valid.
+// checkStep checks the step in of the layer or task ref:
+// that it sets only the fields of its op, and that they are valid.
 func (g *Graph) checkStep(ref Ref, in Step) error {
 	strs := append([]string{in.Display, in.Dest, in.Owner, in.Group, in.Dir}, append(in.Argv, in.Vars...)...)
 	if err := noNUL(strs...); err != nil {

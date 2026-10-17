@@ -25,8 +25,8 @@ import (
 )
 
 // workspace is a project's BUILD files, each in its own directory, or package, loaded as targets name them.
-// A package is named by its directory relative to the workspace's root, "" for the root itself, and a
-// target by its label, "//dir:name".
+// A package is named by its directory relative to the workspace's root, "" for the root itself,
+// and a target by its label, "//dir:name".
 type workspace struct {
 	fs           afero.Fs
 	root         string                // absolute: the directory holding the WORKSPACE file, or else the only package
@@ -49,13 +49,13 @@ type buildFile struct {
 	decls map[string]*declaration // each target, by name
 }
 
-// declaration records a target of a BUILD file: where it was declared, by which builtin, and its template, the
-// target as the call declaring it describes it. In a template, targets that it uses are named by targetRefs;
+// declaration records a target of a BUILD file: where it was declared, by which builtin,
+// and its template, the target as the call declaring it describes it.
+// In a template, targets that it uses are named by targetRefs;
 // configuring the target then makes an instance of it, in which they are targets in configurations.
 //
-// The template is made, and checked, as the BUILD file runs, unless an attribute is given by a function of
-// ctx. Then the call's arguments are kept instead, and a template is made in each configuration the target is
-// needed in.
+// The template is made, and checked, as the BUILD file runs, unless an attribute is given by a function of ctx.
+// Then the call's arguments are kept instead, and a template is made in each configuration the target is needed in.
 type declaration struct {
 	kind      string // "glob", "pull", "layer", "task" or "index"
 	pos       syntax.Position
@@ -71,10 +71,11 @@ type declaration struct {
 	make   makeFunc
 }
 
-// makeFunc makes the template of a target from the arguments of the call to fn that declares it, checking
-// them, and returns the target's name too. It runs in c: as the BUILD file declares the target, or in a
-// configuration, with what the functions of ctx among the arguments return in their place. The arguments don't
-// include params, which the declaration holds.
+// makeFunc makes the template of a target from the arguments of the call to fn that declares it, checking them,
+// and returns the target's name too.
+// It runs in c: as the BUILD file declares the target,
+// or in a configuration, with what the functions of ctx among the arguments return in their place.
+// The arguments don't include params, which the declaration holds.
 type makeFunc func(c *evalContext, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (
 	string, any, error)
 
@@ -95,6 +96,9 @@ const (
 )
 
 // evalContext is what builtins know of the thread calling them, kept in its locals under contextKey.
+// Builtins are shared across the workspace, so caller scope must come from the thread.
+// A function defined in a .star file resolves labels against the BUILD file or target it runs for,
+// not the module defining it.
 type evalContext struct {
 	mode     evalMode
 	file     *buildFile    // the BUILD file running, or declaring the target being configured; nil in a module
@@ -121,8 +125,8 @@ type pullSpec struct {
 	image reference.NamedTagged
 }
 
-// fileSet is a set of files that add() can name in its source: files in a package, declared by
-// glob(), or files a task makes.
+// fileSet is a set of files that add() can name in its source:
+// files in a package, declared by glob(), or files a task makes.
 type fileSet struct {
 	label       string             // of the glob or task
 	task        *targetSpec        // the task that makes the files, or nil for a glob
@@ -131,9 +135,9 @@ type fileSet struct {
 	configuring string             // a glob given by a function of ctx: the target and configuration, for errors
 }
 
-// targetSpec runs on another target's image, declared by a call to layer() or task(). A layer's
-// image becomes the base of later targets; a task's image is discarded once its output, if any, is
-// collected. A task without output, such as one that runs tests, is run only for its steps to succeed.
+// targetSpec runs on another target's image, declared by a call to layer() or task().
+// A layer's image becomes the base of later targets; a task's image is discarded once its output, if any, is collected.
+// A task without output, such as one that runs tests, is run only for its steps to succeed.
 type targetSpec struct {
 	label   string
 	id      confLabel // of an instance: the target in its configuration
@@ -146,8 +150,8 @@ type targetSpec struct {
 	output  *fileSet  // a task's output, found in source; nil for a layer, or a task without output
 }
 
-// indexSpec is an index of images for several platforms, declared by a call to index(): its manifests, each a
-// pull or layer, named with the platform it is for.
+// indexSpec is an index of images for several platforms, declared by a call to index():
+// its manifests, each a pull or layer, named with the platform it is for.
 type indexSpec struct {
 	manifests []targetRef // in the order given, which the index keeps
 }
@@ -159,18 +163,19 @@ type madeStep struct {
 	pos  syntax.Position
 }
 
-// loadError is an error in a BUILD file, which already says where. When loading a package's
-// BUILD file fails as another names one of its targets, the error is reported as it is, rather
-// than as an error of the call that named the target.
+// loadError is an error in a BUILD file, which already says where.
+// When loading a package's BUILD file fails as another names one of its targets, the error is reported as it is,
+// rather than as an error of the call that named the target.
 type loadError struct{ err error }
 
 func (e *loadError) Error() string { return e.err.Error() }
 func (e *loadError) Unwrap() error { return e.err }
 
-// openWorkspace returns the workspace that holds dir, the directory given with -C: the nearest
-// directory at or above dir with a WORKSPACE file, or else dir alone. A WORKSPACE file only marks the
-// workspace's root. It loads no BUILD file yet. exec is the executor's platform, which targets are built for
-// unless --platform gives another.
+// openWorkspace returns the workspace that holds dir, the directory given with -C:
+// the nearest directory at or above dir with a WORKSPACE file, or else dir alone.
+// A WORKSPACE file only marks the workspace's root.
+// It loads no BUILD file yet.
+// exec is the executor's platform, which targets are built for unless --platform gives another.
 func openWorkspace(fsys afero.Fs, dir string, exec imgspecv1.Platform) (*workspace, error) {
 	info, err := fsys.Stat(dir)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -219,9 +224,9 @@ func label(pkg, name string) string {
 	return "//" + pkg + ":" + name
 }
 
-// parseLabel returns the package and name of the target that ref names from package pkg: "name"
-// or ":name" for a target of pkg itself, or "//dir:name" for one in the package at dir. The name
-// of a target in pkg isn't checked, since it is only looked up there.
+// parseLabel returns the package and name of the target that ref names from package pkg:
+// "name" or ":name" for a target of pkg itself, or "//dir:name" for one in the package at dir.
+// The name of a target in pkg isn't checked, since it is only looked up there.
 func parseLabel(ref, pkg string) (string, string, error) {
 	rest, ok := strings.CutPrefix(ref, "//")
 	if !ok {
@@ -265,9 +270,9 @@ func (w *workspace) display(l string) string {
 	return l
 }
 
-// load returns the BUILD file of package pkg, loading it if it hasn't been. Loading it loads the
-// packages whose targets it names too, before the targets that name them are declared, so every
-// target is declared after those it uses.
+// load returns the BUILD file of package pkg, loading it if it hasn't been.
+// Loading it loads the packages whose targets it names too, before the targets that name them are declared,
+// so every target is declared after those it uses.
 func (w *workspace) load(pkg string) (*buildFile, error) {
 	if f, ok := w.packages[pkg]; ok {
 		return f, nil
@@ -305,9 +310,9 @@ func (w *workspace) load(pkg string) (*buildFile, error) {
 	return f, nil
 }
 
-// checkPackageDir reports a symbolic link on the way from the workspace's root to package pkg, which could
-// lead outside the workspace, as checkInclude does for a glob's files. The root itself may be reached
-// through a link, as from a linked $PWD.
+// checkPackageDir reports a symbolic link on the way from the workspace's root to package pkg,
+// which could lead outside the workspace, as checkInclude does for a glob's files.
+// The root itself may be reached through a link, as from a linked $PWD.
 func (w *workspace) checkPackageDir(pkg string) error {
 	if pkg == "" {
 		return nil
@@ -329,8 +334,8 @@ func (w *workspace) checkPackageDir(pkg string) error {
 	return nil
 }
 
-// lookup returns the BUILD file that declares the target ref names from package from, and the target's name
-// there, which it may lack: f, a BUILD file that may be being loaded, has only the targets declared so far.
+// lookup returns the BUILD file that declares the target ref names from package from, and the target's name there,
+// which it may lack: f, a BUILD file that may be being loaded, has only the targets declared so far.
 // Another package is loaded if it hasn't been.
 func (w *workspace) lookup(f *buildFile, ref, from string) (*buildFile, string, error) {
 	pkg, name, err := parseLabel(ref, from)
@@ -344,8 +349,9 @@ func (w *workspace) lookup(f *buildFile, ref, from string) (*buildFile, string, 
 	return other, name, err
 }
 
-// labelHint suggests the label meant by name, which names no target since it has a ":", as a label
-// missing its leading "//". A name can't contain ":", so this is likely.
+// labelHint suggests the label meant by name,
+// which names no target since it has a ":", as a label missing its leading "//".
+// A name can't contain ":", so this is likely.
 func labelHint(name string) string {
 	return fmt.Sprintf(`; a label starts with "//", as in "//%s"`, name)
 }
@@ -374,8 +380,8 @@ func (f *buildFile) missing(name string) error {
 	return fmt.Errorf("%s has no target %q%s", f.path, name, hint)
 }
 
-// exec executes the BUILD file f, whose source is src, declaring its targets in f. The files named by its
-// globs are read only once a build needs them, by readGlobs.
+// exec executes the BUILD file f, whose source is src, declaring its targets in f.
+// The files named by its globs are read only once a build needs them, by readGlobs.
 func (w *workspace) exec(f *buildFile, src []byte) error {
 	c := &evalContext{mode: declaring, file: f, listed: map[step]bool{}}
 	thread := &starlark.Thread{Name: f.path, Load: w.loadModule}
@@ -396,8 +402,8 @@ func (w *workspace) exec(f *buildFile, src []byte) error {
 	return nil
 }
 
-// describeExecError returns err, from running a BUILD or .star file, as it is reported: as one line saying
-// where. An error in another package's BUILD file already says where it is.
+// describeExecError returns err, from running a BUILD or .star file, as it is reported: as one line saying where.
+// An error in another package's BUILD file already says where it is.
 func describeExecError(err error) error {
 	var nested *loadError
 	if errors.As(err, &nested) {
@@ -409,8 +415,8 @@ func describeExecError(err error) error {
 	return err
 }
 
-// loadModule implements load(): it returns the globals of the .star file that label names, such as
-// "//:defs.star", running it the first time it is named.
+// loadModule implements load(): it returns the globals of the .star file that label names, such as "//:defs.star",
+// running it the first time it is named.
 func (w *workspace) loadModule(_ *starlark.Thread, label string) (starlark.StringDict, error) {
 	if !strings.HasPrefix(label, "//") || !strings.HasSuffix(label, ".star") {
 		return nil, fmt.Errorf(`a .star file is named by its label, which starts with "//", such as "//:defs.star"`)
@@ -448,8 +454,8 @@ func (w *workspace) loadModule(_ *starlark.Thread, label string) (starlark.Strin
 	return m.globals, m.err
 }
 
-// predeclared returns the builtins of BUILD and .star files, which take what they need to know of the code
-// calling them from the thread's evalContext.
+// predeclared returns the builtins of BUILD and .star files,
+// which take what they need to know of the code calling them from the thread's evalContext.
 func (w *workspace) predeclared() starlark.StringDict {
 	if w.builtins != nil {
 		return w.builtins
@@ -482,8 +488,8 @@ func (w *workspace) predeclared() starlark.StringDict {
 	return w.builtins
 }
 
-// track wraps a builtin that makes steps, recording each one it makes as a BUILD file runs, with where, so
-// that one left out of every target's steps is reported rather than silently ignored.
+// track wraps a builtin that makes steps, recording each one it makes as a BUILD file runs, with where,
+// so that one left out of every target's steps is reported rather than silently ignored.
 func track(b *starlark.Builtin) *starlark.Builtin {
 	return starlark.NewBuiltin(b.Name(), func(
 		thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple,
@@ -498,10 +504,10 @@ func track(b *starlark.Builtin) *starlark.Builtin {
 	})
 }
 
-// declarer returns the builtin kind, which declares a target, taking params, as starlark.UnpackArgs names
-// them, of which the first is the target's name, and the target's own params, unless it is a pull. makeTemplate
-// makes the target's template from the call's other arguments: as it is called, or, if an argument is a function
-// of ctx, in each configuration the target is needed in.
+// declarer returns the builtin kind, which declares a target, taking params, as starlark.UnpackArgs names them,
+// of which the first is the target's name, and the target's own params, unless it is a pull.
+// makeTemplate makes the target's template from the call's other arguments: as it is called,
+// or, if an argument is a function of ctx, in each configuration the target is needed in.
 func (w *workspace) declarer(kind string, params []string, makeTemplate makeFunc) *starlark.Builtin {
 	return starlark.NewBuiltin(kind, func(
 		thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple,
@@ -549,8 +555,8 @@ func (w *workspace) declarer(kind string, params []string, makeTemplate makeFunc
 				}
 			}
 			d.hasOutput = kind == "glob"
-			// A task has output given both source and include, as functions or not: makeTask refuses one
-			// without the other, and include can't be None.
+			// A task has output given both source and include, as functions or not:
+			// makeTask refuses one without the other, and include can't be None.
 			if i := slices.Index(params, "source?"); i >= 0 {
 				d.hasOutput = values[i] != nil && values[slices.Index(params, "include?")] != nil
 			}
@@ -598,8 +604,8 @@ func (w *workspace) declarer(kind string, params []string, makeTemplate makeFunc
 	})
 }
 
-// takeParams returns kwargs, the keyword arguments of a call to fnName, without params, and the parameters that
-// params declares, if given.
+// takeParams returns kwargs, the keyword arguments of a call to fnName,
+// without params, and the parameters that params declares, if given.
 func takeParams(fnName string, kwargs []starlark.Tuple) ([]starlark.Tuple, []*param, error) {
 	i := slices.IndexFunc(kwargs, func(kv starlark.Tuple) bool { return kv[0] == starlark.String("params") })
 	if i < 0 {
@@ -683,10 +689,11 @@ func (w *workspace) makePull(
 	return name, &pullSpec{label: label(c.file.pkg, name), image: ref}, nil
 }
 
-// resolve finds the target that ref, the argument param of a call to fn, names, setting ref.label: a pull or
-// layer if image is set, or else a glob or task, returning its declaration. It checks the arguments ref gives the
-// target too. As a BUILD file runs, targets of its own must be declared earlier, so targets it names outside
-// functions of ctx can't form a cycle.
+// resolve finds the target that ref, the argument param of a call to fn, names, setting ref.label:
+// a pull or layer if image is set, or else a glob or task, returning its declaration.
+// It checks the arguments ref gives the target too.
+// As a BUILD file runs, targets of its own must be declared earlier,
+// so targets it names outside functions of ctx can't form a cycle.
 func (w *workspace) resolve(
 	c *evalContext, fn *starlark.Builtin, param string, ref *targetRef, image bool,
 ) (*declaration, error) {
@@ -862,8 +869,8 @@ func (w *workspace) makeTask(
 	return name, s, nil
 }
 
-// makeIndex makes the template of an index(): the pulls and layers whose images it lists, each named for its
-// platform. layer is one target, for each of platforms, or a dict from each platform to its own target.
+// makeIndex makes the template of an index(): the pulls and layers whose images it lists, each named for its platform.
+// layer is one target, for each of platforms, or a dict from each platform to its own target.
 func (w *workspace) makeIndex(
 	c *evalContext, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple,
 ) (string, any, error) {
@@ -945,8 +952,8 @@ func (w *workspace) makeIndex(
 	return name, s, nil
 }
 
-// target returns the label and kind of the target that ref, given on the command line, names from
-// the package of -C, loading the BUILD file that declares it.
+// target returns the label and kind of the target that ref, given on the command line,
+// names from the package of -C, loading the BUILD file that declares it.
 func (w *workspace) target(ref string) (string, string, error) {
 	pkg, name, err := parseLabel(ref, w.current)
 	if err != nil {
@@ -963,8 +970,8 @@ func (w *workspace) target(ref string) (string, string, error) {
 	return label(pkg, name), d.kind, nil
 }
 
-// buildTargets returns the labels and kinds of the targets to build that names, given on the command line,
-// name, without repeats.
+// buildTargets returns the labels and kinds of the targets to build that names, given on the command line, name,
+// without repeats.
 func (w *workspace) buildTargets(names []string) ([]string, []string, error) {
 	var labels, kinds []string
 	for _, name := range names {
@@ -983,8 +990,8 @@ func (w *workspace) buildTargets(names []string) ([]string, []string, error) {
 	return labels, kinds, nil
 }
 
-// imageTarget returns the label and kind of the target whose image, or index of images, to send that name,
-// given on the command line, names.
+// imageTarget returns the label and kind of the target whose image,
+// or index of images, to send that name, given on the command line, names.
 func (w *workspace) imageTarget(name string) (string, string, error) {
 	l, kind, err := w.target(name)
 	if err != nil {
@@ -1035,9 +1042,11 @@ func (w *workspace) declaration(l string) *declaration {
 	return w.packages[rest[:i]].decls[rest[i+1:]]
 }
 
-// readGlobs reads the files of each glob in g, whose files are globs, by node, with store, which returns their tree,
-// setting the trees of g's Source nodes. A glob's files are read once, before anything is built, so that every
-// target that adds them gets the same files, as the build cache stored them, even if they change during the build.
+// readGlobs reads the files of each glob in g, whose files are globs, by node, with store,
+// which returns their tree, setting the trees of g's Source nodes.
+// A glob's files are read once, before anything is built,
+// so that every target that adds them gets the same files, as the build cache stored them,
+// even if they change during the build.
 // Each glob is a span of ctx's trace, which those that add its files point back to.
 func (w *workspace) readGlobs(
 	ctx context.Context, g *graph.Graph, globs map[graph.Ref]*fileSet,
@@ -1067,8 +1076,7 @@ func (w *workspace) readGlobs(
 	return nil
 }
 
-// closestName returns the name in names nearest to name, as a likely misspelling of it, or
-// "" if none is near enough.
+// closestName returns the name in names nearest to name, as a likely misspelling of it, or "" if none is near enough.
 func closestName(name string, names []string) string {
 	closest, best := "", max(2, len(name)/3)+1
 	for _, candidate := range names {
@@ -1079,8 +1087,7 @@ func closestName(name string, names []string) string {
 	return closest
 }
 
-// editDistance returns the number of single-byte insertions, deletions and substitutions that
-// turn a into b.
+// editDistance returns the number of single-byte insertions, deletions and substitutions that turn a into b.
 func editDistance(a, b string) int {
 	row := make([]int, len(b)+1)
 	for j := range row {
@@ -1130,8 +1137,7 @@ func article(kind string) string {
 	return "a"
 }
 
-// describeNames lists the targets of a kind, such as "globs", declared so far, for an error
-// about an unknown name.
+// describeNames lists the targets of a kind, such as "globs", declared so far, for an error about an unknown name.
 func describeNames(kind string, names []string) string {
 	if len(names) == 0 {
 		return "; there are none before this"
@@ -1139,8 +1145,8 @@ func describeNames(kind string, names []string) string {
 	return "; earlier " + kind + " are " + fileset.QuoteNames(names)
 }
 
-// describeEvalError reports e at the innermost position within a BUILD file, in the
-// one-line "file:line:col: message" form of compiler errors.
+// describeEvalError reports e at the innermost position within a BUILD file,
+// in the one-line "file:line:col: message" form of compiler errors.
 func describeEvalError(e *starlark.EvalError) string {
 	var at *posError
 	if errors.As(e, &at) {
@@ -1154,8 +1160,7 @@ func describeEvalError(e *starlark.EvalError) string {
 	return e.Msg
 }
 
-// lstat describes the file at path in fsys without following a final symbolic link,
-// if fsys supports links.
+// lstat describes the file at path in fsys without following a final symbolic link, if fsys supports links.
 func lstat(fsys afero.Fs, path string) (fs.FileInfo, bool, error) {
 	if l, ok := fsys.(afero.Lstater); ok {
 		return l.LstatIfPossible(path)

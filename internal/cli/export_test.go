@@ -85,8 +85,8 @@ func TestExportMistakes(t *testing.T) {
 	}
 }
 
-// TestSendTaskWithOutput checks that sending a task's image, which it has none of, suggests exporting its files
-// if it has some.
+// TestSendTaskWithOutput checks that sending a task's image,
+// which it has none of, suggests exporting its files if it has some.
 func TestSendTaskWithOutput(t *testing.T) {
 	fsys := project(t, map[string]string{"BUILD": exportBuild, "app.sh": ""})
 	vamos(t, fsys, "save", "make", filepath.Join(t.TempDir(), "app.tar"), "-C", projectDir).failsWith(t, false,
@@ -94,8 +94,8 @@ func TestSendTaskWithOutput(t *testing.T) {
 			`or export the task's files with "vamos export"`)
 }
 
-// TestExport exports a task's files, with their modes, links and times, and replaces a folder that holds files
-// only with --replace, removing those the task doesn't make.
+// TestExport exports a task's files, with their modes, links and times,
+// and replaces a folder that holds files only with --replace, removing those the task doesn't make.
 func TestExport(t *testing.T) {
 	requireBuildah(t)
 	nonce := newNonce()

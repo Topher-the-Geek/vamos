@@ -50,8 +50,9 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// unnamedImages returns the IDs of the images in the local container store that have no
-// name, such as an image a failed target might leave behind. Cached layers' images are named.
+// unnamedImages returns the IDs of the images in the local container store that have no name,
+// such as an image a failed target might leave behind.
+// Cached layers' images are named.
 func unnamedImages(t *testing.T) map[string]bool {
 	t.Helper()
 	return imageIDs(t, func(img storage.Image) bool { return len(img.Names) == 0 })
@@ -73,8 +74,8 @@ func imageIDs(t *testing.T, keep func(storage.Image) bool) map[string]bool {
 	return ids
 }
 
-// withStore calls use with the local container store, open only until use returns, since each
-// vamos run opens and shuts it too.
+// withStore calls use with the local container store, open only until use returns,
+// since each vamos run opens and shuts it too.
 func withStore(t *testing.T, use func(storage.Store)) {
 	t.Helper()
 	options, err := storage.DefaultStoreOptions()
@@ -85,8 +86,7 @@ func withStore(t *testing.T, use func(storage.Store)) {
 	use(store)
 }
 
-// assertNoNewImages fails the test if the local container store has unnamed images that
-// aren't in before.
+// assertNoNewImages fails the test if the local container store has unnamed images that aren't in before.
 func assertNoNewImages(t *testing.T, before map[string]bool) {
 	t.Helper()
 	for id := range unnamedImages(t) {
@@ -108,8 +108,8 @@ func vamos(t *testing.T, fsys afero.Fs, args ...string) result {
 	return vamosWithOutput(t, fsys, t.Context(), nil, args...)
 }
 
-// vamosWithOutput is like vamos, but runs with ctx, as main does to handle Ctrl-C, and
-// also copies stdout to watch, if it isn't nil.
+// vamosWithOutput is like vamos, but runs with ctx, as main does to handle Ctrl-C,
+// and also copies stdout to watch, if it isn't nil.
 func vamosWithOutput(t *testing.T, fsys afero.Fs, ctx context.Context, watch io.Writer, args ...string) result {
 	t.Helper()
 	cmd := NewRootCommand(fsys)
@@ -258,8 +258,8 @@ func imagePath(hdr *tar.Header) string {
 
 // fakeDocker serves the parts of the Docker Engine API that loading an image uses, on an amd64 machine,
 // over plain HTTP on a "unix" socket or a "tcp" port, and points DOCKER_HOST at it.
-// It answers loads with reply, a stream of JSON messages, or reports success if reply
-// is empty. It returns the tarballs loaded.
+// It answers loads with reply, a stream of JSON messages, or reports success if reply is empty.
+// It returns the tarballs loaded.
 func fakeDocker(t *testing.T, network, reply string) func() [][]byte {
 	t.Helper()
 	return fakeDockerOn(t, network, reply, "x86_64")

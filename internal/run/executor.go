@@ -1,5 +1,3 @@
-// Package run builds a graph, as an Executor: it pulls images, runs layers and tasks with buildah, reusing their
-// cached results, and pushes or exports what it built.
 package run
 
 import (
@@ -31,21 +29,22 @@ import (
 	"go.podman.io/storage"
 )
 
-// Executor runs build graphs and holds the images they make. Local runs them in this process; a remote
-// executor could stand in for it, since a graph reaches it only through the build cache.
+// Executor runs build graphs and holds the images they make.
+// Local runs them in this process; a remote executor could stand in for it,
+// since a graph reaches it only through the build cache.
 type Executor interface {
 	// ExecPlatform returns the platform that run() steps run on without emulation.
 	ExecPlatform(ctx context.Context) (imgspecv1.Platform, error)
-	// Clock returns the time by the executor's clock, so that the client can place the executor's spans in a
-	// trace by its own.
+	// Clock returns the time by the executor's clock,
+	// so that the client can place the executor's spans in a trace by its own.
 	Clock(ctx context.Context) (time.Time, error)
 	// Run runs the graph req names, reporting progress to ev, and returns a result for each of its roots.
 	Run(ctx context.Context, req Request, ev Events) ([]Result, error)
-	// Push copies a result's image or index from the executor to a registry, as req says, using the executor's
-	// credentials, and returns its image ID there, or an index's digest.
+	// Push copies a result's image or index from the executor to a registry, as req says,
+	// using the executor's credentials, and returns its image ID there, or an index's digest.
 	Push(ctx context.Context, req PushRequest, ev Events) (string, error)
-	// Export copies a result's image or index to a destination on the client, as req says, and returns its image
-	// ID there, or an index's digest.
+	// Export copies a result's image or index to a destination on the client, as req says,
+	// and returns its image ID there, or an index's digest.
 	Export(ctx context.Context, req ExportRequest, ev Events) (string, error)
 }
 
@@ -75,12 +74,14 @@ type ExportRequest struct {
 	Trace *tracing.CallContext
 }
 
-// Events receives a run's progress. Its methods may be called from several goroutines.
+// Events receives a run's progress.
+// Its methods may be called from several goroutines.
 type Events interface {
 	// Status reports what is happening to node, such as "building" or "cached".
 	Status(node graph.Ref, status string)
-	// Output passes on what node's run() steps print, or printed when its cached result was made, to stream:
-	// cache.StreamStdout or cache.StreamStderr. data is valid only during the call.
+	// Output passes on what node's run() steps print,
+	// or printed when its cached result was made, to stream: cache.StreamStdout or cache.StreamStderr.
+	// data is valid only during the call.
 	Output(node graph.Ref, stream byte, data []byte)
 	// Spans passes on spans of a trace that the client asked for, in batches, as they end.
 	Spans(spans []tracing.Span)
@@ -89,12 +90,12 @@ type Events interface {
 // executorProcess names the executor's spans' process in a trace.
 const executorProcess = "executor"
 
-// spanBatchSize is how many spans an executor gathers before sending them, so that a remote one needn't send a
-// message for each.
+// spanBatchSize is how many spans an executor gathers before sending them,
+// so that a remote one needn't send a message for each.
 const spanBatchSize = 256
 
-// forCall returns a context whose spans, if call asks for them, go to ev, in batches, and a function that sends
-// what is left of them, which the call must run, last, before it returns.
+// forCall returns a context whose spans, if call asks for them, go to ev, in batches,
+// and a function that sends what is left of them, which the call must run, last, before it returns.
 func forCall(ctx context.Context, call *tracing.CallContext, ev Events) (context.Context, func()) {
 	if call == nil {
 		return ctx, func() {}
@@ -104,6 +105,10 @@ func forCall(ctx context.Context, call *tracing.CallContext, ev Events) (context
 }
 
 // spanBatch gathers spans to send to events.
+// It detaches batches under mu and calls Events.Spans after unlocking,
+// so callbacks may overlap and batches may arrive out of completion order.
+// Detached slices are never reused.
+// The owner must stop producers before the final flush.
 type spanBatch struct {
 	ev    Events
 	mu    sync.Mutex
@@ -135,8 +140,8 @@ func (b *spanBatch) flush() {
 	}
 }
 
-// Result is what a root made. Exactly one of Image, Index and Files is set, unless the root is a task without
-// output.
+// Result is what a root made.
+// Exactly one of Image, Index and Files is set, unless the root is a task without output.
 type Result struct {
 	Node  graph.Ref
 	Image string      // a pull's or layer's image ID, in the executor's store
@@ -153,6 +158,7 @@ type Manifest struct {
 
 // Local is the executor that runs in this process, with buildah, on the local container store and build cache.
 // It opens them only once it needs them, so that commands which fail before building touch neither.
+// Calls on one Local, including Close, must be serialized by its owner.
 type Local struct {
 	systemContext *types.SystemContext
 	storeOptions  storage.StoreOptions
@@ -160,7 +166,8 @@ type Local struct {
 	cache         *cache.Cache
 }
 
-// NewLocal returns a local executor that reaches registries as sys says. The caller must close it.
+// NewLocal returns a local executor that reaches registries as sys says.
+// The caller must close it.
 func NewLocal(sys *types.SystemContext) (*Local, error) {
 	options, err := storage.DefaultStoreOptions()
 	if err != nil {
@@ -212,9 +219,10 @@ func (l *Local) Clock(context.Context) (time.Time, error) {
 	return time.Now(), nil
 }
 
-// Run runs the graph req names with buildah: its pulls first, then its layers, tasks and indexes in order. Each
-// layer's and task's result is kept in the build cache, and reused instead of running the target again whenever
-// a later build gives it the same inputs, unless it is a root and req.Rebuild is set.
+// Run runs the graph req names with buildah: its pulls first, then its layers, tasks and indexes in order.
+// Each layer's and task's result is kept in the build cache,
+// and reused instead of running the target again whenever a later build gives it the same inputs,
+// unless it is a root and req.Rebuild is set.
 func (l *Local) Run(ctx context.Context, req Request, ev Events) (_ []Result, err error) {
 	ctx, flush := forCall(ctx, req.Trace, ev)
 	defer flush() // after the span ends
@@ -223,8 +231,8 @@ func (l *Local) Run(ctx context.Context, req Request, ev Events) (_ []Result, er
 	if err := l.open(); err != nil {
 		return nil, err
 	}
-	// Read the graph as a remote executor would, rather than share the client's, so that nothing reaches the
-	// build but what the graph holds.
+	// Read the graph as a remote executor would, rather than share the client's,
+	// so that nothing reaches the build but what the graph holds.
 	data, err := l.cache.ReadBytes(req.Graph)
 	if err != nil {
 		return nil, fmt.Errorf("reading the build graph: %w", err)
@@ -390,9 +398,9 @@ func (l *Local) export(ctx context.Context, res Result, dest types.ImageReferenc
 	return "", errors.New("the target made no image")
 }
 
-// exportImage copies the image with ID id from the container store to dest, returning the ID it has
-// there: the digest of its config, as written there, which may differ from the store's if its
-// manifest is converted, as docker-archive does.
+// exportImage copies the image with ID id from the container store to dest, returning the ID it has there:
+// the digest of its config, as written there,
+// which may differ from the store's if its manifest is converted, as docker-archive does.
 func (l *Local) exportImage(ctx context.Context, id string, dest types.ImageReference, sys *types.SystemContext) (
 	string, error) {
 	src, err := is.Transport.NewStoreReference(l.store, nil, id)
@@ -416,9 +424,9 @@ func (l *Local) exportImage(ctx context.Context, id string, dest types.ImageRefe
 	return m.ConfigInfo().Digest.Encoded(), nil
 }
 
-// policyContext returns the signature policy to copy images under: the system's, as buildah follows when
-// committing, but trusting local storage and layouts, where vamos has just put the images. The caller
-// must destroy it.
+// policyContext returns the signature policy to copy images under: the system's, as buildah follows when committing,
+// but trusting local storage and layouts, where vamos has just put the images.
+// The caller must destroy it.
 func (l *Local) policyContext() (*signature.PolicyContext, error) {
 	policy, err := signature.DefaultPolicy(l.systemContext)
 	if err != nil {
@@ -432,13 +440,14 @@ func (l *Local) policyContext() (*signature.PolicyContext, error) {
 	return signature.NewPolicyContext(policy)
 }
 
-// exportIndex copies the images of manifests from the container store to dest, as an index listing each with its
-// platform, in order. It returns the digest of the index there.
+// exportIndex copies the images of manifests from the container store to dest,
+// as an index listing each with its platform, in order.
+// It returns the digest of the index there.
 func (l *Local) exportIndex(
 	ctx context.Context, manifests []Manifest, dest types.ImageReference, sys *types.SystemContext,
 ) (string, error) {
-	// containers/image copies an index, and its images, from a source that has one, so make one: an OCI
-	// layout holding the images, and an index of them, which its index.json names.
+	// containers/image copies an index, and its images, from a source that has one, so make one:
+	// an OCI layout holding the images, and an index of them, which its index.json names.
 	dir, err := os.MkdirTemp("", "vamos-index-")
 	if err != nil {
 		return "", err

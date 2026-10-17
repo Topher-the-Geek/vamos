@@ -24,9 +24,9 @@ func (e *spanEvents) Spans(spans []tracing.Span) {
 	e.batches = append(e.batches, spans)
 }
 
-// TestSpanBatches checks that the spans of a call, ended from several goroutines at once, each reach its events
-// exactly once, in batches no larger than spanBatchSize, the rest when the call flushes them, and none before it
-// unless a batch is full.
+// TestSpanBatches checks that the spans of a call, ended from several goroutines at once,
+// each reach its events exactly once, in batches no larger than spanBatchSize, the rest when the call flushes them,
+// and none before it unless a batch is full.
 func TestSpanBatches(t *testing.T) {
 	const goroutines, each = 8, 100 // more than spanBatchSize in all, but not a whole number of batches
 	ev := &spanEvents{}

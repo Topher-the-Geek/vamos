@@ -13,8 +13,9 @@ import (
 	"github.com/spf13/afero"
 )
 
-// TestWorkspace builds a target whose BUILD file uses targets of another package's: its base, a glob's
-// files, relative to that package, and a task's. Targets nothing needs are neither run nor checked.
+// TestWorkspace builds a target whose BUILD file uses targets of another package's:
+// its base, a glob's files, relative to that package, and a task's.
+// Targets nothing needs are neither run nor checked.
 func TestWorkspace(t *testing.T) {
 	requireBuildah(t)
 	nonce := newNonce()
@@ -73,8 +74,8 @@ task(name="test", base="app", steps=[run(["false"])], source="/app", include=["a
 	}
 }
 
-// TestWorkspaceRoot checks which directory labels are relative to: the nearest one with a WORKSPACE file
-// at or above -C, or else -C itself.
+// TestWorkspaceRoot checks which directory labels are relative to:
+// the nearest one with a WORKSPACE file at or above -C, or else -C itself.
 func TestWorkspaceRoot(t *testing.T) {
 	lib := pullBusybox + `glob(name="code", include=["lib.sh"])`
 	app := `layer(name="app", base="//lib:nope")`
@@ -205,8 +206,8 @@ task(name="make", base="busybox", source="/out", include=["made"])
 	}
 }
 
-// TestWorkspaceErrorInOtherPackage checks that an error in a BUILD file loaded for another's label is
-// reported where it is, as if that file were built itself.
+// TestWorkspaceErrorInOtherPackage checks that an error in a BUILD file loaded for another's label is reported
+// where it is, as if that file were built itself.
 func TestWorkspaceErrorInOtherPackage(t *testing.T) {
 	fsys := project(t, map[string]string{
 		"WORKSPACE": "",
@@ -272,8 +273,8 @@ func TestWorkspaceTargetMistakes(t *testing.T) {
 	}
 }
 
-// TestLabelsInOwnPackage checks that a BUILD file can name its own targets by label too, as long as they
-// are declared earlier.
+// TestLabelsInOwnPackage checks that a BUILD file can name its own targets by label too,
+// as long as they are declared earlier.
 func TestLabelsInOwnPackage(t *testing.T) {
 	for _, ref := range []string{":base", "//app:base"} {
 		t.Run(ref, func(t *testing.T) {
@@ -287,8 +288,8 @@ func TestLabelsInOwnPackage(t *testing.T) {
 	}
 }
 
-// TestWorkspaceSearchError checks that a WORKSPACE file that can't be checked stops the search for the
-// workspace's root, rather than letting a directory further up, or -C, become the root.
+// TestWorkspaceSearchError checks that a WORKSPACE file that can't be checked stops the search
+// for the workspace's root, rather than letting a directory further up, or -C, become the root.
 func TestWorkspaceSearchError(t *testing.T) {
 	fsys := &deniedFs{
 		Fs:   project(t, map[string]string{"WORKSPACE": "", "app/BUILD": `layer(name="app", base="scratch")`}),
@@ -313,8 +314,8 @@ func (f *deniedFs) Stat(path string) (fs.FileInfo, error) {
 	return f.Fs.Stat(path)
 }
 
-// TestPackageLinks checks that a label can't reach a package through a symbolic link, which could lead outside
-// the workspace, just as a glob can't include a file through one.
+// TestPackageLinks checks that a label can't reach a package through a symbolic link,
+// which could lead outside the workspace, just as a glob can't include a file through one.
 func TestPackageLinks(t *testing.T) {
 	fsys, root := diskProject(t, map[string]string{
 		"WORKSPACE": "",

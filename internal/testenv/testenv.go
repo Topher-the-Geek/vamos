@@ -1,5 +1,3 @@
-// Package testenv holds what several packages' tests share: projects to build, on an in-memory filesystem or on
-// disk, and checks of what a test may do.
 package testenv
 
 import (
@@ -24,8 +22,7 @@ func RequireBuildah(t *testing.T) {
 	}
 }
 
-// Project returns an in-memory filesystem holding files, keyed by their path within
-// ProjectDir.
+// Project returns an in-memory filesystem holding files, keyed by their path within ProjectDir.
 func Project(t *testing.T, files map[string]string) afero.Fs {
 	t.Helper()
 	fsys := afero.NewMemMapFs()
@@ -45,9 +42,9 @@ func Project(t *testing.T, files map[string]string) afero.Fs {
 	return fsys
 }
 
-// DiskProject is like Project, but keeps the files on disk, under root/project, for tests
-// that need symbolic links or that write into the project. Links maps a link's path within
-// ProjectDir to its target.
+// DiskProject is like Project, but keeps the files on disk, under root/project,
+// for tests that need symbolic links or that write into the project.
+// Links maps a link's path within ProjectDir to its target.
 func DiskProject(t *testing.T, files, links map[string]string) (fsys afero.Fs, root string) {
 	t.Helper()
 	root = t.TempDir()
@@ -81,8 +78,8 @@ func Must(t *testing.T, err error) {
 	}
 }
 
-// EditedFs is a filesystem in which the file File is changed to hold Edit when it is opened for the
-// At'th time, or the second if At is zero, as if it were edited while a build reads it.
+// EditedFs is a filesystem in which the file File is changed to hold Edit when it is opened for the At'th time,
+// or the second if At is zero, as if it were edited while a build reads it.
 type EditedFs struct {
 	afero.Fs
 	File, Edit string

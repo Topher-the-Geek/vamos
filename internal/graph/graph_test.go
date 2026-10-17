@@ -24,8 +24,8 @@ func testSelection(t *testing.T, include, exclude []string, change func(sel *fil
 	return sel
 }
 
-// testGraph returns a valid graph that uses every kind of node and step: a glob's files, built by a task on a
-// pulled image, are added to a layer, which an index lists.
+// testGraph returns a valid graph that uses every kind of node and step:
+// a glob's files, built by a task on a pulled image, are added to a layer, which an index lists.
 func testGraph(t *testing.T) *Graph {
 	t.Helper()
 	from := func(ref Ref) *Ref { return &ref }

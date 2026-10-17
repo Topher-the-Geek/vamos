@@ -23,10 +23,12 @@ var (
 	errNotDir   = errors.New("it isn't a directory")
 )
 
-// removeAll removes what an export replaced. Tests replace it, to make it fail.
+// removeAll removes what an export replaced.
+// Tests replace it, to make it fail.
 var removeAll = os.RemoveAll
 
-// exchange swaps the names a and b in one step. Tests replace it, to make it fail.
+// exchange swaps the names a and b in one step.
+// Tests replace it, to make it fail.
 var exchange = defaultExchange
 
 // defaultExchange swaps the names a and b with renameat2(RENAME_EXCHANGE).
@@ -34,9 +36,10 @@ func defaultExchange(a, b string) error {
 	return unix.Renameat2(unix.AT_FDCWD, a, unix.AT_FDCWD, b, unix.RENAME_EXCHANGE)
 }
 
-// CheckExportDest reports, before anything is built, if export can't write a task's files to dir: if its parent
-// folder is missing or can't be written, or dir is a file or link, or holds anything and replace isn't set. dir
-// may change before the files are installed, so Export decides by what it holds then.
+// CheckExportDest reports, before anything is built, if export can't write a task's files to dir:
+// if its parent folder is missing or can't be written,
+// or dir is a file or link, or holds anything and replace isn't set.
+// dir may change before the files are installed, so Export decides by what it holds then.
 func CheckExportDest(dir string, replace bool) error {
 	parent := filepath.Dir(dir)
 	if info, err := os.Stat(parent); errors.Is(err, fs.ErrNotExist) {
@@ -71,11 +74,12 @@ func CheckExportDest(dir string, replace bool) error {
 	return nil
 }
 
-// Export writes the files of res, a task's, to dir, from the build cache c, replacing what dir holds if replace
-// is set, and calls warn if what it replaced can't be removed. It stages the files in a new folder beside dir, gives
-// them their times and owners, and then installs the folder at dir in one step, so that dir holds either what it
-// did or all the task's files, never a mix. Files that appear in dir during the build are never removed without
-// replace.
+// Export writes the files of res, a task's, to dir, from the build cache c, replacing what dir holds if replace is set,
+// and calls warn if what it replaced can't be removed.
+// It stages the files in a new folder beside dir, gives them their times and owners,
+// and then installs the folder at dir in one step,
+// so that dir holds either what it did or all the task's files, never a mix.
+// Files that appear in dir during the build are never removed without replace.
 func Export(
 	ctx context.Context, c *cache.Cache, res run.Result, dir string, replace bool, warn func(error),
 ) (err error) {
@@ -119,8 +123,8 @@ func Export(
 	return nil
 }
 
-// makeStaging makes a new, empty folder beside dir, on the same filesystem, to stage files for it in. It has the
-// usual mode of a new folder.
+// makeStaging makes a new, empty folder beside dir, on the same filesystem, to stage files for it in.
+// It has the usual mode of a new folder.
 func makeStaging(dir string) (string, error) {
 	for {
 		name := filepath.Join(filepath.Dir(dir), fmt.Sprintf(".%s.vamos-%d", filepath.Base(dir), rand.Uint32()))
@@ -134,11 +138,13 @@ func makeStaging(dir string) (string, error) {
 	}
 }
 
-// setMetadata sets the times of everything within root, root included, to epoch, so that the same tree exports
-// the same files, and, if vamos runs as root, gives each the owner and group of root's parent folder, so that
-// files written into a project belong to its owner, not root. Neither follows links: a link may point anywhere
-// on the host, and following it would change a file there. Each folder is set after what it holds. Changing an
-// owner clears the setuid and setgid bits, so they are set again after.
+// setMetadata sets the times of everything within root, root included, to epoch,
+// so that the same tree exports the same files,
+// and, if vamos runs as root, gives each the owner and group of root's parent folder,
+// so that files written into a project belong to its owner, not root.
+// Neither follows links: a link may point anywhere on the host, and following it would change a file there.
+// Each folder is set after what it holds.
+// Changing an owner clears the setuid and setgid bits, so they are set again after.
 func setMetadata(root string, epoch time.Time) error {
 	uid, gid := -1, -1
 	if os.Geteuid() == 0 {
@@ -185,9 +191,10 @@ func setMetadata(root string, epoch time.Time) error {
 }
 
 // install puts the folder staged in place at dir in one step, and returns where what it replaced is, if anything.
-// Without replace, dir must be missing or an empty folder, as the kernel checks as it renames. With replace, a
-// folder at dir is swapped with staged, so that dir is never missing, and staged then holds the folder; anything
-// else at dir is kept, and refused. If what was at dir can't be put back, it is left where install returns.
+// Without replace, dir must be missing or an empty folder, as the kernel checks as it renames.
+// With replace, a folder at dir is swapped with staged, so that dir is never missing,
+// and staged then holds the folder; anything else at dir is kept, and refused.
+// If what was at dir can't be put back, it is left where install returns.
 func install(staged, dir string, replace bool) (string, error) {
 	if !replace {
 		// Not os.Rename, which refuses to rename onto a folder, even an empty one.
@@ -221,8 +228,8 @@ func install(staged, dir string, replace bool) (string, error) {
 	return staged, nil
 }
 
-// swap installs staged at dir as install does with replace, on a filesystem that can't exchange two names in one
-// step. It moves the folder at dir aside, then staged into its place, so dir is briefly missing.
+// swap installs staged at dir as install does with replace, on a filesystem that can't exchange two names in one step.
+// It moves the folder at dir aside, then staged into its place, so dir is briefly missing.
 func swap(staged, dir string) (string, error) {
 	aside, err := makeStaging(dir)
 	if err != nil {

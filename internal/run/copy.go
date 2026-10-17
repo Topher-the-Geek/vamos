@@ -15,13 +15,13 @@ import (
 	"go.podman.io/image/v5/types"
 )
 
-// progressInterval is how often containers/image would report a blob's progress. It sends no events at all
-// unless this is set, but a trace has no use for the reads between a blob's start and end, so it is long enough
-// that there are none.
+// progressInterval is how often containers/image would report a blob's progress.
+// It sends no events at all unless this is set,
+// but a trace has no use for the reads between a blob's start and end, so it is long enough that there are none.
 const progressInterval = time.Hour
 
-// tracedCopy copies the image or index src to dest, as imagecopy.Image does, returning the manifest written. If
-// ctx is traced, the copy is a span, holding a span for each blob copied, and an instant for each skipped.
+// tracedCopy copies the image or index src to dest, as imagecopy.Image does, returning the manifest written.
+// If ctx is traced, the copy is a span, holding a span for each blob copied, and an instant for each skipped.
 func tracedCopy(ctx context.Context, policyContext *signature.PolicyContext, dest, src types.ImageReference,
 	options *imagecopy.Options) ([]byte, error) {
 	if !tracing.Enabled(ctx) {
@@ -50,8 +50,8 @@ func tracedCopy(ctx context.Context, policyContext *signature.PolicyContext, des
 	return written, err
 }
 
-// writtenArgs returns what a trace records of the manifest a copy wrote: its digest, and the blobs it lists, as
-// the destination has them, or the manifests of an index.
+// writtenArgs returns what a trace records of the manifest a copy wrote: its digest,
+// and the blobs it lists, as the destination has them, or the manifests of an index.
 func writtenArgs(written []byte) []any {
 	args := []any{"manifest", digest.FromBytes(written).String()}
 	mimeType := manifest.GuessMIMEType(written)
@@ -83,9 +83,12 @@ func writtenArgs(written []byte) []any {
 	return append(args, "blobs", blobs)
 }
 
-// blobTracker makes spans of the blobs of a copy from the events containers/image sends. They don't pair up: a
-// blob skipped, as already at the destination, is reported with no start, and a blob whose copy fails or is
-// cancelled has no end.
+// blobTracker makes spans of the blobs of a copy from the events containers/image sends.
+// They don't pair up: a blob skipped, as already at the destination, is reported with no start,
+// and a blob whose copy fails or is cancelled has no end.
+// event is confined to tracedCopy's progress goroutine.
+// close runs only after that goroutine finishes, so open needs no mutex.
+// Do not use the tracker concurrently.
 type blobTracker struct {
 	ctx  context.Context
 	open map[digest.Digest][]*tracing.Active // spans of blobs being copied, by source digest, earliest first
@@ -96,8 +99,9 @@ func newBlobTracker(ctx context.Context) *blobTracker {
 	return &blobTracker{ctx: ctx, open: map[digest.Digest][]*tracing.Active{}}
 }
 
-// event records what p reports. Its Artifact is the source's blob, which may differ from the destination's, as
-// when a layer is compressed, and its Offset, once done, is how many bytes the destination took.
+// event records what p reports.
+// Its Artifact is the source's blob, which may differ from the destination's, as when a layer is compressed,
+// and its Offset, once done, is how many bytes the destination took.
 func (b *blobTracker) event(p types.ProgressProperties) {
 	d := p.Artifact.Digest
 	switch p.Event {
@@ -138,8 +142,8 @@ func (b *blobTracker) close(ctx context.Context, err error) {
 	}
 }
 
-// sourceArgs returns what a trace records of the source's blob info: its digest, its size if known, and its media
-// type if given.
+// sourceArgs returns what a trace records of the source's blob info:
+// its digest, its size if known, and its media type if given.
 func sourceArgs(info types.BlobInfo) []any {
 	args := []any{"source digest", info.Digest.String()}
 	if info.Size >= 0 {

@@ -157,9 +157,10 @@ layer(name="server", base="inner")`,
 	}
 }
 
-// indexBuild has an index of a layer on scratch, which runs nothing, for the host's platform and another,
-// listed in that order. The index passes its own parameter on to the layer. nonce makes the targets unique to a
-// test run.
+// indexBuild has an index of a layer on scratch,
+// which runs nothing, for the host's platform and another, listed in that order.
+// The index passes its own parameter on to the layer.
+// nonce makes the targets unique to a test run.
 func indexBuild(nonce string) string {
 	return fmt.Sprintf(`
 glob(name="code", include=["app.sh"])
@@ -179,8 +180,8 @@ index(
 `, nonce, native, foreign())
 }
 
-// TestIndex builds an index, and sends it: push sends every manifest, in order, with its platform, while save
-// and load, which take one image, send the manifest for the platform of the machine that will run it.
+// TestIndex builds an index, and sends it: push sends every manifest, in order, with its platform, while save and load,
+// which take one image, send the manifest for the platform of the machine that will run it.
 func TestIndex(t *testing.T) {
 	requireBuildah(t)
 	nonce := newNonce()
@@ -315,8 +316,9 @@ index(name="server", layer={"%s": "other", "%s": dep("host")})
 	}
 }
 
-// TestIndexChoosesManifest checks that save and load, which send one image of an index, configure only the
-// manifest they send: another, which fails as it is configured, fails only a command that builds every manifest.
+// TestIndexChoosesManifest checks that save and load,
+// which send one image of an index, configure only the manifest they send: another,
+// which fails as it is configured, fails only a command that builds every manifest.
 func TestIndexChoosesManifest(t *testing.T) {
 	requireBuildah(t)
 	nonce := newNonce()
@@ -345,9 +347,9 @@ index(name="server", layer={"linux/s390x": "broken", "linux/amd64": "app", "linu
 	}
 }
 
-// TestPlatformVariants checks that a platform's variant reaches each place it is given: the image a layer
-// commits, an index's descriptors, and the manifest chosen for a destination, where a manifest for another
-// variant of the same architecture, listed first, doesn't match.
+// TestPlatformVariants checks that a platform's variant reaches each place it is given:
+// the image a layer commits, an index's descriptors, and the manifest chosen for a destination,
+// where a manifest for another variant of the same architecture, listed first, doesn't match.
 func TestPlatformVariants(t *testing.T) {
 	requireBuildah(t)
 	nonce := newNonce()

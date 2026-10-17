@@ -20,8 +20,8 @@ func testSelection(t *testing.T, include, exclude []string) *fileset.Selection {
 	return sel
 }
 
-// TestActionKeyStable pins how an action is encoded, and so every target's key: a change that alters it would
-// make every cached result unusable, so it must be deliberate, and raise actionVersion.
+// TestActionKeyStable pins how an action is encoded, and so every target's key:
+// a change that alters it would make every cached result unusable, so it must be deliberate, and raise actionVersion.
 func TestActionKeyStable(t *testing.T) {
 	files := cache.Blob{Digest: digest.FromString("files"), Size: 5}
 	a := &action{

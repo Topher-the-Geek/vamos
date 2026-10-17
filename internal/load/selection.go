@@ -9,9 +9,10 @@ import (
 	"go.starlark.net/starlark"
 )
 
-// selectionParams returns the parameters of glob() and task() that make sel, for starlark.UnpackArgs. Its
-// include and exclude lists are unpacked into include and exclude, which selectFiles then checks, and the
-// rest into sel. include is optional unless required.
+// selectionParams returns the parameters of glob() and task() that make sel, for starlark.UnpackArgs.
+// Its include and exclude lists are unpacked into include and exclude,
+// which selectFiles then checks, and the rest into sel.
+// include is optional unless required.
 func selectionParams(sel *fileset.Selection, include, exclude **starlark.List, required bool) []any {
 	includeParam := "include?"
 	if required {
@@ -28,8 +29,8 @@ func selectionParams(sel *fileset.Selection, include, exclude **starlark.List, r
 	}
 }
 
-// isSelectionParam reports whether name is one of the parameters that selectionParams returns, so that task() can
-// tell those given without source from its own.
+// isSelectionParam reports whether name is one of the parameters that selectionParams returns,
+// so that task() can tell those given without source from its own.
 func isSelectionParam(name string) bool {
 	params := selectionParams(fileset.DefaultSelection(), new(*starlark.List), new(*starlark.List), false)
 	for i := 0; i < len(params); i += 2 {
@@ -40,8 +41,8 @@ func isSelectionParam(name string) bool {
 	return false
 }
 
-// selectFiles sets sel's patterns from the include and exclude arguments of a call to fnName, and checks
-// them, relative to dir.
+// selectFiles sets sel's patterns from the include and exclude arguments of a call to fnName,
+// and checks them, relative to dir.
 func selectFiles(sel *fileset.Selection, fnName string, include, exclude *starlark.List, dir string) error {
 	var err error
 	if sel.Include, err = stringList(fnName, "include", include); err != nil {

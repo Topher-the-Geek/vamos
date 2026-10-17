@@ -13,8 +13,8 @@ import (
 	"github.com/spf13/afero"
 )
 
-// TestPutFileChanged checks that a file that changes while it is stored is described by the
-// content stored, not the content it had when it was first read.
+// TestPutFileChanged checks that a file that changes while it is stored is described by the content stored,
+// not the content it had when it was first read.
 func TestPutFileChanged(t *testing.T) {
 	fsys := &testenv.EditedFs{Fs: afero.NewMemMapFs(), File: "/a.txt", Edit: "new"}
 	testenv.Must(t, afero.WriteFile(fsys.Fs, "/a.txt", []byte("old"), 0o644))
@@ -28,8 +28,8 @@ func TestPutFileChanged(t *testing.T) {
 	}
 }
 
-// TestPutFileEndless checks that putFile reads no more of a file than its limit allows, so that a file that
-// keeps growing, such as a log, can't fill the cache.
+// TestPutFileEndless checks that putFile reads no more of a file than its limit allows,
+// so that a file that keeps growing, such as a log, can't fill the cache.
 func TestPutFileEndless(t *testing.T) {
 	fsys := &endlessFs{Fs: afero.NewMemMapFs()}
 	testenv.Must(t, afero.WriteFile(fsys.Fs, "/log", nil, 0o644))
@@ -42,8 +42,8 @@ func TestPutFileEndless(t *testing.T) {
 	}
 }
 
-// endlessFs is a filesystem whose files never end. Reading more than a mebibyte of one fails, rather than
-// running until the disk is full.
+// endlessFs is a filesystem whose files never end.
+// Reading more than a mebibyte of one fails, rather than running until the disk is full.
 type endlessFs struct {
 	afero.Fs
 }
@@ -69,8 +69,8 @@ func (f *endlessFile) Read(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// TestActionResults checks that the latest result for a key is kept, and that a key with
-// none, or with one that can't be read, has no result.
+// TestActionResults checks that the latest result for a key is kept,
+// and that a key with none, or with one that can't be read, has no result.
 func TestActionResults(t *testing.T) {
 	c := newTestCache(t)
 	key := digest.FromString("an action")
@@ -127,8 +127,8 @@ func TestLogReplay(t *testing.T) {
 	}
 }
 
-// TestCheckoutRefusesEscapes checks that a tree in the cache can't write outside the folder it
-// is checked out to, even if it has been tampered with.
+// TestCheckoutRefusesEscapes checks that a tree in the cache can't write outside the folder it is checked out to,
+// even if it has been tampered with.
 func TestCheckoutRefusesEscapes(t *testing.T) {
 	tests := []struct {
 		name    string

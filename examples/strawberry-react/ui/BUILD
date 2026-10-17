@@ -102,8 +102,8 @@ VITE_MODES = {
     "release": "production",
 }
 
-# The bundle is the same on every platform, so it is built once, natively. It still depends on the
-# languages, through "messages", and on the mode.
+# The bundle is the same on every platform, so it is built once, natively.
+# It still depends on the languages, through "messages", and on the mode.
 task(
     name = "build",
     params = {
@@ -148,7 +148,8 @@ index(
     platforms = PLATFORMS,
 )
 
-# Makes no files. Run it with `vamos build //ui:lint`.
+# Makes no files.
+# Run it with `vamos build //ui:lint`.
 task(
     name = "lint",
     base = "packages",

@@ -114,8 +114,8 @@ layer(name="tests", params={"mode": "release"}, base="scratch")
 layer(name="server", params={"shards": param(type="int")}, base="scratch")
 `
 
-// TestSetMistakes checks the errors for --set flags that don't give a parameter of the named target a value it
-// can have.
+// TestSetMistakes checks the errors for --set flags
+// that don't give a parameter of the named target a value it can have.
 func TestSetMistakes(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -196,8 +196,8 @@ func TestSetMistakes(t *testing.T) {
 	}
 }
 
-// TestSetSeveralTargets checks that building several targets gives each --set flag to those that have the
-// parameter, and leaves out the others.
+// TestSetSeveralTargets checks that building several targets gives each --set flag to those that have the parameter,
+// and leaves out the others.
 func TestSetSeveralTargets(t *testing.T) {
 	requireBuildah(t)
 	fsys := project(t, map[string]string{"BUILD": paramsBuild})
@@ -209,8 +209,8 @@ func TestSetSeveralTargets(t *testing.T) {
 	}
 }
 
-// TestDepMistakes checks the errors for targets named with arguments: from dep() and arg(), from functions of ctx,
-// and from what those functions give.
+// TestDepMistakes checks the errors for targets named with arguments:
+// from dep() and arg(), from functions of ctx, and from what those functions give.
 func TestDepMistakes(t *testing.T) {
 	// lib takes parameters of each kind, and server one that every use must give.
 	const libs = `layer(
@@ -596,9 +596,9 @@ layer(name="app", base=BASE)`,
 	}
 }
 
-// paramBuild has targets that take parameters: a glob reads languages, and a task mode, while another task
-// takes none. app passes its own parameters on to them, and names "mode" with an argument of its own too. nonce
-// makes the targets unique to a test run.
+// paramBuild has targets that take parameters: a glob reads languages, and a task mode, while another task takes none.
+// app passes its own parameters on to them, and names "mode" with an argument of its own too.
+// nonce makes the targets unique to a test run.
 func paramBuild(nonce string) string {
 	return pullBusybox + `
 glob(
@@ -638,9 +638,9 @@ layer(
 `
 }
 
-// TestParams builds a target with the arguments that the command line and dep() give: they reach the functions
-// of ctx of the targets they're passed to, a target that takes none is built once, and one named with two
-// arguments is built with each.
+// TestParams builds a target with the arguments that the command line and dep() give:
+// they reach the functions of ctx of the targets they're passed to, a target that takes none is built once,
+// and one named with two arguments is built with each.
 func TestParams(t *testing.T) {
 	requireBuildah(t)
 	nonce := newNonce()
@@ -704,9 +704,9 @@ func TestParams(t *testing.T) {
 	}
 }
 
-// TestLoadStarFile builds a target whose BUILD file loads helpers from a .star file: a function that declares a
-// target, and one that gives an attribute as a function of ctx. Relative labels in either name targets of
-// the package of the BUILD file that calls them.
+// TestLoadStarFile builds a target whose BUILD file loads helpers from a .star file:
+// a function that declares a target, and one that gives an attribute as a function of ctx.
+// Relative labels in either name targets of the package of the BUILD file that calls them.
 func TestLoadStarFile(t *testing.T) {
 	requireBuildah(t)
 	nonce := newNonce()

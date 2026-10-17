@@ -19,8 +19,9 @@ func main() {
 	}
 	unshare.MaybeReexecUsingUserNamespace(false)
 
-	// On Ctrl-C or SIGTERM, cancel the build so its deferred cleanup runs: the temporary
-	// tarball, the working container and the copied sources. A second signal kills vamos.
+	// On Ctrl-C or SIGTERM, cancel the build so its deferred cleanup runs:
+	// the temporary tarball, the working container and the copied sources.
+	// A second signal kills vamos.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-ctx.Done()

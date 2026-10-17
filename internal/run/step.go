@@ -30,7 +30,8 @@ type targetState struct {
 }
 
 // lookup returns a function that gives the value of a variable as a run in the target would see it now:
-// set by build_env(), or else in the image's config. An unset variable is empty.
+// set by build_env(), or else in the image's config.
+// An unset variable is empty.
 func (st *targetState) lookup() func(name string) string {
 	env := map[string]string{}
 	for _, v := range st.builder.Env() {
@@ -41,8 +42,8 @@ func (st *targetState) lookup() func(name string) string {
 	return func(name string) string { return env[name] }
 }
 
-// expandPath expands the variables in p, a step's argument param, which CheckPath has checked,
-// and returns it cleaned. It must then be absolute.
+// expandPath expands the variables in p, a step's argument param, which CheckPath has checked, and returns it cleaned.
+// It must then be absolute.
 func (st *targetState) expandPath(param, p string) (string, error) {
 	expanded, err := graph.ExpandVars(p, st.lookup())
 	if err != nil {
@@ -61,8 +62,8 @@ func (st *targetState) tracedApply(ctx context.Context, in graph.Step, files *ca
 	return st.apply(ctx, in, files)
 }
 
-// apply performs the step in on the target being built, recording what it did in ctx's span. files is the tree of
-// its source, stored in the cache, or nil if it has none.
+// apply performs the step in on the target being built, recording what it did in ctx's span.
+// files is the tree of its source, stored in the cache, or nil if it has none.
 func (st *targetState) apply(ctx context.Context, in graph.Step, files *cache.Blob) error {
 	span := tracing.Current(ctx)
 	switch in.Op {
@@ -137,8 +138,8 @@ func (st *targetState) apply(ctx context.Context, in graph.Step, files *cache.Bl
 			return err
 		}
 		span.Set("dir", dir)
-		// As a Dockerfile's WORKDIR does, a new directory belongs to the image's user, so later runs can write
-		// to it. buildah works within the container's root, so a link in the image can't lead outside it.
+		// As a Dockerfile's WORKDIR does, a new directory belongs to the image's user, so later runs can write to it.
+		// buildah works within the container's root, so a link in the image can't lead outside it.
 		mode := os.FileMode(0o755)
 		if err := st.builder.EnsureContainerPathAs(dir, st.builder.User(), &mode); err != nil {
 			return err
@@ -175,8 +176,8 @@ func actionEntry(in graph.Step) actionStep {
 	return actionStep{Op: in.Op}
 }
 
-// chown returns the owner of an add()'s files, given its owner and group, as buildah's Chown option takes it,
-// or "" for root.
+// chown returns the owner of an add()'s files, given its owner and group,
+// as buildah's Chown option takes it, or "" for root.
 func chown(owner, group string) string {
 	switch {
 	case group == "":

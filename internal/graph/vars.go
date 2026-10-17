@@ -7,8 +7,8 @@ import (
 	"strings"
 )
 
-// ExpandVars replaces $NAME and ${NAME} in s with lookup(NAME), and $$ with $. Any other $ is an error,
-// so that a Dockerfile's ${NAME:-default}, which isn't supported, can't silently become empty.
+// ExpandVars replaces $NAME and ${NAME} in s with lookup(NAME), and $$ with $.
+// Any other $ is an error, so that a Dockerfile's ${NAME:-default}, which isn't supported, can't silently become empty.
 func ExpandVars(s string, lookup func(string) string) (string, error) {
 	var b strings.Builder
 	for {
@@ -44,8 +44,8 @@ func ExpandVars(s string, lookup func(string) string) (string, error) {
 	}
 }
 
-// isVarName reports whether name is a variable's name that ExpandVars recognizes: a letter or
-// underscore, then letters, digits and underscores.
+// isVarName reports whether name is a variable's name that ExpandVars recognizes:
+// a letter or underscore, then letters, digits and underscores.
 func isVarName(name string) bool {
 	for i, r := range name {
 		letter := r == '_' || 'a' <= r && r <= 'z' || 'A' <= r && r <= 'Z'
@@ -56,9 +56,9 @@ func isVarName(name string) bool {
 	return name != ""
 }
 
-// CheckPath checks p, a step's argument param, which may refer to variables: that they are
-// written as ExpandVars expects, and that p is absolute, unless it starts with one, which is only
-// known once it is expanded.
+// CheckPath checks p, a step's argument param, which may refer to variables:
+// that they are written as ExpandVars expects, and that p is absolute,
+// unless it starts with one, which is only known once it is expanded.
 func CheckPath(param, p string) error {
 	if strings.Contains(p, "\x00") {
 		return fmt.Errorf("%s %q must not contain a NUL byte", param, p)
