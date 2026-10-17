@@ -24,7 +24,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	"github.com/spf13/afero"
-	"go.podman.io/image/v5/pkg/sysregistriesv2"
+	"go.podman.io/storage"
 )
 
 // helloBuild copies a source file into busybox and sets a command that echoes.
@@ -764,9 +764,7 @@ layer(
 // so that later runs, which run as that user, can write to it.
 func TestWorkdirUser(t *testing.T) {
 	requireBuildah(t)
-	server := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))
-	t.Cleanup(server.Close)
-	host := strings.TrimPrefix(server.URL, "http://")
+	_, host := insecureRegistry(t, nil)
 
 	// busybox runs as root, so push it to the registry with a user that isn't.
 	// A pull() can be sent as it is.
@@ -1075,9 +1073,7 @@ func TestPush(t *testing.T) {
 	// Locally both are this process.
 	for _, from := range []string{"executor", "client"} {
 		t.Run(from, func(t *testing.T) {
-			server := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))
-			t.Cleanup(server.Close)
-			host := strings.TrimPrefix(server.URL, "http://")
+			_, host := insecureRegistry(t, nil)
 			image := host + "/team/app:v1"
 
 			r := vamos(t, project(t, helloBuild), "push", "app", image, "--push-from", from, "--tls-verify=false",
@@ -1104,29 +1100,25 @@ func TestPush(t *testing.T) {
 	}
 }
 
-func TestPushToRegistryMarkedInsecure(t *testing.T) {
+// TestTLSVerifyIsTheClients checks that --tls-verify applies to the client's own registry access alone:
+// against a registry over plain HTTP that registries.conf doesn't mark insecure, a push from the client
+// with --tls-verify=false succeeds, while the executor's push fails whatever the flag says.
+func TestTLSVerifyIsTheClients(t *testing.T) {
 	requireBuildah(t)
 	server := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))
 	t.Cleanup(server.Close)
 	host := strings.TrimPrefix(server.URL, "http://")
-	conf := filepath.Join(t.TempDir(), "registries.conf")
-	content := "[[registry]]\nlocation = \"" + host + "\"\ninsecure = true\n"
-	if err := os.WriteFile(conf, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("CONTAINERS_REGISTRIES_CONF", conf)
-	// containers/image caches registries.conf without noticing the variable change.
-	sysregistriesv2.InvalidateCache()
-	t.Cleanup(sysregistriesv2.InvalidateCache)
-
-	// registries.conf, not --tls-verify, allows plain HTTP here.
-	vamos(t, project(t, helloBuild), "push", "app", host+"/app", "-C", projectDir).succeeds(t)
+	fsys := project(t, helloBuild)
+	vamos(t, fsys, "push", "app", host+"/app", "--tls-verify=false", "-C", projectDir).
+		failsWith(t, false, "pushing to "+host+"/app:latest", "HTTP response to HTTPS client")
+	vamos(t, fsys, "push", "app", host+"/app", "--tls-verify=false", "--push-from=client", "-C", projectDir).
+		succeeds(t)
 }
 
 func TestPushWithAuthFile(t *testing.T) {
 	requireBuildah(t)
 	reg := registry.New(registry.Logger(log.New(io.Discard, "", 0)))
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, host := insecureRegistry(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if user, password, ok := r.BasicAuth(); !ok || user != "vamos" || password != "secret" {
 			w.Header().Set("WWW-Authenticate", `Basic realm="test"`)
 			http.Error(w, `{"errors":[{"code":"UNAUTHORIZED","message":"log in"}]}`, http.StatusUnauthorized)
@@ -1134,8 +1126,6 @@ func TestPushWithAuthFile(t *testing.T) {
 		}
 		reg.ServeHTTP(w, r)
 	}))
-	t.Cleanup(server.Close)
-	host := strings.TrimPrefix(server.URL, "http://")
 	t.Setenv("REGISTRY_AUTH_FILE", filepath.Join(t.TempDir(), "auth.json"))
 	auth := base64.StdEncoding.EncodeToString([]byte("vamos:secret"))
 	content := `{"auths": {"` + host + `": {"auth": "` + auth + `"}}}`
@@ -1148,12 +1138,17 @@ func TestPushWithAuthFile(t *testing.T) {
 
 func TestPushFailures(t *testing.T) {
 	requireBuildah(t)
+	// A registry over plain HTTP that registries.conf doesn't mark insecure.
 	server := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))
 	t.Cleanup(server.Close)
 	host := strings.TrimPrefix(server.URL, "http://")
 
-	t.Run("registry over HTTP without --tls-verify=false", func(t *testing.T) {
+	t.Run("registry over HTTP not marked insecure", func(t *testing.T) {
 		vamos(t, project(t, helloBuild), "push", "app", host+"/app", "-C", projectDir).
+			failsWith(t, false, "pushing to "+host+"/app:latest", "HTTP response to HTTPS client")
+	})
+	t.Run("registry over HTTP, from the client without --tls-verify=false", func(t *testing.T) {
+		vamos(t, project(t, helloBuild), "push", "app", host+"/app", "--push-from=client", "-C", projectDir).
 			failsWith(t, false, "pushing to "+host+"/app:latest", "HTTP response to HTTPS client")
 	})
 	t.Run("registry not running", func(t *testing.T) {
@@ -1371,6 +1366,14 @@ func TestInterrupted(t *testing.T) {
 	vamosWithOutput(t, fsys, ctx, watch, "save", "app", filepath.Join(out, "app.tar"), "-C", projectDir).
 		failsWith(t, false, "context canceled")
 	assertNoFiles(t, out)
+	// The cancellation was reported only once the step's container was removed.
+	withStore(t, func(store storage.Store) {
+		containers, err := store.Containers()
+		must(t, err)
+		if len(containers) != 0 {
+			t.Errorf("%d containers left in the store after the interrupted build", len(containers))
+		}
+	})
 }
 
 // writerFunc is an io.Writer that calls itself.

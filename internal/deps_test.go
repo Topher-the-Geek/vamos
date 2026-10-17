@@ -10,7 +10,8 @@ import (
 const module = "github.com/Topher-the-Geek/vamos/internal/"
 
 // TestImportRules checks which packages each of vamos's may depend on, directly or not: load must not reach buildah,
-// so that it could run where buildah can't, and run must not reach Starlark, so that a graph is all an executor needs.
+// so that it could run where buildah can't, run must not reach Starlark, so that a graph is all an executor needs,
+// and api must reach neither buildah nor the container store, so that a client of a remote executor needs neither.
 func TestImportRules(t *testing.T) {
 	starlark := "go.starlark.net/..."
 	buildah := "go.podman.io/buildah/..."
@@ -40,8 +41,23 @@ func TestImportRules(t *testing.T) {
 			not:      []string{starlark, buildah, storage},
 		},
 		{
+			pkg:      "api",
+			internal: []string{"cache", "fileset", "graph", "tracing"},
+			not:      []string{starlark, buildah, storage},
+		},
+		{
+			pkg:      "api/apitest",
+			internal: []string{"api", "cache", "fileset", "graph", "tracing"},
+			not:      []string{starlark, buildah, storage},
+		},
+		{
 			pkg: "load",
 			not: []string{buildah, storage, "go.podman.io/image/v5/copy", module + "run", module + "finish"},
+		},
+		{
+			pkg:      "transfer",
+			internal: []string{"cache", "tracing"},
+			not:      []string{starlark, buildah, storage},
 		},
 		{
 			pkg: "run",
@@ -49,7 +65,7 @@ func TestImportRules(t *testing.T) {
 		},
 		{
 			pkg: "finish",
-			not: []string{starlark, module + "load"},
+			not: []string{starlark, buildah, storage, module + "load", module + "run"},
 		},
 	}
 	for _, rule := range rules {

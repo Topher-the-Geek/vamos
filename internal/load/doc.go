@@ -10,6 +10,8 @@
 // # Lifecycle
 //
 // Declaration, configuration, lowering and source capture are separate stages.
+// Each honours the load's context: cancelWith stops a Starlark thread when it ends, and the load reports
+// the interruption as the context's error, not the BUILD file's.
 // Their state is private to one Load call.
 // The returned graph and cached sources are the complete handoff; an executor must never need evaluation state.
 //

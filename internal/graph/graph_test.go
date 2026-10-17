@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -30,7 +31,8 @@ func testGraph(t *testing.T) *Graph {
 	t.Helper()
 	from := func(ref Ref) *Ref { return &ref }
 	return &Graph{
-		Version: Version,
+		Version:      Version,
+		ExecPlatform: "linux/amd64",
 		Nodes: []Node{
 			{Label: "src", Desc: `glob "src"`, Source: &Source{
 				Tree: cache.Blob{Digest: digest.FromString("tree"), Size: 4},
@@ -78,7 +80,7 @@ func TestGraphValidate(t *testing.T) {
 		{
 			name:   "another version",
 			change: func(g *Graph) { g.Version = 0 },
-			want:   "invalid build graph: version 0, want 1",
+			want:   fmt.Sprintf("invalid build graph: version 0, want %d", Version),
 		},
 		{
 			name:   "no kind",

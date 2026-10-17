@@ -28,9 +28,10 @@ func TestCacheTreeRoundTrip(t *testing.T) {
 	testenv.Must(t, fsys.Chmod(filepath.Join(dir, "app/run.sh"), 0o755|os.ModeSetuid))
 	testenv.Must(t, fsys.Chmod(filepath.Join(dir, "app/lib"), 0o750))
 
+	ctx := t.Context()
 	c, cacheDir := newTestCache(t)
 	sel := testSelection(t, []string{"app", "top.txt"}, nil, func(sel *Selection) { sel.ModeMask = 0o7777 })
-	stored, stats, err := Store(c, fsys, dir, sel)
+	stored, stats, err := Store(ctx, c, fsys, dir, sel)
 	testenv.Must(t, err)
 	// One blob for each distinct file, and one for the tree.
 	if got, want := countBlobs(t, cacheDir), 5; got != want {
@@ -41,22 +42,22 @@ func TestCacheTreeRoundTrip(t *testing.T) {
 	if stats != want {
 		t.Errorf("stats = %+v, want %+v", stats, want)
 	}
-	_, stats, err = Store(c, fsys, dir, sel)
+	_, stats, err = Store(ctx, c, fsys, dir, sel)
 	testenv.Must(t, err)
 	if want.NewFiles, want.NewBytes = 0, 0; stats != want {
 		t.Errorf("stats of storing the files again = %+v, want %+v", stats, want)
 	}
-	if _, hashed, err := Hash(fsys, dir, sel); err != nil || hashed != want {
+	if _, hashed, err := Hash(ctx, fsys, dir, sel); err != nil || hashed != want {
 		t.Errorf("Hash's stats = %+v, %v; want %+v", hashed, err, want)
 	}
 
 	out := t.TempDir()
-	_, err = c.Checkout(stored, out)
+	_, err = cache.Checkout(ctx, c, stored, out)
 	testenv.Must(t, err)
-	again, _, err := storeFiles(c, afero.NewOsFs(), out, sel)
+	again, _, err := storeFiles(ctx, c, afero.NewOsFs(), out, sel)
 	testenv.Must(t, err)
 	if again.Digest() != stored {
-		want, err := c.ReadTree(stored)
+		want, err := cache.ReadTree(ctx, c, stored)
 		testenv.Must(t, err)
 		t.Errorf("checked-out files make tree %s, want %s:\n%s\nwant:\n%s",
 			again.Digest().Digest, stored.Digest, again.Encode(), want.Encode())
@@ -119,10 +120,11 @@ func TestTreeDigest(t *testing.T) {
 			fsys, _ := testenv.DiskProject(t, map[string]string{"a.txt": "a", "sub/b.txt": "b"},
 				map[string]string{"sub/link": "b.txt"})
 			c, _ := newTestCache(t)
-			before, _, err := storeFiles(c, fsys, testenv.ProjectDir, testSelection(t, []string{"."}, nil, nil))
+			ctx := t.Context()
+			before, _, err := storeFiles(ctx, c, fsys, testenv.ProjectDir, testSelection(t, []string{"."}, nil, nil))
 			testenv.Must(t, err)
 			testenv.Must(t, tc.change(fsys, testenv.ProjectDir))
-			after, _, err := storeFiles(c, fsys, testenv.ProjectDir, testSelection(t, []string{"."}, nil, nil))
+			after, _, err := storeFiles(ctx, c, fsys, testenv.ProjectDir, testSelection(t, []string{"."}, nil, nil))
 			testenv.Must(t, err)
 			if same := before.Digest() == after.Digest(); same != tc.same {
 				t.Errorf("digest unchanged = %v, want %v", same, tc.same)
@@ -131,11 +133,11 @@ func TestTreeDigest(t *testing.T) {
 	}
 }
 
-// newTestCache returns an empty cache in a temporary directory, and the directory.
-func newTestCache(t *testing.T) (*cache.Cache, string) {
+// newTestCache returns an empty content store in a temporary directory, and the directory.
+func newTestCache(t *testing.T) (*cache.Directory, string) {
 	t.Helper()
 	dir := t.TempDir()
-	c, err := cache.Open(dir)
+	c, err := cache.OpenDirectory(dir)
 	testenv.Must(t, err)
 	return c, dir
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/Topher-the-Geek/vamos/internal/testenv"
+	"github.com/google/go-containerregistry/pkg/registry"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/spf13/afero"
@@ -47,7 +49,61 @@ func TestMain(m *testing.M) {
 	if os.Getenv("BUILDAH_ISOLATION") == "" {
 		os.Setenv("BUILDAH_ISOLATION", "chroot")
 	}
-	os.Exit(m.Run())
+	code := m.Run()
+	if err := testenv.RemoveSuiteStores(); err != nil {
+		fmt.Fprintf(os.Stderr, "removing the suite's stores: %v\n", err)
+		code = 1
+	}
+	os.Exit(code)
+}
+
+// privateStores is the stores of the test that asked for its own, while it runs; see usePrivateStores.
+var privateStores *testenv.Stores
+
+// stores returns the stores that vamos runs against: the test's own, if it asked for them, or else the suite's.
+func stores(t *testing.T) *testenv.Stores {
+	t.Helper()
+	if privateStores != nil {
+		return privateStores
+	}
+	return testenv.SuiteStores(t)
+}
+
+// usePrivateStores gives the test a container store and build cache of its own, for the rest of the test,
+// for a test that destroys what they hold, as prune does.
+// Tests run one at a time, so the stores are in a variable; a parallel test can't use it.
+func usePrivateStores(t *testing.T) {
+	t.Helper()
+	t.Setenv("VAMOS_TEST_PRIVATE_STORES", "1") // which fails a parallel test, since the variable is shared
+	previous := privateStores
+	privateStores = testenv.PrivateStores(t)
+	t.Cleanup(func() { privateStores = previous })
+}
+
+// inSuiteStores calls use with the suite's stores as the ones that vamos and the helpers that inspect stores use,
+// as they were before the test called usePrivateStores.
+func inSuiteStores(t *testing.T, use func()) {
+	t.Helper()
+	private := privateStores
+	privateStores = nil
+	defer func() { privateStores = private }()
+	use()
+}
+
+// insecureRegistry serves a registry over plain HTTP, through handler, which defaults to an empty registry,
+// and marks it insecure in a registries.conf of the test's own, so that the executor,
+// which takes its registry settings from its environment, reaches it; the client needs --tls-verify=false.
+// It returns the server and the registry's host.
+func insecureRegistry(t *testing.T, handler http.Handler) (*httptest.Server, string) {
+	t.Helper()
+	if handler == nil {
+		handler = registry.New(registry.Logger(log.New(io.Discard, "", 0)))
+	}
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	host := strings.TrimPrefix(server.URL, "http://")
+	testenv.InsecureRegistry(t, host)
+	return server, host
 }
 
 // unnamedImages returns the IDs of the images in the local container store that have no name,
@@ -74,13 +130,11 @@ func imageIDs(t *testing.T, keep func(storage.Image) bool) map[string]bool {
 	return ids
 }
 
-// withStore calls use with the local container store, open only until use returns,
+// withStore calls use with the test's container store, open only until use returns,
 // since each vamos run opens and shuts it too.
 func withStore(t *testing.T, use func(storage.Store)) {
 	t.Helper()
-	options, err := storage.DefaultStoreOptions()
-	must(t, err)
-	store, err := storage.GetStore(options)
+	store, err := storage.GetStore(stores(t).Options)
 	must(t, err)
 	defer store.Shutdown(false)
 	use(store)
@@ -112,7 +166,7 @@ func vamos(t *testing.T, fsys afero.Fs, args ...string) result {
 // and also copies stdout to watch, if it isn't nil.
 func vamosWithOutput(t *testing.T, fsys afero.Fs, ctx context.Context, watch io.Writer, args ...string) result {
 	t.Helper()
-	cmd := NewRootCommand(fsys)
+	cmd := NewRootCommand(Config{Fs: fsys, Store: &stores(t).Options})
 	var stdout, stderr bytes.Buffer
 	if watch != nil {
 		cmd.SetOut(io.MultiWriter(&stdout, watch))

@@ -58,7 +58,8 @@ vamos build lint test --rebuild
 
 ## Storage and pruning
 
-Cached layers are container-store images named `localhost/vamos-cache:<id>`.
+Cached layers are container-store images named `localhost/vamos-cache:<id>`, by their image ID;
+pulled images carry that name too, beside the name of the digest they were pulled by.
 Other cached data is beside the container store, normally in `/var/lib/containers/vamos`.
 A volume on `/var/lib/containers` preserves both when vamos runs in a disposable container.
 See the [tutorial](../tutorial.md#2-set-up-vamos) for a Docker setup with a named volume.
@@ -71,6 +72,8 @@ vamos prune
 
 This removes cached layer images and other build results, while keeping pulled images and recorded tag resolutions.
 The next build recreates the needed results.
+A prune is refused while another vamos is using the build cache, and a build is refused while a prune runs;
+run it again when the other finishes.
 
 ## Timestamps
 

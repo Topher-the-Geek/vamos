@@ -6,9 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"log"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,7 +17,6 @@ import (
 	"github.com/Topher-the-Geek/vamos/internal/graph"
 	"github.com/Topher-the-Geek/vamos/internal/tracing"
 	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/google/go-containerregistry/pkg/registry"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"go.podman.io/storage"
 )
@@ -366,28 +362,31 @@ func assertFlows(t *testing.T, tr *trace, want []string) {
 }
 
 // TestTracePush checks the trace of pushes to a registry, from the executor and from the client:
-// the executor's copy is part of the client's span for sending the image,
-// and has a span for each blob, whose bytes sent are what the registry's manifest lists.
+// the executor's job is part of the client's span for sending the image, and the copy to the registry,
+// the executor's for a push and the client's after an export, has a span for each blob,
+// whose bytes sent are what the registry's manifest lists.
 // Pushed again, every layer is skipped, as the registry has it.
 func TestTracePush(t *testing.T) {
 	requireBuildah(t)
 	for _, tt := range []struct {
-		from  string
-		track string
+		from    string
+		track   string // of the executor's job
+		process string // that copies to the registry
 	}{
 		{
-			from:  "executor",
-			track: "push",
+			from:    "executor",
+			track:   "push",
+			process: "executor",
 		},
 		{
-			from:  "client",
-			track: "export",
+			from:    "client",
+			track:   "export",
+			process: "vamos",
 		},
 	} {
 		t.Run(tt.from, func(t *testing.T) {
-			server := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))
-			t.Cleanup(server.Close)
-			image := strings.TrimPrefix(server.URL, "http://") + "/team/app:v1"
+			_, host := insecureRegistry(t, nil)
+			image := host + "/team/app:v1"
 			fsys := project(t, helloBuild)
 			path := filepath.Join(t.TempDir(), "trace.json")
 			push := func() *trace {
@@ -404,7 +403,10 @@ func TestTracePush(t *testing.T) {
 				t.Errorf("the executor's %q, on track %q, isn't within the client's %q",
 					executor.Name, executor.track, sending.Name)
 			}
-			copied := tr.one(t, "executor", "copy to *")
+			copied := tr.one(t, tt.process, "copy to docker://*")
+			if !copied.within(sending) {
+				t.Errorf("the copy to the registry, %q, isn't within the client's %q", copied.Name, sending.Name)
+			}
 			ref, err := name.ParseReference(image, name.Insecure)
 			must(t, err)
 			manifest, err := remote.Get(ref)
@@ -420,13 +422,19 @@ func TestTracePush(t *testing.T) {
 			for _, l := range m.Layers {
 				sizes[l.Size] = true
 			}
-			blobs := tr.all("executor", "blob *")
+			// The blobs within the copy to the registry; an export copies blobs to the content store too.
+			var blobs []*traceSlice
+			for _, b := range tr.all(tt.process, "blob *") {
+				if b.within(copied) {
+					blobs = append(blobs, b)
+				}
+			}
 			if len(blobs) != len(m.Layers)+1 {
 				t.Errorf("%d blob spans, want one for the config and each of %d layers", len(blobs), len(m.Layers))
 			}
 			for _, b := range blobs {
-				if b.Phase != "b" || !b.within(copied) {
-					t.Errorf("blob %q isn't an async span within the copy", b.Name)
+				if b.Phase != "b" {
+					t.Errorf("blob %q isn't an async span", b.Name)
 				}
 				if sent := int64(b.arg(t, "bytes sent").(float64)); !sizes[sent] {
 					t.Errorf("blob %q sent %d bytes, which no blob in the registry's manifest has", b.Name, sent)
@@ -437,11 +445,17 @@ func TestTracePush(t *testing.T) {
 			// containers/image sends the config again, as it never looks for one at the destination,
 			// though a registry that has it takes nothing.
 			tr = push()
-			if blobs := tr.all("executor", "blob *"); len(blobs) != 1 ||
-				blobs[0].arg(t, "source digest") != m.Config.Digest.String() {
+			copied = tr.one(t, tt.process, "copy to docker://*")
+			blobs = nil
+			for _, b := range tr.all(tt.process, "blob *") {
+				if b.within(copied) {
+					blobs = append(blobs, b)
+				}
+			}
+			if len(blobs) != 1 || blobs[0].arg(t, "source digest") != m.Config.Digest.String() {
 				t.Errorf("pushed again, %d blobs were copied, want only the config, %s", len(blobs), m.Config.Digest)
 			}
-			skipped := tr.all("executor", "skipped blob *")
+			skipped := tr.all(tt.process, "skipped blob *")
 			if len(skipped) != len(m.Layers) {
 				t.Errorf("pushed again, %d blobs were skipped, want each of %d layers", len(skipped), len(m.Layers))
 			}
@@ -457,9 +471,7 @@ func TestTracePush(t *testing.T) {
 // TestTracePull checks that pulling an image the store lacks traces resolving its tag, and copying its blobs.
 func TestTracePull(t *testing.T) {
 	requireBuildah(t)
-	server := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))
-	t.Cleanup(server.Close)
-	host := strings.TrimPrefix(server.URL, "http://")
+	_, host := insecureRegistry(t, nil)
 	images := pushIndex(t, host+"/base:v1", native) // random, so not pulled before
 	fsys := project(t, map[string]string{
 		"BUILD": fmt.Sprintf(`pull(name="base", image="%s/base", tag="v1")`, host),
@@ -532,8 +544,11 @@ func TestTraceDestinations(t *testing.T) {
 			args:   func(output string) []string { return []string{"save", "app", output} },
 			check: func(t *testing.T, tr *trace, output string) {
 				writing := tr.one(t, "vamos", "writing "+output)
-				if copied := tr.one(t, "executor", "export to docker-archive"); !copied.within(writing) {
+				if exported := tr.one(t, "executor", "export to the content store"); !exported.within(writing) {
 					t.Errorf("the executor's export isn't within the client's %q", writing.Name)
+				}
+				if copied := tr.one(t, "vamos", "copy to docker-archive:*"); !copied.within(writing) {
+					t.Errorf("the client's copy to the tarball isn't within its %q", writing.Name)
 				}
 			},
 		},
@@ -675,9 +690,8 @@ func TestTracePerfetto(t *testing.T) {
 	if err != nil {
 		t.Skip("trace_processor_shell isn't installed")
 	}
-	server := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))
-	t.Cleanup(server.Close)
-	image := strings.TrimPrefix(server.URL, "http://") + "/team/app:v1"
+	_, host := insecureRegistry(t, nil)
+	image := host + "/team/app:v1"
 	path := filepath.Join(t.TempDir(), "trace.json")
 	vamos(t, project(t, traceBuild(newNonce())), "push", "app", image, "--tls-verify=false", "--trace", path,
 		"-C", projectDir).succeeds(t)

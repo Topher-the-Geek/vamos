@@ -21,11 +21,11 @@ import (
 
 // targetState is a target being built, which its steps act on in turn.
 type targetState struct {
-	*targetRunner
-	ref        graph.Ref // the target's node
+	runner     *localRunner
 	builder    *buildah.Builder
 	mountPoint string // where the container's files are on the host, mounted while the target runs
 	log        *cache.LogRecorder
+	events     actionEvents      // where what the target prints goes
 	buildEnv   map[string]string // set by build_env(), and not since by env()
 }
 
@@ -55,30 +55,28 @@ func (st *targetState) expandPath(param, p string) (string, error) {
 	return path.Clean(expanded), nil
 }
 
-// tracedApply applies the step in, as a span of ctx's trace, named as the BUILD file wrote the step.
-func (st *targetState) tracedApply(ctx context.Context, in graph.Step, files *cache.Blob) (err error) {
-	ctx, span := tracing.Start(ctx, in.Display, "op", in.Op)
+// tracedApply applies the step in, as a span of ctx's trace, named display, as the BUILD file wrote the step.
+func (st *targetState) tracedApply(ctx context.Context, in actionStep, display string) (err error) {
+	ctx, span := tracing.Start(ctx, display, "op", in.Op)
 	defer func() { span.EndWith(err) }()
-	return st.apply(ctx, in, files)
+	return st.apply(ctx, in)
 }
 
 // apply performs the step in on the target being built, recording what it did in ctx's span.
-// files is the tree of its source, stored in the cache, or nil if it has none.
-func (st *targetState) apply(ctx context.Context, in graph.Step, files *cache.Blob) error {
+func (st *targetState) apply(ctx context.Context, in actionStep) error {
 	span := tracing.Current(ctx)
 	switch in.Op {
 	case graph.OpAdd:
-		if files == nil {
-			return errors.New("its files are missing from the target's action") // inputs always stores them
+		if in.Files == nil {
+			return errors.New("its files are missing from the target's action") // the scheduler always stores them
 		}
 		dest, err := st.expandPath("dest", in.Dest)
 		if err != nil {
 			return err
 		}
-		span.Set("from", st.graph.Node(*in.From).Label, "tree", files.Digest.String(), "dest", dest,
-			"owner", chown(in.Owner, in.Group))
-		span.Use(graph.FlowKey(*in.From))
-		return st.addSource(ctx, *in.From, *files, dest, chown(in.Owner, in.Group))
+		span.Set("tree", in.Files.Digest.String(), "dest", dest, "owner", chown(in.Owner, in.Group))
+		span.Use(graph.TreeFlow(*in.Files))
+		return st.addSource(ctx, *in.Files, dest, chown(in.Owner, in.Group))
 
 	case graph.OpRun:
 		// Variables in the image's config are passed too; these override them.
@@ -86,8 +84,8 @@ func (st *targetState) apply(ctx context.Context, in graph.Step, files *cache.Bl
 		for _, name := range slices.Sorted(maps.Keys(st.buildEnv)) {
 			env = append(env, name+"="+st.buildEnv[name])
 		}
-		stdout := st.log.Writer(cache.StreamStdout, st.output(st.ref, cache.StreamStdout))
-		stderr := st.log.Writer(cache.StreamStderr, st.output(st.ref, cache.StreamStderr))
+		stdout := st.log.Writer(cache.StreamStdout, streamWriter{st.events, cache.StreamStdout})
+		stderr := st.log.Writer(cache.StreamStderr, streamWriter{st.events, cache.StreamStderr})
 		if tracing.Enabled(ctx) {
 			span.Set("argv", in.Argv)
 			if p := builderPlatform(st.builder); !platforms.NewMatcher(HostPlatform).Match(p) {
@@ -98,7 +96,7 @@ func (st *targetState) apply(ctx context.Context, in graph.Step, files *cache.Bl
 			stdout, stderr = io.MultiWriter(&outCount, stdout), io.MultiWriter(&errCount, stderr)
 		}
 		return st.builder.Run(in.Argv, buildah.RunOptions{
-			Isolation: st.isolation,
+			Isolation: st.runner.isolation,
 			Terminal:  buildah.WithoutTerminal,
 			Env:       env,
 			Stdout:    stdout,
@@ -107,14 +105,14 @@ func (st *targetState) apply(ctx context.Context, in graph.Step, files *cache.Bl
 
 	case graph.OpEnv, graph.OpBuildEnv:
 		// As in a Dockerfile's ENV, every value refers to the variables as they were before the call.
-		// They are set in the order actionEntry gives, so that targets with the same key make the same image.
+		// They are set in the order actionEntry gives, sorted, so that targets with the same key make the same image.
 		lookup := st.lookup()
 		var values []string // for the span, if traced
 		traced := tracing.Enabled(ctx)
 		if traced {
 			defer func() { span.Set("values", values) }()
 		}
-		for _, v := range slices.Sorted(slices.Values(in.Vars)) {
+		for _, v := range in.Vars {
 			name, value, _ := strings.Cut(v, "=")
 			value, err := graph.ExpandVars(value, lookup)
 			if err != nil {
@@ -155,6 +153,7 @@ type countingWriter struct {
 	n int64
 }
 
+// Write counts data.
 func (w *countingWriter) Write(data []byte) (int, error) {
 	w.n += int64(len(data))
 	return len(data), nil

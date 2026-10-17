@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -77,6 +78,14 @@ func resolve(p string) string {
 		return filepath.Join(dir, filepath.Base(p))
 	}
 	return p
+}
+
+// addGap records that the events from position from to before first weren't retained by the executor,
+// so the trace lacks the spans they carried: an instant in the client's trace says so.
+func (t *traceSession) addGap(from, first int64) {
+	ctx := tracing.WithRecorder(context.Background(), t.recorder, "")
+	tracing.Instant(ctx, "trace incomplete", "lost events from", from, "to", first-1,
+		"reason", "the executor no longer retained them")
 }
 
 // addRemote keeps spans that the executor sent.

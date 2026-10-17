@@ -28,7 +28,7 @@ func main() {
 		stop()
 	}()
 
-	if err := cli.NewRootCommand(afero.NewOsFs()).ExecuteContext(ctx); err != nil {
+	if err := cli.NewRootCommand(cli.Config{Fs: afero.NewOsFs()}).ExecuteContext(ctx); err != nil {
 		if ctx.Err() != nil {
 			err = fmt.Errorf("interrupted: %w", err)
 		}

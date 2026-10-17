@@ -18,27 +18,47 @@ import (
 func TestPutFileChanged(t *testing.T) {
 	fsys := &testenv.EditedFs{Fs: afero.NewMemMapFs(), File: "/a.txt", Edit: "new"}
 	testenv.Must(t, afero.WriteFile(fsys.Fs, "/a.txt", []byte("old"), 0o644))
-	c := newTestCache(t)
-	b, _, err := c.PutFile(fsys, "/a.txt", 100<<20)
+	d := newTestDirectory(t)
+	b, _, err := PutFile(t.Context(), d, fsys, "/a.txt", 100<<20)
 	testenv.Must(t, err)
-	data, err := c.ReadBytes(b)
+	data, err := d.Read(t.Context(), b, 100)
 	testenv.Must(t, err)
 	if b.Digest != digest.FromBytes(data) || string(data) != "new" {
 		t.Errorf("stored %q as %s, want %q under its own digest", data, b.Digest, "new")
 	}
 }
 
-// TestPutFileEndless checks that putFile reads no more of a file than its limit allows,
-// so that a file that keeps growing, such as a log, can't fill the cache.
+// TestPutFileEndless checks that PutFile reads no more of a file than its limit allows,
+// so that a file that keeps growing, such as a log, can't fill the store.
 func TestPutFileEndless(t *testing.T) {
 	fsys := &endlessFs{Fs: afero.NewMemMapFs()}
 	testenv.Must(t, afero.WriteFile(fsys.Fs, "/log", nil, 0o644))
-	c := newTestCache(t)
-	if _, _, err := c.PutFile(fsys, "/log", 10); !errors.Is(err, ErrOverLimit) {
-		t.Errorf("putFile = %v, want %v", err, ErrOverLimit)
+	d := newTestDirectory(t)
+	if _, _, err := PutFile(t.Context(), d, fsys, "/log", 10); !errors.Is(err, ErrOverLimit) {
+		t.Errorf("PutFile = %v, want %v", err, ErrOverLimit)
 	}
-	if n := countBlobs(t, c); n != 0 {
-		t.Errorf("the cache holds %d blobs, want none", n)
+	if n := countBlobs(t, d); n != 0 {
+		t.Errorf("the store holds %d blobs, want none", n)
+	}
+}
+
+// TestPutFileCorrupt checks that a file whose content the store holds corrupt, as far as Has can tell,
+// is stored again.
+func TestPutFileCorrupt(t *testing.T) {
+	fsys := afero.NewMemMapFs()
+	testenv.Must(t, afero.WriteFile(fsys, "/a.txt", []byte("content"), 0o644))
+	d := newTestDirectory(t)
+	b, stored, err := PutFile(t.Context(), d, fsys, "/a.txt", 100)
+	testenv.Must(t, err)
+	if !stored {
+		t.Error("the first put didn't store the file")
+	}
+	testenv.Must(t, os.WriteFile(d.blobPath(b), []byte("truncated"[:3]), 0o600))
+	if _, stored, err := PutFile(t.Context(), d, fsys, "/a.txt", 100); err != nil || !stored {
+		t.Errorf("PutFile over a corrupt blob stored = %v, %v; want it stored again", stored, err)
+	}
+	if data, err := d.Read(t.Context(), b, 100); err != nil || string(data) != "content" {
+		t.Errorf("after storing again, Read = %q, %v", data, err)
 	}
 }
 
@@ -69,30 +89,10 @@ func (f *endlessFile) Read(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// TestActionResults checks that the latest result for a key is kept,
-// and that a key with none, or with one that can't be read, has no result.
-func TestActionResults(t *testing.T) {
-	c := newTestCache(t)
-	key := digest.FromString("an action")
-	if r, err := c.Result(key); err != nil || r != nil {
-		t.Fatalf("result before any = %v, %v; want none", r, err)
-	}
-	testenv.Must(t, c.SetResult(key, &ActionResult{Epoch: 1}))
-	testenv.Must(t, c.SetResult(key, &ActionResult{Epoch: 2}))
-	if r, err := c.Result(key); err != nil || r == nil || r.Epoch != 2 {
-		t.Errorf("result = %+v, %v; want the latest, with epoch 2", r, err)
-	}
-
-	testenv.Must(t, os.WriteFile(c.actionPath(key), []byte("{"), 0o600))
-	if r, err := c.Result(key); err != nil || r != nil {
-		t.Errorf("unreadable result = %v, %v; want none", r, err)
-	}
-}
-
 // TestLogReplay checks that a recorded log replays each stream's output in its original order.
 func TestLogReplay(t *testing.T) {
-	c := newTestCache(t)
-	log, err := c.NewLog()
+	d := newTestDirectory(t)
+	log, err := NewLog()
 	testenv.Must(t, err)
 	defer log.Discard()
 	var stdout, stderr bytes.Buffer
@@ -105,78 +105,62 @@ func TestLogReplay(t *testing.T) {
 		t.Fatalf("passed on stdout %q and stderr %q", stdout.String(), stderr.String())
 	}
 
-	saved, err := log.Save(c)
+	saved, err := log.Save(t.Context(), d)
 	testenv.Must(t, err)
-	f, err := c.OpenBlob(*saved)
+	f, err := d.Get(t.Context(), *saved)
 	testenv.Must(t, err)
 	defer f.Close()
 	var both strings.Builder
-	testenv.Must(t, ReplayLog(f, prefixWriter{"out: ", &both}, prefixWriter{"err: ", &both}))
+	testenv.Must(t, ReplayLog(t.Context(), f, prefixWriter{"out: ", &both}, prefixWriter{"err: ", &both}))
 	if want := "out: one\nerr: two\nout: three\n"; both.String() != want {
 		t.Errorf("replayed %q, want %q", both.String(), want)
 	}
 
-	empty, err := c.NewLog()
+	empty, err := NewLog()
 	testenv.Must(t, err)
-	if b, err := empty.Save(c); b != nil || err != nil {
+	if b, err := empty.Save(t.Context(), d); b != nil || err != nil {
 		t.Errorf("saved log with nothing written = %v, %v; want none", b, err)
 	}
 	empty.Discard()
-	if entries, _ := os.ReadDir(filepath.Join(c.dir, "tmp")); len(entries) > 0 {
-		t.Errorf("temporary files %v left in the cache", entries)
+	for _, l := range []*LogRecorder{log, empty} {
+		if l.file != nil {
+			t.Errorf("the log's temporary file %s is left behind", l.file.Name())
+		}
 	}
 }
 
-// TestCheckoutRefusesEscapes checks that a tree in the cache can't write outside the folder it is checked out to,
-// even if it has been tampered with.
-func TestCheckoutRefusesEscapes(t *testing.T) {
-	tests := []struct {
-		name    string
-		entries []TreeEntry
-		want    string
-	}{
-		{
-			name:    "parent path",
-			entries: []TreeEntry{{Path: "../escaped", Type: EntryLink, Target: "x"}},
-			want:    `"../escaped" is outside it`,
-		},
-		{
-			name:    "absolute path",
-			entries: []TreeEntry{{Path: "/escaped", Type: EntryLink, Target: "x"}},
-			want:    `"/escaped" is outside it`,
-		},
-		{
-			name: "beneath a link",
-			entries: []TreeEntry{
-				{Path: "out", Type: EntryLink, Target: "/tmp"},
-				{Path: "out/escaped", Type: EntryLink, Target: "x"},
-			},
-			want: `"out/escaped" is beneath the symbolic link "out"`,
-		},
-		{
-			name: "beneath a link named by an unclean path",
-			entries: []TreeEntry{
-				{Path: "a/../out", Type: EntryLink, Target: "/tmp"},
-				{Path: "out/escaped", Type: EntryLink, Target: "x"},
-			},
-			want: `"a/../out" isn't a clean path`,
-		},
-		{
-			name:    "file without content",
-			entries: []TreeEntry{{Path: "empty", Type: EntryFile, Mode: 0o644}},
-			want:    `"empty" has unknown type "file" or no content`,
-		},
+// TestLogTruncated checks that a log stops recording at its cap, ending with a marker on stderr,
+// while the output still reaches its destination, and that a log that isn't whole is reported.
+func TestLogTruncated(t *testing.T) {
+	d := newTestDirectory(t)
+	log, err := NewLog()
+	testenv.Must(t, err)
+	defer log.Discard()
+	var stdout bytes.Buffer
+	out := log.Writer(StreamStdout, &stdout)
+	chunk := bytes.Repeat([]byte("x"), 1<<20)
+	for range MaxLogSize/len(chunk) + 2 {
+		out.Write(chunk)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			c := newTestCache(t)
-			b, err := c.PutBytes((&Tree{Entries: tt.entries}).Encode())
-			testenv.Must(t, err)
-			_, err = c.Checkout(b, t.TempDir())
-			if err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Errorf("checkout error = %v, want it to contain %q", err, tt.want)
-			}
-		})
+	if stdout.Len() != (MaxLogSize/len(chunk)+2)*len(chunk) {
+		t.Errorf("the destination got %d bytes, want all of the output", stdout.Len())
+	}
+	saved, err := log.Save(t.Context(), d)
+	testenv.Must(t, err)
+	if saved.Size > MaxLogSize {
+		t.Errorf("the log holds %d bytes, more than %d", saved.Size, MaxLogSize)
+	}
+	data, err := d.Read(t.Context(), *saved, MaxLogSize)
+	testenv.Must(t, err)
+	testenv.Must(t, CheckLog(data))
+	var replayedOut, replayedErr bytes.Buffer
+	testenv.Must(t, ReplayLog(t.Context(), bytes.NewReader(data), &replayedOut, &replayedErr))
+	if replayedErr.String() != Truncated || replayedOut.Len() == 0 || replayedOut.Len() >= stdout.Len() {
+		t.Errorf("replayed %d bytes of stdout and %q on stderr; want some of the output, then the marker",
+			replayedOut.Len(), replayedErr.String())
+	}
+	if err := CheckLog(data[:len(data)-3]); err == nil {
+		t.Error("CheckLog accepted a log cut short")
 	}
 }
 
@@ -192,18 +176,18 @@ func (p prefixWriter) Write(b []byte) (int, error) {
 	return p.w.Write(b)
 }
 
-// newTestCache returns an empty cache in a temporary directory.
-func newTestCache(t *testing.T) *Cache {
+// newTestDirectory returns empty stores in a temporary directory.
+func newTestDirectory(t *testing.T) *Directory {
 	t.Helper()
-	c, err := Open(t.TempDir())
+	d, err := OpenDirectory(t.TempDir())
 	testenv.Must(t, err)
-	return c
+	return d
 }
 
-// countBlobs returns how many blobs c holds.
-func countBlobs(t *testing.T, c *Cache) int {
+// countBlobs returns how many blobs d holds.
+func countBlobs(t *testing.T, d *Directory) int {
 	t.Helper()
-	entries, err := os.ReadDir(filepath.Join(c.dir, "cas", "sha256"))
+	entries, err := os.ReadDir(filepath.Join(d.dir, "cas", "sha256"))
 	testenv.Must(t, err)
 	return len(entries)
 }

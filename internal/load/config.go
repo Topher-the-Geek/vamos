@@ -1,6 +1,7 @@
 package load
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -812,7 +813,7 @@ func (w *workspace) configure(roots []confLabel) (*graph.Graph, map[graph.Ref]*f
 	l := &lowering{
 		w:     w,
 		cr:    cr,
-		g:     &graph.Graph{Version: graph.Version},
+		g:     &graph.Graph{Version: graph.Version, ExecPlatform: platforms.Format(w.execPlatform.spec)},
 		refs:  map[confLabel]graph.Ref{},
 		globs: map[*fileSet]graph.Ref{},
 		sets:  map[graph.Ref]*fileSet{},
@@ -1113,6 +1114,7 @@ func (w *workspace) template(d *declaration, cl confLabel) (any, error) {
 	c := &evalContext{mode: configuring, file: d.file}
 	thread := &starlark.Thread{Name: d.file.path}
 	thread.SetLocal(contextKey, c)
+	defer cancelWith(w.ctx, thread)()
 	ctx := &ctxValue{params: d.params, cfg: cl.cfg, glob: d.kind == "glob", exec: w.execPlatform}
 	var results []starlark.Value // of the functions, whose arg()s are checked once they run
 	call := func(param string, v starlark.Value) (starlark.Value, error) {
@@ -1122,7 +1124,7 @@ func (w *workspace) template(d *declaration, cl confLabel) (any, error) {
 		}
 		result, err := starlark.Call(thread, fn, starlark.Tuple{ctx}, nil)
 		if err != nil {
-			return nil, err
+			return nil, w.interrupted(err)
 		}
 		if _, ok := result.(starlark.Callable); ok {
 			return nil, fmt.Errorf("%s: %s gave a function, not the value of %s", d.kind, fn.Name(), param)
@@ -1156,6 +1158,10 @@ func (w *workspace) template(d *declaration, cl confLabel) (any, error) {
 	}
 	if err == nil {
 		return tmpl, nil
+	}
+	// An interruption is reported as itself, not as a mistake in the file.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return nil, err
 	}
 
 	// An error loading another package's BUILD file already says where it is.

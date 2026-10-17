@@ -5,12 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime/debug"
+	"slices"
 	"sync"
 	"time"
 
+	"github.com/Topher-the-Geek/vamos/internal/api"
 	"github.com/Topher-the-Geek/vamos/internal/cache"
 	"github.com/Topher-the-Geek/vamos/internal/graph"
 	"github.com/Topher-the-Geek/vamos/internal/tracing"
+	"github.com/Topher-the-Geek/vamos/internal/transfer"
 
 	"github.com/containerd/platforms"
 	"github.com/opencontainers/go-digest"
@@ -19,7 +23,6 @@ import (
 	"go.podman.io/buildah/pkg/parse"
 	containersconfig "go.podman.io/common/pkg/config"
 	imagecopy "go.podman.io/image/v5/copy"
-	"go.podman.io/image/v5/docker"
 	"go.podman.io/image/v5/docker/reference"
 	"go.podman.io/image/v5/manifest"
 	"go.podman.io/image/v5/oci/layout"
@@ -29,52 +32,7 @@ import (
 	"go.podman.io/storage"
 )
 
-// Executor runs build graphs and holds the images they make.
-// Local runs them in this process; a remote executor could stand in for it,
-// since a graph reaches it only through the build cache.
-type Executor interface {
-	// ExecPlatform returns the platform that run() steps run on without emulation.
-	ExecPlatform(ctx context.Context) (imgspecv1.Platform, error)
-	// Clock returns the time by the executor's clock,
-	// so that the client can place the executor's spans in a trace by its own.
-	Clock(ctx context.Context) (time.Time, error)
-	// Run runs the graph req names, reporting progress to ev, and returns a result for each of its roots.
-	Run(ctx context.Context, req Request, ev Events) ([]Result, error)
-	// Push copies a result's image or index from the executor to a registry, as req says,
-	// using the executor's credentials, and returns its image ID there, or an index's digest.
-	Push(ctx context.Context, req PushRequest, ev Events) (string, error)
-	// Export copies a result's image or index to a destination on the client, as req says,
-	// and returns its image ID there, or an index's digest.
-	Export(ctx context.Context, req ExportRequest, ev Events) (string, error)
-}
-
-// Request asks an executor to run a graph.
-type Request struct {
-	Graph     cache.Blob // the encoded graph, in the build cache
-	Rebuild   bool       // run the roots again, and resolve their pulls' tags again
-	Timestamp time.Time  // the earliest time that targets which run stamp their files with
-	// Trace, if set, asks for the spans of a trace of the run, sent to the run's Events.
-	Trace *tracing.CallContext
-}
-
-// PushRequest asks an executor to push a result to a registry.
-type PushRequest struct {
-	Result Result
-	Dest   reference.Named
-	// Trace, if set, asks for the spans of a trace of the push, sent to the push's Events.
-	Trace *tracing.CallContext
-}
-
-// ExportRequest asks an executor to copy a result to a destination on the client.
-type ExportRequest struct {
-	Result Result
-	Dest   types.ImageReference
-	System *types.SystemContext // describes Dest
-	// Trace, if set, asks for the spans of a trace of the export, sent to the export's Events.
-	Trace *tracing.CallContext
-}
-
-// Events receives a run's progress.
+// Events receives a run's progress, within the executor: a job sends them on as api.Events.
 // Its methods may be called from several goroutines.
 type Events interface {
 	// Status reports what is happening to node, such as "building" or "cached".
@@ -140,57 +98,102 @@ func (b *spanBatch) flush() {
 	}
 }
 
-// Result is what a root made.
-// Exactly one of Image, Index and Files is set, unless the root is a task without output.
-type Result struct {
-	Node  graph.Ref
-	Image string      // a pull's or layer's image ID, in the executor's store
-	Index []Manifest  // an index's images, in order
-	Files *cache.Blob // a task's files, as a tree
-	Epoch int64       // when Files' files were stamped, in Unix seconds
-}
-
-// Manifest is an image of an index.
-type Manifest struct {
-	Image    string // its ID, in the executor's store
-	Platform string // as platforms.Format gives it
-}
-
-// Local is the executor that runs in this process, with buildah, on the local container store and build cache.
-// It opens them only once it needs them, so that commands which fail before building touch neither.
-// Calls on one Local, including Close, must be serialized by its owner.
+// Local is the executor that runs in this process, with buildah, on a container store and the build cache beside it.
+// It opens them only once it needs them, so that commands which fail before building touch neither,
+// and the container store only to run a job, so that capturing sources doesn't need it.
+// Its jobs run in goroutines of their own and are kept, with their events, until it is closed;
+// Close cancels those still running and waits for them.
 type Local struct {
 	systemContext *types.SystemContext
 	storeOptions  storage.StoreOptions
-	store         storage.Store
-	cache         *cache.Cache
+	jobs          jobTable
+
+	mu        sync.Mutex // guards opening the store and cache
+	store     storage.Store
+	directory *cache.Directory   // beside the container store, holding its lock while open
+	content   cache.ContentStore // the directory
+	records   cache.RecordStore  // the directory
+	sharing   *sharing           // runs actions, once for every job that needs the same one
 }
 
-// NewLocal returns a local executor that reaches registries as sys says.
+// NewLocal returns a local executor on the container store that options describe, such as DefaultStoreOptions
+// gives, which reaches registries as its environment says: registries.conf, and $REGISTRY_AUTH_FILE for credentials.
+// The client's registry settings never reach it.
 // The caller must close it.
-func NewLocal(sys *types.SystemContext) (*Local, error) {
-	options, err := storage.DefaultStoreOptions()
+func NewLocal(options storage.StoreOptions) (*Local, error) {
+	sys, err := SystemContext()
 	if err != nil {
 		return nil, err
 	}
 	return &Local{systemContext: sys, storeOptions: options}, nil
 }
 
-// CacheDir returns where the build cache is kept, which the client and a local executor share.
-func CacheDir() (string, error) {
-	options, err := storage.DefaultStoreOptions()
-	if err != nil {
-		return "", err
+// SystemContext returns the settings for reaching registries that this process's environment gives:
+// containers/image doesn't read $REGISTRY_AUTH_FILE itself; podman and buildah pass it on.
+// The local executor and the client, which share the environment, each build their own.
+func SystemContext() (*types.SystemContext, error) {
+	sys := &types.SystemContext{}
+	if path := os.Getenv("REGISTRY_AUTH_FILE"); path != "" {
+		if _, err := os.Stat(path); err != nil {
+			return nil, fmt.Errorf("REGISTRY_AUTH_FILE: %w", err)
+		}
+		sys.AuthFilePath = path
 	}
-	return cacheDir(options), nil
+	return sys, nil
 }
 
-// open opens the store and the build cache, unless they are open.
+// RetainEvents makes the executor retain n events of each job for watchers, rather than the default,
+// so that tests can see gaps without long jobs.
+// It is for tests, before any job is submitted.
+func (l *Local) RetainEvents(n int) {
+	l.jobs.retention = n
+}
+
+// DefaultStoreOptions returns the container store that buildah and podman use here, as containers/storage finds it.
+func DefaultStoreOptions() (storage.StoreOptions, error) {
+	return storage.DefaultStoreOptions()
+}
+
+// CacheDir returns where the build cache beside the container store that options describe is kept,
+// which the client and a local executor share.
+func CacheDir(options storage.StoreOptions) string {
+	return cacheDir(options)
+}
+
+// openContent opens the build cache, unless it is open; l.mu must be held.
+func (l *Local) openContent() error {
+	if l.directory != nil {
+		return nil
+	}
+	d, err := cache.OpenDirectory(cacheDir(l.storeOptions))
+	if err != nil {
+		return err
+	}
+	l.directory, l.content, l.records = d, d, d
+	return nil
+}
+
+// open opens the build cache and the container store, unless they are open.
+// A failure to open the container store leaves the build cache open, as ContentStore may have opened it;
+// Close releases it.
 func (l *Local) open() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.openContent(); err != nil {
+		return err
+	}
 	if l.store != nil {
 		return nil
 	}
-	c, err := cache.Open(cacheDir(l.storeOptions))
+	conf, err := containersconfig.Default()
+	if err != nil {
+		return err
+	}
+	capabilities, err := conf.Capabilities("root", nil, nil)
+	if err != nil {
+		return err
+	}
+	isolation, err := parse.IsolationOption("")
 	if err != nil {
 		return err
 	}
@@ -198,42 +201,209 @@ func (l *Local) open() error {
 	if err != nil {
 		return err
 	}
-	l.cache, l.store = c, store
+	l.sharing = newSharing(&localRunner{
+		store:         store,
+		content:       l.directory,
+		records:       l.directory,
+		systemContext: l.systemContext,
+		capabilities:  capabilities,
+		isolation:     isolation,
+	}, l.directory)
+	l.store = store
 	return nil
 }
 
-// Close closes the store, if it was opened.
-func (l *Local) Close() {
-	if l.store != nil {
-		l.store.Shutdown(false)
+// ContentStore returns the content store the executor reads submitted content from,
+// which a client building locally captures sources into and delivers from.
+// It opens the build cache alone, not the container store,
+// so that capturing sources, and refusing them, needs nothing that only building does.
+func (l *Local) ContentStore() (cache.ContentStore, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.openContent(); err != nil {
+		return nil, err
 	}
+	return l.content, nil
 }
 
-// ExecPlatform returns the host's platform.
-func (l *Local) ExecPlatform(context.Context) (imgspecv1.Platform, error) {
-	return HostPlatform, nil
+// maxGraphSize is the most bytes a graph may have, so that a corrupt or hostile one is refused rather than decoded.
+const maxGraphSize = 64 << 20
+
+// Close shuts the executor down: it cancels the jobs still running and waits for them to end,
+// so that their containers and pending files are removed, then shuts the container store down
+// and releases the build cache's lock, reporting what failed.
+func (l *Local) Close() error {
+	// Every attempt has ended once its jobs have: the last job to detach from one waits for it.
+	l.jobs.stop()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var errs []error
+	if l.store != nil {
+		if _, err := l.store.Shutdown(false); err != nil {
+			errs = append(errs, fmt.Errorf("shutting down the container store: %w", err))
+		}
+		l.store = nil
+	}
+	if l.directory != nil {
+		if err := l.directory.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("closing the build cache: %w", err))
+		}
+		l.directory, l.content, l.records, l.sharing = nil, nil, nil, nil
+	}
+	return errors.Join(errs...)
 }
 
-// Clock returns the time, by the clock the client shares.
-func (l *Local) Clock(context.Context) (time.Time, error) {
-	return time.Now(), nil
+// graphVersions are the graph versions the executor runs.
+var graphVersions = []int{graph.Version}
+
+// Capabilities reports the host's platform, the graph versions this version of vamos runs,
+// how commands are isolated, and the time.
+func (l *Local) Capabilities(context.Context) (api.Capabilities, error) {
+	isolation, err := parse.IsolationOption("")
+	if err != nil {
+		return api.Capabilities{}, err
+	}
+	return api.Capabilities{
+		Platform:      HostPlatform,
+		GraphVersions: graphVersions,
+		Isolation:     isolation.String(),
+		Version:       vamosVersion(),
+		Clock:         time.Now(),
+	}.Clone(), nil
 }
 
-// Run runs the graph req names with buildah: its pulls first, then its layers, tasks and indexes in order.
+// checkExecPlatform refuses a graph configured for an executor on platform, if this one isn't.
+func checkExecPlatform(platform string) error {
+	if want := platforms.Format(HostPlatform); platform != want {
+		return fmt.Errorf("the graph was configured for an executor on %s, but this one runs on %s", platform, want)
+	}
+	return nil
+}
+
+// vamosVersion returns the version of vamos, as the Go module that built it records, or "" if that is unknown.
+func vamosVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok || info.Main.Version == "(devel)" {
+		return ""
+	}
+	return info.Main.Version
+}
+
+// Submit starts a job for req: a graph run, a push or an export.
+// A graph of a version it can't run, or configured for another platform, is refused before anything else;
+// so is a push to a destination that isn't a registry reference with a tag.
+func (l *Local) Submit(ctx context.Context, req api.Request) (api.JobID, error) {
+	req = req.Clone() // the job runs after Submit returns, and the caller's request is its own again
+	kinds := 0
+	for _, set := range []bool{req.Graph != nil, req.Push != nil, req.Export != nil} {
+		if set {
+			kinds++
+		}
+	}
+	if kinds != 1 {
+		return "", fmt.Errorf("the request asks for %d jobs, want 1", kinds)
+	}
+	switch {
+	case req.Push != nil:
+		if err := checkResult(req.Push.Result); err != nil {
+			return "", err
+		}
+		return l.submitPush(*req.Push)
+	case req.Export != nil:
+		if err := checkResult(req.Export.Result); err != nil {
+			return "", err
+		}
+		return l.submitExport(*req.Export)
+	}
+	g := req.Graph
+	if !slices.Contains(graphVersions, g.Version) {
+		return "", fmt.Errorf("graph version %d isn't supported; this executor runs version %d", g.Version,
+			graph.Version)
+	}
+	if err := checkExecPlatform(platforms.Format(platforms.Normalize(g.Platform))); err != nil {
+		return "", err
+	}
+	return l.jobs.start(false, func(ctx context.Context, ev Events) api.Outcome {
+		results, err := l.run(ctx, *g, ev)
+		if err != nil {
+			return failed(err)
+		}
+		return api.Outcome{Results: results}
+	})
+}
+
+// failed returns the outcome of a job that err ended: its failure, as data if the scheduler made it so,
+// or else by its message alone, and cancelled if the job's cancellation is what caused it.
+func failed(err error) api.Outcome {
+	var f *failure
+	outcome := api.Outcome{Cancelled: errors.Is(err, context.Canceled)}
+	if errors.As(err, &f) {
+		outcome.Failure = &f.Failure
+	} else {
+		outcome.Failure = &api.Failure{Message: err.Error()}
+	}
+	return outcome
+}
+
+// Watch delivers the events of the job id from position from to fn, as api.Executor describes.
+func (l *Local) Watch(ctx context.Context, id api.JobID, from int64, fn func(api.Event) error) error {
+	j, err := l.jobs.lookup(id)
+	if err != nil {
+		return err
+	}
+	return j.watch(ctx, from, fn)
+}
+
+// Cancel asks the job id to stop; it does so between commands, which buildah can't interrupt.
+func (l *Local) Cancel(_ context.Context, id api.JobID) error {
+	j, err := l.jobs.lookup(id)
+	if err != nil {
+		return err
+	}
+	j.cancel()
+	return nil
+}
+
+// Result returns the outcome of the job id, or ErrRunning.
+func (l *Local) Result(_ context.Context, id api.JobID) (api.Outcome, error) {
+	j, err := l.jobs.lookup(id)
+	if err != nil {
+		return api.Outcome{}, err
+	}
+	return j.result()
+}
+
+// Prune starts a job that removes every cached result from the container store and the build cache.
+// It is refused while any other job of this executor runs, and no job is accepted while it runs;
+// it fails with cache.ErrLocked while another process holds the build cache open.
+func (l *Local) Prune(context.Context) (api.JobID, error) {
+	return l.jobs.start(true, func(ctx context.Context, ev Events) api.Outcome {
+		pruned, err := l.prune(ctx)
+		if err != nil {
+			return failed(err)
+		}
+		return api.Outcome{Pruned: &pruned}
+	})
+}
+
+// run runs the graph req names with buildah: its pulls first, then its layers, tasks and indexes in order.
 // Each layer's and task's result is kept in the build cache,
 // and reused instead of running the target again whenever a later build gives it the same inputs,
 // unless it is a root and req.Rebuild is set.
-func (l *Local) Run(ctx context.Context, req Request, ev Events) (_ []Result, err error) {
+func (l *Local) run(ctx context.Context, req api.GraphRequest, ev Events) (_ []api.Result, err error) {
 	ctx, flush := forCall(ctx, req.Trace, ev)
 	defer flush() // after the span ends
 	ctx, span := tracing.StartTrack(ctx, "run", "run", "graph", req.Graph.Digest.String(), "rebuild", req.Rebuild)
 	defer func() { span.EndWith(err) }()
-	if err := l.open(); err != nil {
+	content, err := l.ContentStore()
+	if err != nil {
 		return nil, err
 	}
 	// Read the graph as a remote executor would, rather than share the client's,
 	// so that nothing reaches the build but what the graph holds.
-	data, err := l.cache.ReadBytes(req.Graph)
+	// A graph that is missing or corrupt fails the job, naming the blob; the client may submit it again.
+	// It is read before the container store is opened, which a graph that can't run doesn't need.
+	data, err := content.Read(ctx, req.Graph, maxGraphSize)
 	if err != nil {
 		return nil, fmt.Errorf("reading the build graph: %w", err)
 	}
@@ -241,179 +411,101 @@ func (l *Local) Run(ctx context.Context, req Request, ev Events) (_ []Result, er
 	if err != nil {
 		return nil, err
 	}
-	rebuild := map[graph.Ref]bool{}
-	for _, ref := range g.Roots {
-		rebuild[ref] = req.Rebuild
-		// An index is built by building its manifests.
-		if idx := g.Node(ref).Index; idx != nil {
-			for _, m := range idx.Manifests {
-				rebuild[m] = req.Rebuild
-			}
-		}
-	}
-
-	// Pull everything first, so a bad image name is reported before any slow target runs.
-	images := map[graph.Ref]builtImage{
-		graph.Scratch: {id: scratch, epoch: time.Unix(0, 0)}, // buildah starts an empty image from this name
-	}
-	pl := &puller{
-		store:         l.store,
-		cache:         l.cache,
-		systemContext: l.systemContext,
-		tags:          map[string]*tagRecord{},
-		again:         map[string]bool{},
-	}
-	for i, n := range g.Nodes {
-		// Every pull of a tag that one pulls again gets the image it names now, even if pulled before that one.
-		if n.Pull != nil && rebuild[graph.Ref(i)] {
-			pl.again[n.Pull.Image] = true
-		}
-	}
-	for i, n := range g.Nodes {
-		if n.Pull == nil {
-			continue
-		}
-		if rebuild[graph.Ref(i)] {
-			// The tag may name a newer image now.
-			ev.Status(graph.Ref(i), "pulling again")
-		}
-		if images[graph.Ref(i)], err = pl.tracedPull(ctx, graph.Ref(i), &g.Nodes[i]); err != nil {
-			return nil, fmt.Errorf("%s: %w", n.Desc, err)
-		}
-	}
-
-	conf, err := containersconfig.Default()
-	if err != nil {
+	if err := checkExecPlatform(g.ExecPlatform); err != nil {
 		return nil, err
 	}
-	capabilities, err := conf.Capabilities("root", nil, nil)
-	if err != nil {
+	if err := l.open(); err != nil {
 		return nil, err
 	}
-	isolation, err := parse.IsolationOption("")
-	if err != nil {
-		return nil, err
-	}
-
-	r := targetRunner{
-		graph:         g,
-		store:         l.store,
-		cache:         l.cache,
-		systemContext: l.systemContext,
-		timestamp:     req.Timestamp,
-		events:        ev,
-		capabilities:  capabilities,
-		isolation:     isolation,
-		images:        images,
-		trees:         map[graph.Ref]setTree{},
-		indexes:       map[graph.Ref][]Manifest{},
-	}
-	for i, n := range g.Nodes {
-		switch {
-		case n.Layer != nil, n.Task != nil:
-			err = r.runCached(ctx, graph.Ref(i), rebuild[graph.Ref(i)])
-		case n.Index != nil:
-			err = r.runIndex(ctx, graph.Ref(i))
-		}
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	var results []Result
-	for _, ref := range g.Roots {
-		res := Result{Node: ref}
-		switch n := g.Node(ref); {
-		case n.Pull != nil, n.Layer != nil:
-			res.Image = r.images[ref].id
-		case n.Index != nil:
-			res.Index = r.indexes[ref]
-		case n.Task != nil && n.Task.Output != nil:
-			t := r.trees[ref]
-			res.Files, res.Epoch = &t.tree, t.epoch.Unix()
-		}
-		results = append(results, res)
-	}
-	return results, nil
+	return newScheduler(g, l.content, l.records, l.sharing, ev, req.Rebuild, req.Timestamp).run(ctx)
 }
 
-// runIndex makes the result of the index ref: its manifests' images, each checked to be for its platform.
-func (r *targetRunner) runIndex(ctx context.Context, ref graph.Ref) (err error) {
-	n := r.graph.Node(ref)
-	ctx, span := tracing.StartTrack(ctx, n.Desc, n.Desc)
-	defer func() { span.EndWith(err) }()
-	var manifests []Manifest
-	for _, m := range n.Index.Manifests {
-		id := r.images[m].id
-		want := r.graph.Node(m).Platform()
-		got, err := imagePlatform(ctx, r.store, id)
-		if err != nil {
-			return fmt.Errorf("%s: %w", n.Desc, err)
+// checkResult refuses a result to push or export whose image IDs aren't image IDs, as Result.Image gives them,
+// so that one that names nothing this executor could have made is refused before a job starts.
+func checkResult(res api.Result) error {
+	if res.Image != "" {
+		if err := digest.SHA256.Validate(res.Image); err != nil {
+			return fmt.Errorf("the result's image ID %q: %w", res.Image, err)
 		}
-		if platforms.Format(got) != want {
-			return fmt.Errorf("%s: the image of %s is for %s, not %s", n.Desc, r.graph.Node(m).Label,
-				platforms.Format(got), want)
-		}
-		manifests = append(manifests, Manifest{Image: id, Platform: want})
-		span.Set(want, id)
 	}
-	r.indexes[ref] = manifests
+	for i, m := range res.Index {
+		if err := digest.SHA256.Validate(m.Image); err != nil {
+			return fmt.Errorf("the image ID %q of the result's manifest %d: %w", m.Image, i, err)
+		}
+	}
 	return nil
 }
 
-// Push copies the image or index of req.Result to the registry req.Dest.
-func (l *Local) Push(ctx context.Context, req PushRequest, ev Events) (_ string, err error) {
-	ctx, flush := forCall(ctx, req.Trace, ev)
-	defer flush() // after the span ends
-	ctx, span := tracing.StartTrack(ctx, "push", "push to "+req.Dest.String())
-	defer func() { span.EndWith(err) }()
-	ref, err := docker.NewReference(req.Dest)
-	if err != nil {
-		return "", err
+// shortID abbreviates the image ID id for messages, as container tools do, leaving one too short as it is.
+func shortID(id string) string {
+	if len(id) > 12 {
+		return id[:12]
 	}
-	return l.export(ctx, req.Result, ref, l.systemContext)
+	return id
 }
 
-// Export copies the image or index of req.Result from the container store to req.Dest.
-func (l *Local) Export(ctx context.Context, req ExportRequest, ev Events) (_ string, err error) {
-	ctx, flush := forCall(ctx, req.Trace, ev)
-	defer flush() // after the span ends
-	ctx, span := tracing.StartTrack(ctx, "export", "export to "+req.Dest.Transport().Name())
-	defer func() { span.EndWith(err) }()
-	return l.export(ctx, req.Result, req.Dest, req.System)
+// submitPush starts a job that pushes req.Result's image or index to the registry req.Destination names,
+// with the executor's credentials and registry settings.
+// The destination must be a full reference with a tag and no digest: the client resolves short names,
+// so that both sides mean the same registry.
+func (l *Local) submitPush(req api.PushRequest) (api.JobID, error) {
+	named, err := reference.ParseNamed(req.Destination)
+	if err != nil {
+		return "", fmt.Errorf("push destination %q: %w", req.Destination, err)
+	}
+	if _, ok := named.(reference.Digested); ok {
+		return "", fmt.Errorf("push destination %q must not include a digest", req.Destination)
+	}
+	dest, ok := named.(reference.NamedTagged)
+	if !ok {
+		return "", fmt.Errorf("push destination %q has no tag", req.Destination)
+	}
+	return l.jobs.start(false, func(ctx context.Context, ev Events) api.Outcome {
+		ctx, flush := forCall(ctx, req.Trace, ev)
+		defer flush() // after the span ends
+		ctx, span := tracing.StartTrack(ctx, "push", "push to "+dest.String())
+		pushed, err := l.push(ctx, req.Result, dest)
+		span.EndWith(err)
+		if err != nil {
+			outcome := failed(err)
+			outcome.Failure.Nodes = []graph.Ref{req.Result.Node}
+			return outcome
+		}
+		return api.Outcome{Pushed: &pushed}
+	})
 }
 
-// export is Export, as part of ctx's trace.
-func (l *Local) export(ctx context.Context, res Result, dest types.ImageReference, sys *types.SystemContext) (
-	string, error) {
+// push copies the image or index of res from the container store to the tag dest at its registry,
+// and returns what it made there.
+func (l *Local) push(ctx context.Context, res api.Result, dest reference.NamedTagged) (api.Pushed, error) {
 	if err := l.open(); err != nil {
-		return "", err
+		return api.Pushed{}, err
 	}
 	switch {
 	case res.Index != nil:
-		return l.exportIndex(ctx, res.Index, dest, sys)
+		d, err := l.pushIndex(ctx, res.Index, dest)
+		return api.Pushed{Index: d}, err
 	case res.Image != "":
-		return l.exportImage(ctx, res.Image, dest, sys)
+		id, err := l.pushImage(ctx, res.Image, dest)
+		return api.Pushed{Image: id}, err
 	}
-	return "", errors.New("the target made no image")
+	return api.Pushed{}, errors.New("the target made no image")
 }
 
-// exportImage copies the image with ID id from the container store to dest, returning the ID it has there:
-// the digest of its config, as written there,
-// which may differ from the store's if its manifest is converted, as docker-archive does.
-func (l *Local) exportImage(ctx context.Context, id string, dest types.ImageReference, sys *types.SystemContext) (
-	string, error) {
-	src, err := is.Transport.NewStoreReference(l.store, nil, id)
+// pushImage copies the image with ID id from the container store to dest, returning the ID it has there:
+// the digest of its config, as written there, which may differ from the store's if its manifest is converted.
+func (l *Local) pushImage(ctx context.Context, id string, dest reference.NamedTagged) (string, error) {
+	src, err := l.imageReference(ctx, id)
 	if err != nil {
 		return "", err
 	}
-	policyContext, err := l.policyContext()
+	policyContext, err := transfer.Policy(l.systemContext)
 	if err != nil {
 		return "", err
 	}
 	defer policyContext.Destroy()
-
-	written, err := tracedCopy(ctx, policyContext, dest, src, &imagecopy.Options{DestinationCtx: sys})
+	written, err := transfer.Push(ctx, policyContext, dest, src, l.systemContext,
+		&imagecopy.Options{DestinationCtx: l.systemContext})
 	if err != nil {
 		return "", err
 	}
@@ -424,78 +516,30 @@ func (l *Local) exportImage(ctx context.Context, id string, dest types.ImageRefe
 	return m.ConfigInfo().Digest.Encoded(), nil
 }
 
-// policyContext returns the signature policy to copy images under: the system's, as buildah follows when committing,
-// but trusting local storage and layouts, where vamos has just put the images.
-// The caller must destroy it.
-func (l *Local) policyContext() (*signature.PolicyContext, error) {
-	policy, err := signature.DefaultPolicy(l.systemContext)
-	if err != nil {
-		return nil, err
-	}
-	for _, transport := range []string{is.Transport.Name(), layout.Transport.Name()} {
-		policy.Transports[transport] = signature.PolicyTransportScopes{
-			"": {signature.NewPRInsecureAcceptAnything()},
-		}
-	}
-	return signature.NewPolicyContext(policy)
-}
-
-// exportIndex copies the images of manifests from the container store to dest,
-// as an index listing each with its platform, in order.
-// It returns the digest of the index there.
-func (l *Local) exportIndex(
-	ctx context.Context, manifests []Manifest, dest types.ImageReference, sys *types.SystemContext,
-) (string, error) {
-	// containers/image copies an index, and its images, from a source that has one, so make one:
-	// an OCI layout holding the images, and an index of them, which its index.json names.
+// pushIndex copies the images of manifests from the container store to dest,
+// as an index listing each with its platform, in order, through a layout, and returns the index's digest there.
+func (l *Local) pushIndex(ctx context.Context, manifests []api.Manifest, dest reference.NamedTagged) (
+	_ string, err error) {
 	dir, err := os.MkdirTemp("", "vamos-index-")
 	if err != nil {
 		return "", err
 	}
-	defer os.RemoveAll(dir)
-	policyContext, err := l.policyContext()
+	defer func() {
+		if rerr := os.RemoveAll(dir); rerr != nil {
+			err = errors.Join(err, fmt.Errorf("removing the copied blobs: %w", rerr))
+		}
+	}()
+	policyContext, err := transfer.Policy(l.systemContext)
 	if err != nil {
 		return "", err
 	}
 	defer policyContext.Destroy()
-
-	index := imgspecv1.Index{Versioned: specs.Versioned{SchemaVersion: 2}, MediaType: imgspecv1.MediaTypeImageIndex}
-	for i, m := range manifests {
-		src, err := is.Transport.NewStoreReference(l.store, nil, m.Image)
-		if err != nil {
-			return "", err
-		}
-		layoutRef, err := layout.NewReference(dir, fmt.Sprintf("manifest-%d", i))
-		if err != nil {
-			return "", err
-		}
-		written, err := tracedCopy(ctx, policyContext, layoutRef, src, &imagecopy.Options{
-			ForceManifestMIMEType: imgspecv1.MediaTypeImageManifest,
-		})
-		if err != nil {
-			return "", err
-		}
-		platform, err := graph.ParsePlatform(m.Platform)
-		if err != nil {
-			return "", err
-		}
-		index.Manifests = append(index.Manifests, imgspecv1.Descriptor{
-			MediaType: imgspecv1.MediaTypeImageManifest,
-			Digest:    digest.FromBytes(written),
-			Size:      int64(len(written)),
-			Platform:  &platform,
-		})
-	}
-	if err := writeLayoutIndex(dir, index, "index"); err != nil {
-		return "", err
-	}
-
-	src, err := layout.NewReference(dir, "index")
+	src, _, err := l.layoutIndex(ctx, policyContext, dir, manifests)
 	if err != nil {
 		return "", err
 	}
-	written, err := tracedCopy(ctx, policyContext, dest, src, &imagecopy.Options{
-		DestinationCtx:     sys,
+	written, err := transfer.Push(ctx, policyContext, dest, src, l.systemContext, &imagecopy.Options{
+		DestinationCtx:     l.systemContext,
 		ImageListSelection: imagecopy.CopyAllImages,
 	})
 	if err != nil {
@@ -504,14 +548,159 @@ func (l *Local) exportIndex(
 	return digest.FromBytes(written).String(), nil
 }
 
-// eventWriter passes what is written to it on to the events of a node, as the output of one stream.
-type eventWriter struct {
-	events Events
-	node   graph.Ref
-	stream byte
+// imageReference returns the reference of the image with ID id in the container store,
+// located by its name in the cache repository and referred to by the store's ID found, which can't move.
+func (l *Local) imageReference(ctx context.Context, id string) (types.ImageReference, error) {
+	storeID, _, err := locateImage(ctx, l.store, id)
+	if err != nil {
+		return nil, fmt.Errorf("image %s: %w", shortID(id), err)
+	}
+	return is.Transport.NewStoreReference(l.store, nil, storeID)
 }
 
-func (w eventWriter) Write(data []byte) (int, error) {
-	w.events.Output(w.node, w.stream, data)
-	return len(data), nil
+// submitExport starts a job that publishes req.Result's content to the content store, for a client to deliver.
+func (l *Local) submitExport(req api.ExportRequest) (api.JobID, error) {
+	return l.jobs.start(false, func(ctx context.Context, ev Events) api.Outcome {
+		ctx, flush := forCall(ctx, req.Trace, ev)
+		defer flush() // after the span ends
+		ctx, span := tracing.StartTrack(ctx, "export", "export to the content store")
+		exported, err := l.export(ctx, req.Result)
+		span.EndWith(err)
+		if err != nil {
+			outcome := failed(err)
+			outcome.Failure.Nodes = []graph.Ref{req.Result.Node}
+			return outcome
+		}
+		return api.Outcome{Exported: exported}
+	})
+}
+
+// export publishes the content of res to the content store: a task's tree is there already;
+// an image's manifest, config and layers, or an index's and its images', are copied out of the container store
+// through a layout, and imported.
+// Only an export copies image blobs out of the container store; a task's export doesn't open it.
+func (l *Local) export(ctx context.Context, res api.Result) (_ *api.Exported, err error) {
+	if res.Files != nil {
+		content, err := l.ContentStore()
+		if err != nil {
+			return nil, err
+		}
+		if err := cache.CheckTree(ctx, content, *res.Files); err != nil {
+			return nil, fmt.Errorf("the task's files can't be delivered from the content store: %w", err)
+		}
+		return &api.Exported{Files: res.Files, Epoch: res.Epoch}, nil
+	}
+	if res.Image == "" && res.Index == nil {
+		return nil, errors.New("the target made no image and no files")
+	}
+	if err := l.open(); err != nil {
+		return nil, err
+	}
+	dir, err := os.MkdirTemp("", "vamos-export-")
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if rerr := os.RemoveAll(dir); rerr != nil {
+			err = errors.Join(err, fmt.Errorf("removing the copied blobs: %w", rerr))
+		}
+	}()
+	policyContext, err := transfer.Policy(l.systemContext)
+	if err != nil {
+		return nil, err
+	}
+	defer policyContext.Destroy()
+	var written []byte
+	mediaType := imgspecv1.MediaTypeImageManifest
+	if res.Index != nil {
+		if _, written, err = l.layoutIndex(ctx, policyContext, dir, res.Index); err != nil {
+			return nil, err
+		}
+		mediaType = imgspecv1.MediaTypeImageIndex
+	} else {
+		if written, err = l.layoutImage(ctx, policyContext, dir, res.Image, "image"); err != nil {
+			return nil, err
+		}
+	}
+	blobs, err := transfer.LayoutBlobs(dir)
+	if err != nil {
+		return nil, err
+	}
+	manifestBlob := cache.Blob{Digest: digest.FromBytes(written), Size: int64(len(written))}
+	exported := &api.Exported{Manifest: manifestBlob, MediaType: mediaType}
+	_, span := tracing.Start(ctx, "publish blobs", "manifest", manifestBlob.Digest.String(), "blobs", len(blobs))
+	defer func() { span.EndWith(err) }()
+	for _, b := range blobs {
+		if err := l.importBlob(ctx, dir, b); err != nil {
+			return nil, err
+		}
+		if b != manifestBlob {
+			exported.Blobs = append(exported.Blobs, b)
+		}
+	}
+	return exported, nil
+}
+
+// importBlob imports blob b from the layout in dir into the content store, whether or not it holds one by that
+// digest: Has tells a blob of the right size from none, not a corrupt one, and an export must deliver.
+func (l *Local) importBlob(ctx context.Context, dir string, b cache.Blob) error {
+	f, err := os.Open(transfer.LayoutBlobPath(dir, b))
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := l.content.Import(ctx, b, f); err != nil {
+		return fmt.Errorf("publishing blob %s: %w", b.Digest, err)
+	}
+	return nil
+}
+
+// layoutImage copies the image with ID id from the container store into the OCI layout in dir, as ref,
+// with an OCI manifest, and returns the manifest written.
+func (l *Local) layoutImage(
+	ctx context.Context, policyContext *signature.PolicyContext, dir, id, ref string,
+) ([]byte, error) {
+	src, err := l.imageReference(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	layoutRef, err := layout.NewReference(dir, ref)
+	if err != nil {
+		return nil, err
+	}
+	return transfer.Image(ctx, policyContext, layoutRef, src, &imagecopy.Options{
+		ForceManifestMIMEType: imgspecv1.MediaTypeImageManifest,
+	})
+}
+
+// layoutIndex copies the images of manifests from the container store into the OCI layout in dir,
+// and makes an index listing each with its platform, in order, which the layout's index.json names as "index",
+// and returns a reference to it and the index's bytes.
+// containers/image copies an index, and its images, only from a source that has one, which this makes.
+func (l *Local) layoutIndex(
+	ctx context.Context, policyContext *signature.PolicyContext, dir string, manifests []api.Manifest,
+) (types.ImageReference, []byte, error) {
+	index := imgspecv1.Index{Versioned: specs.Versioned{SchemaVersion: 2}, MediaType: imgspecv1.MediaTypeImageIndex}
+	for i, m := range manifests {
+		written, err := l.layoutImage(ctx, policyContext, dir, m.Image, fmt.Sprintf("manifest-%d", i))
+		if err != nil {
+			return nil, nil, err
+		}
+		platform, err := graph.ParsePlatform(m.Platform)
+		if err != nil {
+			return nil, nil, err
+		}
+		index.Manifests = append(index.Manifests, imgspecv1.Descriptor{
+			MediaType: imgspecv1.MediaTypeImageManifest,
+			Digest:    digest.FromBytes(written),
+			Size:      int64(len(written)),
+			Platform:  &platform,
+		})
+	}
+	data, err := transfer.WriteLayoutIndex(dir, index, "index")
+	if err != nil {
+		return nil, nil, err
+	}
+	ref, err := layout.NewReference(dir, "index")
+	return ref, data, err
 }

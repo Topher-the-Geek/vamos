@@ -40,8 +40,9 @@ Use `diskProject` for symlinks or tests that write the project.
 Do not add `testdata/` directories.
 Workspace cases need `WORKSPACE` plus each package's BUILD file.
 BUILD snippets start with `pullBusybox`; image commands usually name `app`.
-Tests that build call `requireBuildah(t)` so `-short` and non-root runs skip them.
-Every `TestMain` that uses buildah must call `buildah.InitReexec()` first.
+Tests that build call `requireBuildah(t)`.
+Every `TestMain` that uses buildah must call `buildah.InitReexec()` first,
+and `testenv.RemoveSuiteStores` after the tests.
 Table cases use keyed struct literals, one field per line.
 
 On failure, check output absence with `assertNoFiles` and image cleanup with `assertNoNewImages`.
@@ -49,10 +50,23 @@ Successful dependencies remain cached even if a later target fails.
 For path and metadata changes inspect [export_test.go](../../internal/finish/export_test.go)
 and the end-to-end cases routed by [container-builds.md](container-builds.md).
 
-Build tests share the machine's cache and container store.
-Use `newNonce` for cases that need fresh actions; `cached` versus `building` is observable.
-`TestPrune` and `TestPullTag` empty the cache, so the next build runs targets again.
-The initial run pulls `busybox:1.36`; avoid redundant registry requests and concurrent destructive cache tests.
-Tests overriding `CONTAINERS_REGISTRIES_CONF` must call `sysregistriesv2.InvalidateCache`
+Tests never touch the developer's container store or build cache.
+`testenv.SuiteStores` makes a store and cache for the test binary, beside the default store, removed after the run;
+`testenv.PrivateStores` makes a test its own, for one that destroys what they hold, as `TestPrune` does.
+In `internal/cli`, `vamos` runs against the suite's stores unless the test called `usePrivateStores`.
+Each run of the suite pulls `busybox:1.36` once into its fresh store, which Docker Hub counts against its pull limit,
+so tests that need only a base to add files to push one to an in-process registry instead.
+Use `newNonce` for cases that need fresh actions within a run; `cached` versus `building` is observable.
+Tests that need buildah call `requireBuildah(t)`; those that change owners call `testenv.RequireOwnership`.
+Both skip where the capability is missing, by probing it, unless `VAMOS_REQUIRE_INTEGRATION` is set,
+which makes them fail instead, for a host that must run the whole suite.
+The buildah probe needs root and makes and mounts a container from scratch in the suite's store;
+the ownership probe needs root, as exports do, and a filesystem that takes `chown`.
+Test stores drop the default store's additional image and layer stores,
+and are removed only once nothing under them is mounted.
+`-short` still skips image builds.
+The executor takes its registry settings from its environment, so a test whose executor reaches a registry
+over plain HTTP marks it insecure with `testenv.InsecureRegistry`, or `insecureRegistry` in `internal/cli`,
+which write a `registries.conf` and call `sysregistriesv2.InvalidateCache`,
 because containers/image caches registry configuration.
 Trace importer coverage skips without `trace_processor_shell`.

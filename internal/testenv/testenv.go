@@ -11,17 +11,6 @@ import (
 // ProjectDir is where in-memory test projects live.
 const ProjectDir = "/project"
 
-// RequireBuildah skips tests that build images when that isn't possible.
-func RequireBuildah(t *testing.T) {
-	t.Helper()
-	if testing.Short() {
-		t.Skip("builds an image; skipped with -short")
-	}
-	if os.Geteuid() != 0 {
-		t.Skip("builds an image, which needs root")
-	}
-}
-
 // Project returns an in-memory filesystem holding files, keyed by their path within ProjectDir.
 func Project(t *testing.T, files map[string]string) afero.Fs {
 	t.Helper()

@@ -46,9 +46,13 @@ Publishes an image, or a whole index with its images, to the destination reposit
 An image name without a tag gets `:latest`.
 Destination names cannot include a digest.
 
-`--push-from=executor` is the default: the executor pushes with its credentials and registry settings.
-`--push-from=client` pushes with the client's credentials and settings.
-The executor currently runs inside vamos, so both use your local environment.
+`--push-from=executor` is the default: the executor pushes with its credentials and registry settings,
+from its own environment: `registries.conf` and `REGISTRY_AUTH_FILE`.
+`--push-from=client` pushes with the client's credentials and settings, including `--tls-verify`.
+The executor currently runs inside vamos, so both read your local environment,
+but only the client honours the command line's `--tls-verify`.
+A push retries transient registry failures as `containers.conf` configures, then reads the tag back
+from the registry it wrote to, never a mirror, and fails if it names another manifest.
 
 ### `load`
 
@@ -121,7 +125,7 @@ These flags are shared by commands that build targets:
 | `-C`, `--dir <dir>` | Directory for unqualified target names and workspace discovery | `.` |
 | `--set <name=value>` | Set a named target's parameter; repeat for several parameters | Parameter defaults |
 | `--platform <os/arch[/variant]>` | Target platform for a pull, layer, or task | Host platform |
-| `--tls-verify <bool>` | Require HTTPS and verify registry certificates when explicitly set | Registry settings |
+| `--tls-verify <bool>` | Require HTTPS and verify certificates when vamos itself contacts a registry | `registries.conf` |
 | `--timestamp <time>` | Minimum timestamp for newly executed targets | Derived from bases and added tasks |
 
 `--platform` cannot be given when naming an index.
@@ -137,7 +141,9 @@ and is available on `build`, `push`, `load`, `save` (including its deprecated `w
 
 The TLS flag displays `true` in help, but when omitted vamos defers to `registries.conf`,
 including entries with `insecure = true`.
-Use `--tls-verify=false` explicitly to contact a registry over plain HTTP.
+It applies to what the client itself does, a push with `--push-from=client`;
+the executor, which pulls and pushes otherwise, follows `registries.conf` alone,
+so mark a plain-HTTP registry `insecure = true` there for it.
 
 Command-specific flags are `build --rebuild`, `push --push-from`, `save --tag`/`-t`, and `export --replace`.
 

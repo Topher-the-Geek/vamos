@@ -4,15 +4,12 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"log"
-	"net/http/httptest"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/google/go-containerregistry/pkg/registry"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 )
@@ -194,9 +191,8 @@ func TestIndex(t *testing.T) {
 	})
 
 	t.Run("push", func(t *testing.T) {
-		server := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))
-		t.Cleanup(server.Close)
-		image := strings.TrimPrefix(server.URL, "http://") + "/server:v1"
+		_, host := insecureRegistry(t, nil)
+		image := host + "/server:v1"
 		r := vamos(t, fsys, "push", "server", image, "--set", "greeting=hola", "--tls-verify=false", "-C", projectDir).
 			succeeds(t)
 		assertTargets(t, r, map[string]string{
@@ -234,9 +230,8 @@ func TestIndex(t *testing.T) {
 	})
 
 	t.Run("push from the client", func(t *testing.T) {
-		server := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))
-		t.Cleanup(server.Close)
-		image := strings.TrimPrefix(server.URL, "http://") + "/server:v1"
+		_, host := insecureRegistry(t, nil)
+		image := host + "/server:v1"
 		r := vamos(t, fsys, "push", "server", image, "--set", "greeting=hola", "--push-from=client",
 			"--tls-verify=false", "-C", projectDir).succeeds(t)
 
@@ -292,9 +287,8 @@ layer(name="other", base="scratch", command=["other", "%s"])
 index(name="server", layer={"%s": "other", "%s": dep("host")})
 `, nonce, nonce, foreign(), native)})
 
-	server := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))
-	t.Cleanup(server.Close)
-	image := strings.TrimPrefix(server.URL, "http://") + "/server:v1"
+	_, host := insecureRegistry(t, nil)
+	image := host + "/server:v1"
 	vamos(t, fsys, "push", "server", image, "--tls-verify=false", "-C", projectDir).succeeds(t)
 
 	ref, err := name.ParseReference(image, name.Insecure)
@@ -366,9 +360,8 @@ index(name="server", layer="app", platforms=["linux/arm/v6", "linux/arm/v7"])
 		t.Errorf("command = %q, want ctx.variant v7", cmd)
 	}
 
-	server := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))
-	t.Cleanup(server.Close)
-	image := strings.TrimPrefix(server.URL, "http://") + "/server:v1"
+	_, host := insecureRegistry(t, nil)
+	image := host + "/server:v1"
 	vamos(t, fsys, "push", "server", image, "--tls-verify=false", "-C", projectDir).succeeds(t)
 	ref, err := name.ParseReference(image, name.Insecure)
 	must(t, err)

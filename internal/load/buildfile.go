@@ -28,6 +28,7 @@ import (
 // A package is named by its directory relative to the workspace's root, "" for the root itself,
 // and a target by its label, "//dir:name".
 type workspace struct {
+	ctx          context.Context // of the load, which ends Starlark evaluation when it ends
 	fs           afero.Fs
 	root         string                // absolute: the directory holding the WORKSPACE file, or else the only package
 	current      string                // the package of -C, whose targets are named without a label
@@ -176,7 +177,7 @@ func (e *loadError) Unwrap() error { return e.err }
 // A WORKSPACE file only marks the workspace's root.
 // It loads no BUILD file yet.
 // exec is the executor's platform, which targets are built for unless --platform gives another.
-func openWorkspace(fsys afero.Fs, dir string, exec imgspecv1.Platform) (*workspace, error) {
+func openWorkspace(ctx context.Context, fsys afero.Fs, dir string, exec imgspecv1.Platform) (*workspace, error) {
 	info, err := fsys.Stat(dir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("directory %s does not exist", dir)
@@ -213,6 +214,7 @@ func openWorkspace(fsys afero.Fs, dir string, exec imgspecv1.Platform) (*workspa
 		current:      filepath.ToSlash(current),
 		packages:     map[string]*buildFile{},
 		modules:      map[string]*module{},
+		ctx:          ctx,
 		execPlatform: &platformValue{exec},
 		platform:     &platformValue{exec},
 		configs:      map[string]*config{},
@@ -386,8 +388,9 @@ func (w *workspace) exec(f *buildFile, src []byte) error {
 	c := &evalContext{mode: declaring, file: f, listed: map[step]bool{}}
 	thread := &starlark.Thread{Name: f.path, Load: w.loadModule}
 	thread.SetLocal(contextKey, c)
+	defer cancelWith(w.ctx, thread)()
 	if _, err := starlark.ExecFileOptions(&syntax.FileOptions{}, thread, f.path, src, w.predeclared()); err != nil {
-		return describeExecError(err)
+		return w.interrupted(describeExecError(err))
 	}
 
 	// A step made as the file runs may be listed only by a function of ctx giving steps, which runs later.
@@ -446,9 +449,10 @@ func (w *workspace) loadModule(_ *starlark.Thread, label string) (starlark.Strin
 	w.modules[label] = m
 	thread := &starlark.Thread{Name: path, Load: w.loadModule}
 	thread.SetLocal(contextKey, &evalContext{mode: loadingModule})
+	defer cancelWith(w.ctx, thread)()
 	m.globals, m.err = starlark.ExecFileOptions(&syntax.FileOptions{}, thread, path, src, w.predeclared())
 	if m.err != nil {
-		m.err = describeExecError(m.err)
+		m.err = w.interrupted(describeExecError(m.err))
 	}
 	m.loading = false
 	return m.globals, m.err
@@ -1050,7 +1054,7 @@ func (w *workspace) declaration(l string) *declaration {
 // Each glob is a span of ctx's trace, which those that add its files point back to.
 func (w *workspace) readGlobs(
 	ctx context.Context, g *graph.Graph, globs map[graph.Ref]*fileSet,
-	store func(dir string, sel *fileset.Selection) (cache.Blob, fileset.Stats, error),
+	store func(ctx context.Context, dir string, sel *fileset.Selection) (cache.Blob, fileset.Stats, error),
 ) error {
 	for _, ref := range slices.Sorted(maps.Keys(globs)) {
 		set := globs[ref]
@@ -1058,7 +1062,7 @@ func (w *workspace) readGlobs(
 			"dir", set.dir,
 			"include", set.sel.Include,
 			"exclude", set.sel.Exclude)
-		tree, stats, err := store(set.dir, set.sel)
+		tree, stats, err := store(ctx, set.dir, set.sel)
 		if err != nil {
 			err = fmt.Errorf("%s: glob: %w", w.declaration(set.label).pos, err)
 			if set.configuring != "" {
@@ -1069,7 +1073,7 @@ func (w *workspace) readGlobs(
 		}
 		span.Set(stats.Args()...)
 		span.Set("tree", tree.Digest.String(), "tree bytes", tree.Size)
-		span.Produce(graph.FlowKey(ref))
+		span.Produce(graph.TreeFlow(tree))
 		span.End()
 		g.Node(ref).Source.Tree = tree
 	}
@@ -1187,4 +1191,31 @@ func stringList(fnName, param string, list *starlark.List) ([]string, error) {
 		out = append(out, s)
 	}
 	return out, nil
+}
+
+// interrupted returns ctx's error if it has ended, so that a Starlark evaluation it cancelled reports
+// the interruption as such, rather than as a failure of the BUILD file, and err otherwise.
+func (w *workspace) interrupted(err error) error {
+	if w.ctx != nil && w.ctx.Err() != nil {
+		return w.ctx.Err()
+	}
+	return err
+}
+
+// cancelWith cancels thread when ctx ends, so that a BUILD file that runs on, as a loop that never ends does,
+// stops when the command is interrupted, and returns what stops watching, which the caller defers.
+// Starlark checks for cancellation between statements, so the thread stops promptly.
+func cancelWith(ctx context.Context, thread *starlark.Thread) func() {
+	if ctx == nil || ctx.Done() == nil {
+		return func() {}
+	}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			thread.Cancel("interrupted: " + ctx.Err().Error())
+		case <-done:
+		}
+	}()
+	return func() { close(done) }
 }

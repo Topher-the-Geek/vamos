@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"reflect"
 	"sync"
 	"time"
 )
@@ -27,6 +28,74 @@ type Span struct {
 	// Perfetto binds a slice to one arrow's end alone, so a span has at most one of them.
 	Produces string `json:"produces,omitempty"`
 	Uses     string `json:"uses,omitempty"`
+}
+
+// Clone returns a copy of s that shares no memory with it: its arguments are copied,
+// and so are the slices, maps and pointers among their values, and within those;
+// arguments are JSON values, so no struct among them holds one.
+func (s Span) Clone() Span {
+	if s.Args != nil {
+		args := make(map[string]any, len(s.Args))
+		for k, v := range s.Args {
+			args[k] = cloneValue(v)
+		}
+		s.Args = args
+	}
+	return s
+}
+
+// cloneValue returns a copy of v that shares no slice, map or pointer with it, as deepCopy makes.
+func cloneValue(v any) any {
+	if v == nil {
+		return nil
+	}
+	return deepCopy(reflect.ValueOf(v)).Interface()
+}
+
+// deepCopy returns a copy of v, copying the slices, arrays, maps and pointers it holds, and interfaces' values;
+// any other value, a struct among them, is copied as it is.
+func deepCopy(v reflect.Value) reflect.Value {
+	switch v.Kind() {
+	case reflect.Slice:
+		if v.IsNil() {
+			return v
+		}
+		c := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
+		for i := range v.Len() {
+			c.Index(i).Set(deepCopy(v.Index(i)))
+		}
+		return c
+	case reflect.Array:
+		c := reflect.New(v.Type()).Elem()
+		for i := range v.Len() {
+			c.Index(i).Set(deepCopy(v.Index(i)))
+		}
+		return c
+	case reflect.Map:
+		if v.IsNil() {
+			return v
+		}
+		c := reflect.MakeMapWithSize(v.Type(), v.Len())
+		for it := v.MapRange(); it.Next(); {
+			c.SetMapIndex(it.Key(), deepCopy(it.Value()))
+		}
+		return c
+	case reflect.Pointer:
+		if v.IsNil() {
+			return v
+		}
+		c := reflect.New(v.Type().Elem())
+		c.Elem().Set(deepCopy(v.Elem()))
+		return c
+	case reflect.Interface:
+		if v.IsNil() {
+			return v
+		}
+		c := reflect.New(v.Type()).Elem()
+		c.Set(deepCopy(v.Elem()))
+		return c
+	}
+	return v
 }
 
 // CallContext asks an executor to trace a call, as a part of the client's span Parent.
@@ -104,6 +173,36 @@ func ForCall(ctx context.Context, call *CallContext, onEnd func(Span), process s
 		return ctx
 	}
 	return WithRecorder(ctx, NewRecorder(process, onEnd), call.Parent)
+}
+
+// Revocable returns a context whose spans are recorded as ctx's would be, as part of its span and on its track,
+// until the function it returns is called; spans that end afterwards are dropped.
+// It is for work that may outlive the owner of ctx's trace, which revokes it before its last spans are sent:
+// once the function returns, no span of the context is being recorded, and none will be.
+// If ctx isn't traced, it returns ctx and a function that does nothing.
+func Revocable(ctx context.Context) (context.Context, func()) {
+	rec, _ := ctx.Value(contextKey{}).(*recording)
+	if rec == nil {
+		return ctx, func() {}
+	}
+	var (
+		mu      sync.RWMutex // held to read while a span is recorded, so that revoking waits for it
+		revoked bool
+	)
+	owner := rec.recorder
+	r := NewRecorder(owner.process, func(s Span) {
+		mu.RLock()
+		defer mu.RUnlock()
+		if !revoked {
+			owner.add(s)
+		}
+	})
+	revocable := &recording{recorder: r, parent: rec.parent, span: rec.span, track: rec.track}
+	return context.WithValue(ctx, contextKey{}, revocable), func() {
+		mu.Lock()
+		revoked = true
+		mu.Unlock()
+	}
 }
 
 // Call returns what asks an executor to trace a call made within ctx's span, or nil if ctx isn't traced.

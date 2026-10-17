@@ -2,7 +2,6 @@ package run
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -12,10 +11,10 @@ import (
 	"github.com/Topher-the-Geek/vamos/internal/fileset"
 	"github.com/Topher-the-Geek/vamos/internal/graph"
 	"github.com/Topher-the-Geek/vamos/internal/tracing"
+	"github.com/Topher-the-Geek/vamos/internal/transfer"
 	"github.com/containerd/platforms"
 	"github.com/opencontainers/go-digest"
 	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
-	containersconfig "go.podman.io/common/pkg/config"
 	"go.podman.io/common/pkg/retry"
 	imagecopy "go.podman.io/image/v5/copy"
 	"go.podman.io/image/v5/docker"
@@ -27,81 +26,42 @@ import (
 	"go.podman.io/storage"
 )
 
-// tagRecord is what a pull()'s tag named when vamos last resolved it, kept in the build cache
+// tagRecord is what a pull()'s tag named when vamos last resolved it, kept in the record store
 // so that later builds pull the same images, without reaching the registry, until --rebuild resolves it again.
-type tagRecord struct {
-	Digest    digest.Digest            `json:"digest"`              // of the manifest it named: an index or an image
-	MIMEType  string                   `json:"mime_type,omitempty"` // the manifest's
-	Manifest  []byte                   `json:"manifest,omitempty"`  // the manifest itself, a few KB
-	Instances map[string]digest.Digest `json:"instances,omitempty"` // each platform's image, by platform, once chosen
-}
+type tagRecord = cache.TagRecord
 
-// tagRecordOf returns the record of the tag ref, or nil if there is none.
-func tagRecordOf(c *cache.Cache, ref reference.NamedTagged) (*tagRecord, error) {
-	data, err := c.Tag(ref.String())
-	if err != nil || data == nil {
-		return nil, err
-	}
-	var record tagRecord
-	if err := json.Unmarshal(data, &record); err != nil || record.Digest == "" {
-		return nil, nil // as good as none: the tag is resolved again
-	}
-	return &record, nil
-}
-
-// setTagRecord records what the tag ref names, replacing any earlier record.
-func setTagRecord(c *cache.Cache, ref reference.NamedTagged, record *tagRecord) error {
-	data, err := json.Marshal(record)
-	if err != nil {
-		return err
-	}
-	return c.SetTag(ref.String(), data)
-}
-
-// puller pulls the images of a build's pulls, each tag resolved once in the build,
-// so that one tag gives every platform's image from the same index, even if the tag moves meanwhile.
+// puller executes resolve actions: it resolves a tag to the image it names for a platform, pulls that image
+// into the store unless it is there, and leaves a tag record saying what the tag named.
 type puller struct {
 	store         storage.Store
-	cache         *cache.Cache
+	records       cache.RecordStore
 	systemContext *types.SystemContext
-	tags          map[string]*tagRecord // resolved in this build, by tag
-	again         map[string]bool       // tags to resolve again, rather than as the build cache records them
 }
 
-// tracedPull pulls the image of n, the pull ref, as a span of ctx's trace, on a track of its own.
-func (pl *puller) tracedPull(ctx context.Context, ref graph.Ref, n *graph.Node) (_ builtImage, err error) {
-	ctx, span := tracing.StartTrack(ctx, n.Desc, n.Desc, "image", n.Pull.Image, "platform", n.Pull.Platform)
-	defer func() { span.EndWith(err) }()
-	img, err := pl.pull(ctx, n.Pull)
-	if err == nil {
-		span.Set("image ID", img.id, "epoch", img.epoch.UTC().Format(time.RFC3339))
-		span.Produce(graph.FlowKey(ref))
-	}
-	return img, err
-}
-
-// pull fetches the image of p, for its platform, into the store, unless it is there already.
-func (pl *puller) pull(ctx context.Context, p *graph.Pull) (builtImage, error) {
-	image := p.Image
+// resolve resolves req, a resolve action, as a span of ctx's trace, and returns the image's ID, platform and epoch,
+// and the index, or image, that its tag named.
+func (pl *puller) resolve(ctx context.Context, req actionRequest) (*cache.ActionResult, error) {
+	a := req.action
+	image := a.Image
 	named, err := reference.ParseNamed(image)
 	if err != nil {
-		return builtImage{}, fmt.Errorf("image %q: %w", image, err)
+		return nil, fmt.Errorf("image %q: %w", image, err)
 	}
 	tagged, ok := named.(reference.NamedTagged)
 	if !ok {
-		return builtImage{}, fmt.Errorf("image %q has no tag", image)
+		return nil, fmt.Errorf("image %q has no tag", image)
 	}
-	platform, err := graph.ParsePlatform(p.Platform)
+	platform, err := graph.ParsePlatform(a.Platform)
 	if err != nil {
-		return builtImage{}, fmt.Errorf("image %q: %w", image, err)
+		return nil, fmt.Errorf("image %q: %w", image, err)
 	}
-	instance, err := pl.instance(ctx, tagged, platform)
+	instance, record, err := pl.instance(ctx, tagged, platform, a.Index, req.again)
 	if err != nil {
-		return builtImage{}, pullError(image, err)
+		return nil, pullError(image, err)
 	}
 	digested, err := reference.WithDigest(reference.TrimNamed(tagged), instance)
 	if err != nil {
-		return builtImage{}, fmt.Errorf("image %q: %w", image, err)
+		return nil, fmt.Errorf("image %q: %w", image, err)
 	}
 	tracing.Current(ctx).Set("instance", instance.String())
 	// Look for the image pulled before, by its manifest's digest,
@@ -121,20 +81,33 @@ func (pl *puller) pull(ctx context.Context, p *graph.Pull) (builtImage, error) {
 		img, err = pl.fetch(ctx, digested, platform)
 		if err != nil {
 			// With the tag's record cached, this is the first request to reach the registry.
-			return builtImage{}, pullError(image, err)
+			return nil, pullError(image, err)
 		}
 	}
 	if err != nil {
-		return builtImage{}, fmt.Errorf("image %q: %w", image, err)
+		return nil, fmt.Errorf("image %q: %w", image, err)
 	}
-	id := img.ID
-	got, err := imagePlatform(ctx, pl.store, id)
+	// What the tag resolved to is validated before it is used: the store's image must be the manifest chosen,
+	// its ID is its config's digest, and it must be for the platform asked.
+	// containers/image checks the manifest against the digest it fetched too; this guards the store's index.
+	if img.Digest != instance && !slices.Contains(img.Digests, instance) {
+		return nil, fmt.Errorf("image %q: the store's image for manifest %s isn't that manifest", image, instance)
+	}
+	id, got, err := imageIdentity(ctx, pl.store, img.ID)
 	if err != nil {
-		return builtImage{}, fmt.Errorf("image %q: %w", image, err)
+		return nil, fmt.Errorf("image %q: %w", image, err)
 	}
 	if !platforms.NewMatcher(platform).Match(got) {
-		return builtImage{}, fmt.Errorf("image %q is for %s, not %s, and its tag names that image alone, "+
+		return nil, fmt.Errorf("image %q is for %s, not %s, and its tag names that image alone, "+
 			"not an index of images for several platforms", image, platforms.Format(got), platforms.Format(platform))
+	}
+	// The image is located by its ID through the cache repository from now on, as a built layer is.
+	if err := nameImage(pl.store, img, id.Encoded()); err != nil {
+		return nil, fmt.Errorf("image %q: %w", image, err)
+	}
+	// The record is written once the image is in the store, so that no record names an image never pulled.
+	if err := pl.records.SetTag(ctx, tagged.String(), record); err != nil {
+		return nil, fmt.Errorf("saving to the build cache: %w", err)
 	}
 	// Files built on the image are stamped with its creation time:
 	// a time that is the same on every machine, and that moves forward only when the image does.
@@ -142,7 +115,12 @@ func (pl *puller) pull(ctx context.Context, p *graph.Pull) (builtImage, error) {
 	if epoch.IsZero() {
 		epoch = time.Unix(0, 0)
 	}
-	return builtImage{id: id, epoch: epoch}, nil
+	return &cache.ActionResult{
+		Image:    id,
+		Platform: platforms.Format(got),
+		Index:    record.Digest,
+		Epoch:    epoch.Unix(),
+	}, nil
 }
 
 // fetch copies the image that digested names from its registry into the store, named by digest, and returns it.
@@ -167,36 +145,19 @@ func (pl *puller) fetch(ctx context.Context, digested reference.Canonical, platf
 		return nil, err
 	}
 	defer policyContext.Destroy()
-	retries, err := pullRetries()
+	retries, err := transfer.Retries()
 	if err != nil {
 		return nil, err
 	}
 	sys := forPlatform(pl.systemContext, platform)
 	err = retry.IfNecessary(ctx, func() error {
-		_, err := tracedCopy(ctx, policyContext, dest, src, &imagecopy.Options{SourceCtx: sys, DestinationCtx: sys})
+		_, err := transfer.Image(ctx, policyContext, dest, src, &imagecopy.Options{SourceCtx: sys, DestinationCtx: sys})
 		return err
 	}, retries)
 	if err != nil {
 		return nil, err
 	}
 	return is.Transport.GetStoreImage(pl.store, dest)
-}
-
-// pullRetries returns how to retry a pull after an error that may not happen again, such as a connection reset:
-// as containers.conf's retry and retry_delay say, as for buildah and podman,
-// backing off exponentially from a second unless retry_delay is set.
-func pullRetries() (*retry.Options, error) {
-	conf, err := containersconfig.Default()
-	if err != nil {
-		return nil, err
-	}
-	options := &retry.Options{MaxRetry: int(conf.Engine.Retry)}
-	if conf.Engine.RetryDelay != "" {
-		if options.Delay, err = time.ParseDuration(conf.Engine.RetryDelay); err != nil {
-			return nil, fmt.Errorf("containers.conf's retry_delay: %w", err)
-		}
-	}
-	return options, nil
 }
 
 // pullError describes err, from reaching the registry for image,
@@ -208,55 +169,57 @@ func pullError(image string, err error) error {
 	return fmt.Errorf("image %q: %w", image, err)
 }
 
-// instance returns the digest of the image that the tag ref names for platform:
-// the tag's own, if it names an image, or else the one for platform in the index it names.
-// The record keeps the manifest the tag names,
-// so that choosing another platform's image later needs no registry either.
-func (pl *puller) instance(ctx context.Context, ref reference.NamedTagged, platform imgspecv1.Platform) (
-	digest.Digest, error) {
-	record := pl.tags[ref.String()]
+// instance returns the digest of the image that the tag ref names for platform, and the tag's record:
+// the tag's own manifest, if it names an image, or else the one for platform in the index it names.
+// With pinned, the tag is taken to name that manifest, as it did earlier in the job;
+// otherwise the tag is resolved as the record store has it, or afresh if again or it has no record.
+// The record keeps the manifest the tag names, so that choosing another platform's image later needs no registry;
+// the caller saves it once the image is in the store.
+func (pl *puller) instance(
+	ctx context.Context, ref reference.NamedTagged, platform imgspecv1.Platform, pinned digest.Digest, again bool,
+) (digest.Digest, *tagRecord, error) {
+	var record *tagRecord
 	var err error
-	if record == nil && !pl.again[ref.String()] {
-		if record, err = tagRecordOf(pl.cache, ref); err != nil {
-			return "", err
+	if pinned != "" || !again {
+		if record, err = pl.records.Tag(ctx, ref.String()); err != nil {
+			return "", nil, err
 		}
 	}
 	tracing.Current(ctx).Set("tag recorded", record != nil)
+	if pinned != "" && (record == nil || record.Digest != pinned) {
+		record = &tagRecord{Digest: pinned} // the manifest is fetched by its digest, below
+	}
 	if record == nil {
 		data, mimeType, err := pl.manifest(ctx, ref)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		d, err := manifest.Digest(data)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		record = &tagRecord{Digest: d, MIMEType: mimeType, Manifest: data}
 	}
-	pl.tags[ref.String()] = record
 	tracing.Current(ctx).Set("manifest", record.Digest.String())
 	if d, ok := record.Instances[platforms.Format(platform)]; ok {
-		return d, nil
+		return d, record, nil
 	}
 
 	data, err := pl.recordedManifest(ctx, ref, record)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	d := record.Digest
 	if manifest.MIMETypeIsMultiImage(record.MIMEType) {
 		if d, err = chooseInstance(data, record.MIMEType, platform); err != nil {
-			return "", err
+			return "", nil, err
 		}
 	}
 	if record.Instances == nil {
 		record.Instances = map[string]digest.Digest{}
 	}
 	record.Instances[platforms.Format(platform)] = d
-	if err := setTagRecord(pl.cache, ref, record); err != nil {
-		return "", fmt.Errorf("saving to the build cache: %w", err)
-	}
-	return d, nil
+	return d, record, nil
 }
 
 // recordedManifest returns the manifest that record says the tag ref named: as recorded,
@@ -273,6 +236,13 @@ func (pl *puller) recordedManifest(ctx context.Context, ref reference.NamedTagge
 	data, mimeType, err := pl.manifest(ctx, digested)
 	if err != nil {
 		return nil, err
+	}
+	d, err := manifest.Digest(data)
+	if err != nil {
+		return nil, err
+	}
+	if d != record.Digest {
+		return nil, fmt.Errorf("the registry gave manifest %s for %s", d, digested.Digest())
 	}
 	record.MIMEType, record.Manifest = mimeType, data
 	return data, nil
@@ -344,24 +314,110 @@ func forPlatform(sys *types.SystemContext, platform imgspecv1.Platform) *types.S
 // HostPlatform is the platform of the machine vamos runs on, whose programs need no emulator.
 var HostPlatform = platforms.Normalize(platforms.DefaultSpec())
 
-// imagePlatform returns the platform that the image with ID id in store says it is for.
-func imagePlatform(ctx context.Context, store storage.Store, id string) (imgspecv1.Platform, error) {
-	ref, err := is.Transport.NewStoreReference(store, nil, id)
+// imageIdentity returns the image ID of the image that storeID names in store, the digest of its config,
+// and the platform its config says it is for.
+// The store's own IDs stay within run; results and names use the image ID.
+// An image with no config, as the retired Docker schema 1 makes, has no image ID and can't be used,
+// and nor can one whose config's digest isn't SHA-256, the algorithm image IDs are named in.
+// The image's layers in the store must be those its config lists, so that its ID identifies its files too.
+func imageIdentity(ctx context.Context, store storage.Store, storeID string) (
+	digest.Digest, imgspecv1.Platform, error) {
+	ref, err := is.Transport.NewStoreReference(store, nil, storeID)
 	if err != nil {
-		return imgspecv1.Platform{}, err
+		return "", imgspecv1.Platform{}, err
 	}
 	img, err := ref.NewImage(ctx, nil)
 	if err != nil {
-		return imgspecv1.Platform{}, err
+		return "", imgspecv1.Platform{}, err
 	}
 	defer img.Close()
+	configDigest := img.ConfigInfo().Digest
+	if configDigest == "" {
+		return "", imgspecv1.Platform{}, errors.New("the image has no config, so no image ID")
+	}
+	if err := configDigest.Validate(); err != nil {
+		return "", imgspecv1.Platform{}, fmt.Errorf("the image's config digest %q: %w", configDigest, err)
+	}
+	if configDigest.Algorithm() != digest.SHA256 {
+		return "", imgspecv1.Platform{}, fmt.Errorf("the image's config digest %s isn't SHA-256", configDigest)
+	}
 	config, err := img.OCIConfig(ctx)
 	if err != nil {
-		return imgspecv1.Platform{}, err
+		return "", imgspecv1.Platform{}, err
 	}
-	return platforms.Normalize(imgspecv1.Platform{
+	stored, err := store.Image(storeID)
+	if err != nil {
+		return "", imgspecv1.Platform{}, err
+	}
+	if err := checkLayers(store, stored, config.RootFS.DiffIDs); err != nil {
+		return "", imgspecv1.Platform{}, err
+	}
+	return configDigest, platforms.Normalize(imgspecv1.Platform{
 		OS:           config.OS,
 		Architecture: config.Architecture,
 		Variant:      config.Variant,
 	}), nil
+}
+
+// checkLayers checks that img's layers in store are, from the bottom, those with the uncompressed digests diffIDs.
+// containers/image checks a pulled layer against its config's diff ID unless storage.conf's
+// insecure_allow_unpredictable_image_contents lets a partial pull keep a layer that only its table of contents
+// identifies, with no uncompressed digest: an image whose config wouldn't identify its files.
+func checkLayers(store storage.Store, img *storage.Image, diffIDs []digest.Digest) error {
+	var stored []digest.Digest
+	// A layer chain longer than the config's can't match, which bounds a walk of a corrupt one.
+	for id := img.TopLayer; id != "" && len(stored) <= len(diffIDs); {
+		layer, err := store.Layer(id)
+		if err != nil {
+			return err
+		}
+		stored = append(stored, layer.UncompressedDigest)
+		id = layer.Parent
+	}
+	slices.Reverse(stored)
+	if !slices.Equal(stored, diffIDs) {
+		return errors.New("the image's layers in the container store aren't those its config lists, " +
+			"as when storage.conf's insecure_allow_unpredictable_image_contents lets a partial pull skip checking them")
+	}
+	return nil
+}
+
+// errWrongImage is the error that the image a name in the cache repository names isn't the image the name is for.
+var errWrongImage = errors.New("the image named for it isn't that image")
+
+// locateImage returns the container store's own ID of the image with image ID id, and the platform it is for.
+// The image is found by its name in the cache repository, which anything changing the store can move to another,
+// so what the name names is checked to be the image, and then used by the store's ID found, which can't move.
+// It returns an error wrapping storage.ErrImageUnknown if nothing has the name,
+// and one wrapping errWrongImage if what does isn't the image, or can't be read as an image.
+func locateImage(ctx context.Context, store storage.Store, id string) (string, imgspecv1.Platform, error) {
+	img, err := store.Image(cacheName(id))
+	if err != nil {
+		return "", imgspecv1.Platform{}, err
+	}
+	got, platform, err := imageIdentity(ctx, store, img.ID)
+	if err != nil {
+		return "", imgspecv1.Platform{}, fmt.Errorf("%w: %w", errWrongImage, err)
+	}
+	if got.Encoded() != id {
+		return "", imgspecv1.Platform{}, fmt.Errorf("%w: it is image %s", errWrongImage, got.Encoded()[:12])
+	}
+	return img.ID, platform, nil
+}
+
+// cacheName returns the name the image with ID id has in the cache repository, through which run locates it.
+func cacheName(id string) string {
+	return CacheRepository + ":" + id
+}
+
+// nameImage gives img, in store, its name in the cache repository, by its image ID id, unless it has it.
+func nameImage(store storage.Store, img *storage.Image, id string) error {
+	name := cacheName(id)
+	if slices.Contains(img.Names, name) {
+		return nil
+	}
+	if err := store.AddNames(img.ID, []string{name}); err != nil {
+		return fmt.Errorf("naming image %s: %w", shortID(id), err)
+	}
+	return nil
 }

@@ -18,24 +18,33 @@ import (
 
 // Version changes whenever what a graph means changes,
 // so that a client and an executor of different versions refuse each other's graphs rather than build something else.
-const Version = 1
+const Version = 2
 
 // Graph is everything a build runs:
 // each target in each configuration it's needed in, in an order where each node comes after the nodes it uses.
 // It holds no Starlark, so that what runs it needs nothing of the BUILD files that made it.
 type Graph struct {
-	Version int    `json:"version"`
-	Nodes   []Node `json:"nodes"`
-	Roots   []Ref  `json:"roots"` // the targets the command named, once an index is chosen from
+	Version int `json:"version"`
+	// ExecPlatform is the platform the graph was configured for run() steps to run on without emulation,
+	// as EXEC_PLATFORM named it, normalized, so that an executor for another platform can refuse the graph.
+	ExecPlatform string `json:"exec_platform"`
+	Nodes        []Node `json:"nodes"`
+	Roots        []Ref  `json:"roots"` // the targets the command named, once an index is chosen from
 }
 
 // Ref names a node by its position in Graph.Nodes.
 // A node refers only to nodes before it, so a graph is acyclic by construction.
 type Ref int
 
-// FlowKey names what the node ref makes, in a trace, so that the spans that make and use it are joined.
-func FlowKey(ref Ref) string {
-	return fmt.Sprintf("node %d", ref)
+// TreeFlow names the tree b in a trace, so that the spans that make it and those that use it are joined,
+// in whichever process they are.
+func TreeFlow(b cache.Blob) string {
+	return "tree " + b.Digest.String()
+}
+
+// ImageFlow names the image with ID id in a trace, as TreeFlow names a tree.
+func ImageFlow(id string) string {
+	return "image " + id
 }
 
 // Scratch is the empty image, as a base.
@@ -196,6 +205,9 @@ func Decode(data []byte) (*Graph, error) {
 func (g *Graph) Validate() error {
 	if g.Version != Version {
 		return fmt.Errorf("invalid build graph: version %d, want %d", g.Version, Version)
+	}
+	if err := checkPlatform(g.ExecPlatform); err != nil {
+		return fmt.Errorf("invalid build graph: execution %w", err)
 	}
 	for i := range g.Nodes {
 		if err := g.validateNode(Ref(i)); err != nil {

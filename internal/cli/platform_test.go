@@ -5,7 +5,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/http/httptest"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -298,18 +297,18 @@ func layerDigests(t *testing.T, img v1.Image) []v1.Hash {
 // each platform's image comes from the index it named then, even after the tag moves,
 // and for a platform not built for before, until --rebuild resolves it again.
 // Pruning keeps the record and the pulled images, so builds after it don't reach the registry.
+// It has stores of its own, since it prunes them.
 func TestPullTag(t *testing.T) {
 	requireBuildah(t)
+	usePrivateStores(t)
 	reg := registry.New(registry.Logger(log.New(io.Discard, "", 0)))
 	var requests atomic.Int64 // that pulls make, of the image "base"
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server, regHost := insecureRegistry(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v2/base/") {
 			requests.Add(1)
 		}
 		reg.ServeHTTP(w, r)
 	}))
-	t.Cleanup(server.Close)
-	regHost := strings.TrimPrefix(server.URL, "http://")
 	first := pushIndex(t, regHost+"/base:v1", native, foreign())
 
 	fsys := project(t, map[string]string{
@@ -352,7 +351,7 @@ func TestPullTag(t *testing.T) {
 	}
 
 	// With the registry gone, the layers built again after pruning use the images pulled before.
-	vamos(t, fsys, "prune").ran(t) // empties the build cache that every test shares, as TestPrune does
+	vamos(t, fsys, "prune").ran(t)
 	server.Close()
 	for _, platform := range []string{native, foreign()} {
 		img := write(platform+"-4.tar", platform)
@@ -363,9 +362,7 @@ func TestPullTag(t *testing.T) {
 // TestPullTagMistakes checks the errors for a tag that names no image for the platform.
 func TestPullTagMistakes(t *testing.T) {
 	requireBuildah(t)
-	server := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))
-	t.Cleanup(server.Close)
-	regHost := strings.TrimPrefix(server.URL, "http://")
+	_, regHost := insecureRegistry(t, nil)
 	pushIndex(t, regHost+"/index:v1", "linux/s390x", "linux/ppc64le")
 	ref, err := name.ParseReference(regHost+"/single:v1", name.Insecure)
 	must(t, err)

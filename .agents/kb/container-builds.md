@@ -40,9 +40,13 @@ Preflight checks improve diagnostics but cannot authorize deleting files that ap
 The replacement fallback may briefly leave the destination absent; cleanup failure after installation is a warning.
 
 Transport details belong beside their owners:
-`archiveReference` and `LoadDocker` in [finish.go](../../internal/finish/finish.go), `exportIndex`
-and `policyContext` in [executor.go](../../internal/run/executor.go),
-and `newSystemContext` in [cli.go](../../internal/cli/cli.go).
+`archiveReference`, `copyTo` and `LoadDocker` in [finish.go](../../internal/finish/finish.go),
+which deliver an exported image from the content store through an OCI layout;
+`export`, `pushImage` and `layoutIndex` in [executor.go](../../internal/run/executor.go),
+which publish an image's blobs or push them; `Image`, `Push`, `Policy` and `Layout` in
+[transfer](../../internal/transfer/doc.go), which both sides copy with; and the registry settings,
+`run.SystemContext` for the executor's environment and `invocation.systemContext` in
+[cli.go](../../internal/cli/cli.go) for the client's, with `--tls-verify`.
 Construct image references with transport packages;
 preserve the system signature policy
 and the distinction between an unset TLS override and explicit `--tls-verify=false`.

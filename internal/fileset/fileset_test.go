@@ -1,6 +1,7 @@
 package fileset
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
@@ -77,7 +78,7 @@ func describeTree(t *cache.Tree) []string {
 // walkFiles walks sel within projectDir in fsys, giving each file a blob that holds its content in place of a digest,
 // so that describeTree shows which file each entry came from.
 func walkFiles(fsys afero.Fs, sel *Selection) (*cache.Tree, error) {
-	return Walk(fsys, testenv.ProjectDir, sel, func(name string, _ int64) (cache.Blob, error) {
+	return Walk(context.Background(), fsys, testenv.ProjectDir, sel, func(name string, _ int64) (cache.Blob, error) {
 		data, err := afero.ReadFile(fsys, name)
 		return cache.Blob{Digest: digest.NewDigestFromEncoded(digest.SHA256, string(data)), Size: int64(len(data))}, err
 	})
@@ -484,7 +485,8 @@ func TestWalkTreeFileGrew(t *testing.T) {
 				At:   tc.at,
 			}
 			c, dir := newTestCache(t)
-			_, _, err := storeFiles(c, fsys, testenv.ProjectDir, testSelection(t, []string{"*.txt"}, nil, tc.change))
+			_, _, err := storeFiles(t.Context(), c, fsys, testenv.ProjectDir,
+				testSelection(t, []string{"*.txt"}, nil, tc.change))
 			failedWith(t, err, tc.err)
 			if n := countBlobs(t, dir); n != 0 {
 				t.Errorf("the cache holds %d blobs, want none", n)

@@ -1,9 +1,12 @@
-// Package finish delivers executor results to client-selected destinations.
+// Package finish delivers exported results to client-selected destinations.
 //
 // # Invariants
 //
-// This phase uses results and cached content, never loader state or live project sources.
-// Registry push placement is explicit: executor and client settings need not agree.
+// This phase uses api.Exported and the content store, never loader state, live project sources,
+// the executor's directory or its container store: the executor publishes an image's blobs with an export job,
+// and finish reads them through cache.ContentStore, which may be a store of the client's own.
+// Registry push placement is explicit: the executor pushes as a job with its settings,
+// and Push here is the client's, with the client's.
 // Destination preflight improves errors but does not reserve a path.
 //
 // # Lifecycle
@@ -15,7 +18,8 @@
 //
 // # Changes
 //
-// Push, Save and LoadDocker own image delivery; archiveReference owns archive path adaptation.
+// Push, Save and LoadDocker own image delivery through copyTo, which lays the blobs out for transfer.Image;
+// archiveReference owns archive path adaptation.
 // Export, install, swap and setMetadata in export.go own directory replacement and host metadata.
 // Consult their contracts before changing filesystem operations,
 // especially around symlinks, cancellation and replacement races.

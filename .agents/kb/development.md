@@ -14,7 +14,8 @@ package behavior lives in `doc.go` and individual symbol contracts.
 
 Read BUILD files and project sources through `afero.Fs`.
 Real filesystem access is for output artifacts, cached content and container storage.
-Send target statuses and step output through `run.Events`; the CLI renders them through Cobra's configured writers.
+Send target statuses and step output through `run.Events`, which a job turns into `api.Event`s;
+the CLI renders them through the invocation's writers, which Cobra configures.
 Do not print executor output directly to `os.Stdout`.
 
 Errors are part of the interface.

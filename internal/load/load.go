@@ -36,9 +36,10 @@ type Request struct {
 	// Its error is returned as it is.
 	DestPlatform func(context.Context) (imgspecv1.Platform, string, error)
 	// Store reads the files that a glob selects within dir in fsys, as it returns their tree, with their stats:
-	// into the build cache, for a build.
+	// into the content store, for a build.
 	// It is called only once the targets are configured, so that a mistake in a BUILD file touches nothing.
-	Store func(fsys afero.Fs, dir string, sel *fileset.Selection) (cache.Blob, fileset.Stats, error)
+	Store func(ctx context.Context, fsys afero.Fs, dir string, sel *fileset.Selection) (
+		cache.Blob, fileset.Stats, error)
 }
 
 // Load evaluates the BUILD files of the workspace holding req.Dir, as the targets req names need them,
@@ -64,7 +65,7 @@ func load(ctx context.Context, fsys afero.Fs, req Request) (*graph.Graph, *works
 	if err != nil {
 		return nil, nil, err
 	}
-	w, err := openWorkspace(fsys, dir, req.ExecPlatform)
+	w, err := openWorkspace(ctx, fsys, dir, req.ExecPlatform)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -102,8 +103,9 @@ func load(ctx context.Context, fsys afero.Fs, req Request) (*graph.Graph, *works
 	if err != nil {
 		return nil, w, err
 	}
-	err = w.readGlobs(ctx, g, globs, func(dir string, sel *fileset.Selection) (cache.Blob, fileset.Stats, error) {
-		return req.Store(w.fs, dir, sel)
+	err = w.readGlobs(ctx, g, globs, func(ctx context.Context, dir string, sel *fileset.Selection) (
+		cache.Blob, fileset.Stats, error) {
+		return req.Store(ctx, w.fs, dir, sel)
 	})
 	if err != nil {
 		return nil, w, err

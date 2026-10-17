@@ -14,6 +14,7 @@ Read the routes relevant to the change before editing.
 | Cache identity, epochs, pruning | [.agents/kb/storage.md](.agents/kb/storage.md) |
 | Concurrency, ownership, trace transport | [.agents/kb/concurrency-model.md](.agents/kb/concurrency-model.md) |
 | Root startup / `main.go` | [doc.go](doc.go) |
+| `internal/api/` | [internal/api/doc.go](internal/api/doc.go) |
 | `internal/cli/` | [internal/cli/doc.go](internal/cli/doc.go) |
 | `internal/load/` | [internal/load/doc.go](internal/load/doc.go) |
 | `internal/graph/` | [internal/graph/doc.go](internal/graph/doc.go) |
@@ -22,6 +23,7 @@ Read the routes relevant to the change before editing.
 | `internal/cache/` | [internal/cache/doc.go](internal/cache/doc.go) |
 | `internal/fileset/` | [internal/fileset/doc.go](internal/fileset/doc.go) |
 | `internal/tracing/` | [internal/tracing/doc.go](internal/tracing/doc.go) |
+| `internal/transfer/` | [internal/transfer/doc.go](internal/transfer/doc.go) |
 | `internal/testenv/` | [internal/testenv/doc.go](internal/testenv/doc.go) |
 | Example projects and their own checks | [.agents/kb/development.md](.agents/kb/development.md) |
 | Go example payload | [examples/golang-cli/doc.go](examples/golang-cli/doc.go) |

@@ -2,6 +2,7 @@ package fileset
 
 import (
 	"cmp"
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -219,6 +220,7 @@ func (sel *Selection) matchPrefix(parts []string) (string, bool) {
 
 // treeWalk is a walk of the files a selection selects within a directory, which Walk describes.
 type treeWalk struct {
+	ctx      context.Context // the walk stops between directories when it ends
 	fsys     afero.Fs
 	dir      string
 	sel      *Selection
@@ -241,10 +243,13 @@ type treeWalk struct {
 // so they can't bring in files from outside it.
 // checkInclude refuses links on the way to each prefix.
 // dir itself may be a link, as a project reached through a linked $PWD is.
+// The walk stops with ctx's error, between entries, once ctx ends.
 func Walk(
-	fsys afero.Fs, dir string, sel *Selection, file func(name string, limit int64) (cache.Blob, error),
+	ctx context.Context, fsys afero.Fs, dir string, sel *Selection,
+	file func(name string, limit int64) (cache.Blob, error),
 ) (*cache.Tree, error) {
 	w := &treeWalk{
+		ctx:      ctx,
 		fsys:     fsys,
 		dir:      dir,
 		sel:      sel,
@@ -307,6 +312,9 @@ func (w *treeWalk) visit(rel string, info fs.FileInfo) error {
 	}
 	src := filepath.Join(w.dir, rel)
 	if info.IsDir() {
+		if err := w.ctx.Err(); err != nil {
+			return err
+		}
 		if !slices.ContainsFunc(w.sel.include, func(p pattern) bool { return mayMatchBeneath(p.parts, parts) }) {
 			return nil
 		}
@@ -331,6 +339,9 @@ func (w *treeWalk) visit(rel string, info fs.FileInfo) error {
 	prefix, ok := w.sel.matchPrefix(parts)
 	if !ok {
 		return nil
+	}
+	if err := w.ctx.Err(); err != nil {
+		return err
 	}
 	w.files++
 	if w.files > w.sel.MaxFileCount {
@@ -436,8 +447,8 @@ func (s Stats) Args() []any {
 
 // Hash returns the blob that the tree of the files sel selects within dir in fsys would be stored as,
 // and their stats, storing nothing.
-func Hash(fsys afero.Fs, dir string, sel *Selection) (cache.Blob, Stats, error) {
-	t, err := Walk(fsys, dir, sel, func(name string, limit int64) (cache.Blob, error) {
+func Hash(ctx context.Context, fsys afero.Fs, dir string, sel *Selection) (cache.Blob, Stats, error) {
+	t, err := Walk(ctx, fsys, dir, sel, func(name string, limit int64) (cache.Blob, error) {
 		return cache.HashFile(fsys, name, limit)
 	})
 	if err != nil {
@@ -446,12 +457,13 @@ func Hash(fsys afero.Fs, dir string, sel *Selection) (cache.Blob, Stats, error) 
 	return t.Digest(), Stats{Count: t.Count()}, nil
 }
 
-// storeFiles stores the files that sel selects within dir in fsys in c,
+// storeFiles stores the files that sel selects within dir in fsys in store,
 // and returns the tree that describes them, without storing it, and their stats.
-func storeFiles(c *cache.Cache, fsys afero.Fs, dir string, sel *Selection) (*cache.Tree, Stats, error) {
+func storeFiles(ctx context.Context, store cache.ContentStore, fsys afero.Fs, dir string, sel *Selection) (
+	*cache.Tree, Stats, error) {
 	var stats Stats
-	t, err := Walk(fsys, dir, sel, func(name string, limit int64) (cache.Blob, error) {
-		b, stored, err := c.PutFile(fsys, name, limit)
+	t, err := Walk(ctx, fsys, dir, sel, func(name string, limit int64) (cache.Blob, error) {
+		b, stored, err := cache.PutFile(ctx, store, fsys, name, limit)
 		if stored {
 			stats.NewFiles++
 			stats.NewBytes += b.Size
@@ -465,14 +477,15 @@ func storeFiles(c *cache.Cache, fsys afero.Fs, dir string, sel *Selection) (*cac
 	return t, stats, nil
 }
 
-// Store stores the files that sel selects within dir in fsys in c,
+// Store stores the files that sel selects within dir in fsys in store,
 // and then the tree that describes them, and returns the tree's blob and the files' stats.
-func Store(c *cache.Cache, fsys afero.Fs, dir string, sel *Selection) (cache.Blob, Stats, error) {
-	t, stats, err := storeFiles(c, fsys, dir, sel)
+func Store(ctx context.Context, store cache.ContentStore, fsys afero.Fs, dir string, sel *Selection) (
+	cache.Blob, Stats, error) {
+	t, stats, err := storeFiles(ctx, store, fsys, dir, sel)
 	if err != nil {
 		return cache.Blob{}, Stats{}, err
 	}
-	b, err := c.PutBytes(t.Encode())
+	b, err := store.PutBytes(ctx, t.Encode())
 	return b, stats, err
 }
 

@@ -10,7 +10,7 @@
 // # Lifecycle
 //
 // Compile normalizes selection policy without reading files.
-// Walk applies that policy and calls the supplied content reader.
+// Walk applies that policy and calls the supplied content reader, and stops between entries when its context ends.
 // Store and Hash select whether to persist content; both use the same walk.
 // Each walk owns its traversal state.
 //

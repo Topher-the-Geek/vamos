@@ -12,8 +12,8 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/Topher-the-Geek/vamos/internal/api"
 	"github.com/Topher-the-Geek/vamos/internal/cache"
-	"github.com/Topher-the-Geek/vamos/internal/run"
 	"github.com/Topher-the-Geek/vamos/internal/testenv"
 )
 
@@ -23,11 +23,11 @@ var epoch = time.Date(2300, 1, 1, 0, 0, 0, 0, time.UTC)
 // testTree stores a tree in a new cache, and returns the cache and a result naming it.
 // Its files are a.txt, and deep/x/y.txt, whose folders it doesn't list, and links to victim, a file outside the tree:
 // by its absolute path, and by a path leading out of the tree, and a link leading nowhere.
-func testTree(t *testing.T, victim string) (*cache.Cache, run.Result) {
+func testTree(t *testing.T, victim string) (*cache.Directory, api.Exported) {
 	t.Helper()
-	c, err := cache.Open(t.TempDir())
+	c, err := cache.OpenDirectory(t.TempDir())
 	testenv.Must(t, err)
-	a, err := c.PutBytes([]byte("a"))
+	a, err := c.PutBytes(t.Context(), []byte("a"))
 	testenv.Must(t, err)
 	tree := &cache.Tree{Entries: []cache.TreeEntry{
 		{Path: "a.txt", Type: cache.EntryFile, Mode: 0o644, Blob: &a},
@@ -36,9 +36,9 @@ func testTree(t *testing.T, victim string) (*cache.Cache, run.Result) {
 		{Path: "deep/x/y.txt", Type: cache.EntryFile, Mode: 0o600, Blob: &a},
 		{Path: "up", Type: cache.EntryLink, Target: "../../../../../../../../.." + victim},
 	}}
-	stored, err := c.PutBytes(tree.Encode())
+	stored, err := c.PutBytes(t.Context(), tree.Encode())
 	testenv.Must(t, err)
-	return c, run.Result{Files: &stored, Epoch: epoch.Unix()}
+	return c, api.Exported{Files: &stored, Epoch: epoch.Unix()}
 }
 
 // newVictim returns a file outside any export, with an old time, which exports must leave alone.
@@ -97,9 +97,7 @@ func TestExportLinks(t *testing.T) {
 // TestExportOwners checks that, as root, an export gives every entry it writes the owner of the folder's parent:
 // the folder itself and the folders the tree doesn't list too.
 func TestExportOwners(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("changes owners, which needs root")
-	}
+	testenv.RequireOwnership(t)
 	victim, _ := newVictim(t)
 	c, res := testTree(t, victim)
 	parent := t.TempDir()
@@ -233,23 +231,21 @@ func TestExportIntoEmptyFolder(t *testing.T) {
 // TestExportSetuid checks that, as root, giving files the parent's owner keeps their setuid and setgid bits,
 // which changing an owner clears.
 func TestExportSetuid(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("changes owners, which needs root")
-	}
-	c, err := cache.Open(t.TempDir())
+	testenv.RequireOwnership(t)
+	c, err := cache.OpenDirectory(t.TempDir())
 	testenv.Must(t, err)
-	a, err := c.PutBytes([]byte("a"))
+	a, err := c.PutBytes(t.Context(), []byte("a"))
 	testenv.Must(t, err)
 	tree := &cache.Tree{Entries: []cache.TreeEntry{
 		{Path: "setgid", Type: cache.EntryFile, Mode: 0o2755, Blob: &a},
 		{Path: "setuid", Type: cache.EntryFile, Mode: 0o4755, Blob: &a},
 	}}
-	stored, err := c.PutBytes(tree.Encode())
+	stored, err := c.PutBytes(t.Context(), tree.Encode())
 	testenv.Must(t, err)
 	parent := t.TempDir()
 	testenv.Must(t, os.Chown(parent, 1234, 1235))
 	dir := filepath.Join(parent, "out")
-	res := run.Result{Files: &stored, Epoch: epoch.Unix()}
+	res := api.Exported{Files: &stored, Epoch: epoch.Unix()}
 	testenv.Must(t, Export(context.Background(), c, res, dir, false, noWarnings(t)))
 
 	for name, want := range map[string]os.FileMode{

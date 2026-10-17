@@ -1,15 +1,24 @@
-package run
+package transfer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"time"
 
+	"github.com/Topher-the-Geek/vamos/internal/cache"
 	"github.com/Topher-the-Geek/vamos/internal/tracing"
 
 	"github.com/opencontainers/go-digest"
+	"github.com/opencontainers/image-spec/specs-go"
+	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
 	imagecopy "go.podman.io/image/v5/copy"
 	"go.podman.io/image/v5/manifest"
+	"go.podman.io/image/v5/oci/layout"
 	"go.podman.io/image/v5/signature"
 	"go.podman.io/image/v5/transports"
 	"go.podman.io/image/v5/types"
@@ -20,9 +29,9 @@ import (
 // but a trace has no use for the reads between a blob's start and end, so it is long enough that there are none.
 const progressInterval = time.Hour
 
-// tracedCopy copies the image or index src to dest, as imagecopy.Image does, returning the manifest written.
+// Image copies the image or index src to dest, as imagecopy.Image does, returning the manifest written.
 // If ctx is traced, the copy is a span, holding a span for each blob copied, and an instant for each skipped.
-func tracedCopy(ctx context.Context, policyContext *signature.PolicyContext, dest, src types.ImageReference,
+func Image(ctx context.Context, policyContext *signature.PolicyContext, dest, src types.ImageReference,
 	options *imagecopy.Options) ([]byte, error) {
 	if !tracing.Enabled(ctx) {
 		return imagecopy.Image(ctx, policyContext, dest, src, options)
@@ -86,7 +95,7 @@ func writtenArgs(written []byte) []any {
 // blobTracker makes spans of the blobs of a copy from the events containers/image sends.
 // They don't pair up: a blob skipped, as already at the destination, is reported with no start,
 // and a blob whose copy fails or is cancelled has no end.
-// event is confined to tracedCopy's progress goroutine.
+// event is confined to Image's progress goroutine.
 // close runs only after that goroutine finishes, so open needs no mutex.
 // Do not use the tracker concurrently.
 type blobTracker struct {
@@ -161,4 +170,128 @@ func shortDigest(d digest.Digest) string {
 		return d.String()
 	}
 	return d.Algorithm().String() + ":" + d.Encoded()[:12]
+}
+
+// Policy returns the signature policy to copy images under: the system's, as buildah follows when committing,
+// but trusting local storage and layouts, where vamos has just put the images.
+// The storage transport is named rather than imported, since this package must not reach the container store;
+// a client never uses it, so trusting it there changes nothing.
+// The caller must destroy it.
+func Policy(sys *types.SystemContext) (*signature.PolicyContext, error) {
+	policy, err := signature.DefaultPolicy(sys)
+	if err != nil {
+		return nil, err
+	}
+	for _, transport := range []string{"containers-storage", layout.Transport.Name()} {
+		policy.Transports[transport] = signature.PolicyTransportScopes{
+			"": {signature.NewPRInsecureAcceptAnything()},
+		}
+	}
+	return signature.NewPolicyContext(policy)
+}
+
+// WriteLayoutIndex stores index as a blob of the OCI layout in dir,
+// and makes the layout's index.json name it, as ref, alone, returning the index's bytes as stored.
+func WriteLayoutIndex(dir string, index imgspecv1.Index, ref string) ([]byte, error) {
+	data, err := json.Marshal(index)
+	if err != nil {
+		return nil, err
+	}
+	d := digest.FromBytes(data)
+	if err := os.WriteFile(filepath.Join(dir, "blobs", d.Algorithm().String(), d.Encoded()), data, 0o644); err != nil {
+		return nil, err
+	}
+	return data, writeIndexJSON(dir, imgspecv1.Descriptor{
+		MediaType: imgspecv1.MediaTypeImageIndex,
+		Digest:    d,
+		Size:      int64(len(data)),
+	}, ref)
+}
+
+// writeIndexJSON makes the layout in dir's index.json name what desc describes, as ref, alone.
+func writeIndexJSON(dir string, desc imgspecv1.Descriptor, ref string) error {
+	desc.Annotations = map[string]string{imgspecv1.AnnotationRefName: ref}
+	top := imgspecv1.Index{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: imgspecv1.MediaTypeImageIndex,
+		Manifests: []imgspecv1.Descriptor{desc},
+	}
+	data, err := json.Marshal(top)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "index.json"), data, 0o644)
+}
+
+// LayoutBlobs returns the blobs that the OCI layout in dir holds, by reading its blobs directory.
+func LayoutBlobs(dir string) ([]cache.Blob, error) {
+	entries, err := os.ReadDir(filepath.Join(dir, "blobs", "sha256"))
+	if err != nil {
+		return nil, err
+	}
+	var blobs []cache.Blob
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil {
+			return nil, err
+		}
+		b := cache.Blob{Digest: digest.NewDigestFromEncoded(digest.SHA256, e.Name()), Size: info.Size()}
+		if err := b.Validate(); err != nil {
+			return nil, err
+		}
+		blobs = append(blobs, b)
+	}
+	return blobs, nil
+}
+
+// LayoutBlobPath returns where the OCI layout in dir keeps blob b.
+func LayoutBlobPath(dir string, b cache.Blob) string {
+	return filepath.Join(dir, "blobs", b.Digest.Algorithm().String(), b.Digest.Encoded())
+}
+
+// Layout writes an OCI layout in dir, which must exist and be empty, holding the blobs from store,
+// whose index.json names the manifest, of mediaType, as "image", and returns a reference to it.
+// A blob that is missing or corrupt in store fails the layout.
+func Layout(
+	ctx context.Context, store cache.ContentStore, dir string, manifest cache.Blob, mediaType string,
+	blobs []cache.Blob,
+) (types.ImageReference, error) {
+	if err := os.MkdirAll(filepath.Join(dir, "blobs", "sha256"), 0o755); err != nil {
+		return nil, err
+	}
+	version := []byte(`{"imageLayoutVersion":"1.0.0"}`)
+	if err := os.WriteFile(filepath.Join(dir, "oci-layout"), version, 0o644); err != nil {
+		return nil, err
+	}
+	for _, b := range append([]cache.Blob{manifest}, blobs...) {
+		if err := copyBlob(ctx, store, b, LayoutBlobPath(dir, b)); err != nil {
+			return nil, err
+		}
+	}
+	if err := writeIndexJSON(dir, imgspecv1.Descriptor{
+		MediaType: mediaType,
+		Digest:    manifest.Digest,
+		Size:      manifest.Size,
+	}, "image"); err != nil {
+		return nil, err
+	}
+	return layout.NewReference(dir, "image")
+}
+
+// copyBlob writes blob b from store to the file at path, verified as it is read.
+func copyBlob(ctx context.Context, store cache.ContentStore, b cache.Blob, path string) error {
+	r, err := store.Get(ctx, b)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(f, r); err != nil {
+		f.Close()
+		return fmt.Errorf("reading blob %s from the content store: %w", b.Digest, err)
+	}
+	return f.Close()
 }

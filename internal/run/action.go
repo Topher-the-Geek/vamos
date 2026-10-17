@@ -11,24 +11,37 @@ import (
 
 // actionVersion changes whenever what a key covers, or how a target is built, changes,
 // so that results built the old way aren't reused.
-const actionVersion = 6
+const actionVersion = 7 // 7: results record the platform of the image they made
 
-// action is everything a target's result depends on.
-// Its digest is the target's key in the action cache.
-// Target names are left out, so renaming a target keeps its results.
+// The kinds of action.
+const (
+	kindLayer   = "layer"
+	kindTask    = "task"
+	kindResolve = "resolve" // resolve a tag to an image for a platform, pulling it
+)
+
+// action is the keyed payload of an action: everything a target's result depends on.
+// Its digest is the target's key in the record store; the version is kept with it.
+// Target names and positions are left out, so renaming a target keeps its results.
 // The requested timestamp is deliberately absent: reused results retain their epoch.
 // Added tasks' epochs are inputs through actionStep.Epoch; the base image ID already fixes its epoch.
+// A resolve has no key: its result is the tag record it leaves, not an action result.
 type action struct {
 	Version int    `json:"version"`
-	Kind    string `json:"kind"` // "layer" or "task"
-	Base    string `json:"base"` // image ID of the base, or "scratch"
-	// Platform distinguishes layer images, including those on scratch, whose base has no platform.
+	Kind    string `json:"kind"`           // kindLayer, kindTask or kindResolve
+	Base    string `json:"base,omitempty"` // image ID of the base, or "scratch"
+	// Platform distinguishes layer images, including those on scratch, whose base has no platform,
+	// and says which platform a resolve wants an image for.
 	// Tasks omit it: their results depend on the base and steps, which already contain configured values.
-	Platform string             `json:"platform,omitempty"`
-	Steps    []actionStep       `json:"steps,omitempty"`   // in the order applied
-	Command  []string           `json:"command,omitempty"` // a layer's default command
-	Source   string             `json:"source,omitempty"`  // a task's directory of output
-	Output   *fileset.Selection `json:"output,omitempty"`  // a task's output, within source
+	Platform string `json:"platform,omitempty"`
+	// Image is the tag a resolve resolves, and Index the index it resolved to earlier in the job, if it did,
+	// so that every platform's image of one tag comes from one index even if the tag moves meanwhile.
+	Image   string             `json:"image,omitempty"`
+	Index   digest.Digest      `json:"index,omitempty"`
+	Steps   []actionStep       `json:"steps,omitempty"`   // in the order applied
+	Command []string           `json:"command,omitempty"` // a layer's default command
+	Source  string             `json:"source,omitempty"`  // a task's directory of output
+	Output  *fileset.Selection `json:"output,omitempty"`  // a task's output, within source
 }
 
 // actionStep is one step of an action.

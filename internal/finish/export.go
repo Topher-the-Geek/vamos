@@ -13,8 +13,8 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/Topher-the-Geek/vamos/internal/api"
 	"github.com/Topher-the-Geek/vamos/internal/cache"
-	"github.com/Topher-the-Geek/vamos/internal/run"
 )
 
 // The reasons export refuses a destination.
@@ -74,16 +74,17 @@ func CheckExportDest(dir string, replace bool) error {
 	return nil
 }
 
-// Export writes the files of res, a task's, to dir, from the build cache c, replacing what dir holds if replace is set,
+// Export writes the files of exp, a task's, to dir, from the content store, replacing what dir holds if replace is set,
 // and calls warn if what it replaced can't be removed.
+// A blob that is missing or corrupt fails the export; the result that names it stands.
 // It stages the files in a new folder beside dir, gives them their times and owners,
 // and then installs the folder at dir in one step,
 // so that dir holds either what it did or all the task's files, never a mix.
 // Files that appear in dir during the build are never removed without replace.
 func Export(
-	ctx context.Context, c *cache.Cache, res run.Result, dir string, replace bool, warn func(error),
+	ctx context.Context, store cache.ContentStore, exp api.Exported, dir string, replace bool, warn func(error),
 ) (err error) {
-	if res.Files == nil {
+	if exp.Files == nil {
 		return errors.New("the task made no files")
 	}
 	staged, err := makeStaging(dir)
@@ -96,10 +97,10 @@ func Export(
 			os.RemoveAll(staged)
 		}
 	}()
-	if _, err := c.Checkout(*res.Files, staged); err != nil {
+	if _, err := cache.Checkout(ctx, store, *exp.Files, staged); err != nil {
 		return fmt.Errorf("copying the files from the build cache: %w", err)
 	}
-	if err := setMetadata(staged, time.Unix(res.Epoch, 0)); err != nil {
+	if err := setMetadata(staged, time.Unix(exp.Epoch, 0)); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {

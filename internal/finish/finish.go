@@ -11,16 +11,21 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Topher-the-Geek/vamos/internal/run"
+	"github.com/Topher-the-Geek/vamos/internal/api"
+	"github.com/Topher-the-Geek/vamos/internal/cache"
 	"github.com/Topher-the-Geek/vamos/internal/tracing"
+	"github.com/Topher-the-Geek/vamos/internal/transfer"
 
 	"github.com/containerd/platforms"
 	dockerclient "github.com/moby/moby/client"
 	"github.com/moby/moby/client/pkg/jsonmessage"
+	"github.com/opencontainers/go-digest"
 	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
-	"go.podman.io/image/v5/docker"
+	imagecopy "go.podman.io/image/v5/copy"
 	"go.podman.io/image/v5/docker/archive"
 	"go.podman.io/image/v5/docker/reference"
+	"go.podman.io/image/v5/manifest"
+	"go.podman.io/image/v5/signature"
 	"go.podman.io/image/v5/types"
 )
 
@@ -33,38 +38,91 @@ const (
 	FromClient   PushFrom = "client"
 )
 
-// Push pushes the image or index of res to the registry name,
-// from the side from says, returning the image's ID there, or the index's digest.
-// sys describes the client's registry settings.
-// The executor sends the spans of its part, if ctx is traced, to ev.
-func Push(ctx context.Context, ex run.Executor, res run.Result, name reference.Named, from PushFrom,
-	sys *types.SystemContext, ev run.Events) (string, error) {
-	if from == FromClient {
-		ref, err := docker.NewReference(name)
-		if err != nil {
-			return "", err
-		}
-		return copyTo(ctx, ex, res, ref, sys, ev)
+// Push pushes the image or index that exp holds, read from store, to the tag name at its registry,
+// with the client's credentials and registry settings, sys, retrying transient failures and reading the tag back,
+// and returns the image's ID there, or the index's digest.
+// The executor's own push is a job of api.Executor; this is the client's.
+func Push(ctx context.Context, store cache.ContentStore, exp api.Exported, name reference.NamedTagged,
+	sys *types.SystemContext) (string, error) {
+	return deliver(ctx, store, exp, sys, func(
+		ctx context.Context, policyContext *signature.PolicyContext, src types.ImageReference,
+		options *imagecopy.Options,
+	) ([]byte, error) {
+		return transfer.Push(ctx, policyContext, name, src, sys, options)
+	})
+}
+
+// sender copies an image or index from src, a layout, to a destination, as transfer.Image does,
+// returning the manifest written.
+type sender func(
+	ctx context.Context, policyContext *signature.PolicyContext, src types.ImageReference, options *imagecopy.Options,
+) ([]byte, error)
+
+// copyTo copies the image or index that exp holds, read from store, to ref, a destination that sys describes,
+// and returns the image's ID there, or the index's digest.
+func copyTo(ctx context.Context, store cache.ContentStore, exp api.Exported, ref types.ImageReference,
+	sys *types.SystemContext) (string, error) {
+	return deliver(ctx, store, exp, sys, func(
+		ctx context.Context, policyContext *signature.PolicyContext, src types.ImageReference,
+		options *imagecopy.Options,
+	) ([]byte, error) {
+		return transfer.Image(ctx, policyContext, ref, src, options)
+	})
+}
+
+// deliver lays the image or index that exp holds out from store in a temporary folder, sends it with send,
+// as sys describes the destination, and returns the image's ID there, or the index's digest.
+func deliver(ctx context.Context, store cache.ContentStore, exp api.Exported, sys *types.SystemContext,
+	send sender) (_ string, err error) {
+	if exp.Manifest.Digest == "" {
+		return "", errors.New("the target made no image")
 	}
-	return ex.Push(ctx, run.PushRequest{Result: res, Dest: name, Trace: tracing.Call(ctx)}, ev)
+	dir, err := os.MkdirTemp("", "vamos-export-")
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if rerr := os.RemoveAll(dir); rerr != nil {
+			err = errors.Join(err, fmt.Errorf("removing the copied blobs: %w", rerr))
+		}
+	}()
+	_, span := tracing.Start(ctx, "read blobs", "manifest", exp.Manifest.Digest.String(), "blobs", len(exp.Blobs))
+	src, err := transfer.Layout(ctx, store, dir, exp.Manifest, exp.MediaType, exp.Blobs)
+	span.EndWith(err)
+	if err != nil {
+		return "", fmt.Errorf("reading the image from the content store: %w", err)
+	}
+	policyContext, err := transfer.Policy(sys)
+	if err != nil {
+		return "", err
+	}
+	defer policyContext.Destroy()
+	options := &imagecopy.Options{DestinationCtx: sys}
+	if manifest.MIMETypeIsMultiImage(exp.MediaType) {
+		options.ImageListSelection = imagecopy.CopyAllImages
+	}
+	written, err := send(ctx, policyContext, src, options)
+	if err != nil {
+		return "", err
+	}
+	if manifest.MIMETypeIsMultiImage(manifest.GuessMIMEType(written)) {
+		return digest.FromBytes(written).String(), nil
+	}
+	// The ID the image has where it was written: the digest of its config, as written there,
+	// which may differ from the executor's if its manifest is converted, as docker-archive does.
+	m, err := manifest.FromBlob(written, manifest.GuessMIMEType(written))
+	if err != nil {
+		return "", fmt.Errorf("reading the manifest written: %w", err)
+	}
+	return m.ConfigInfo().Digest.Encoded(), nil
 }
 
-// copyTo has ex copy res to ref, a destination on the client that sys describes,
-// sending the spans of its part, if ctx is traced, to ev.
-func copyTo(
-	ctx context.Context, ex run.Executor, res run.Result, ref types.ImageReference, sys *types.SystemContext,
-	ev run.Events,
-) (string, error) {
-	return ex.Export(ctx, run.ExportRequest{Result: res, Dest: ref, System: sys, Trace: tracing.Call(ctx)}, ev)
-}
-
-// Save writes the image of res to a tarball at path,
+// Save writes the image that exp holds, read from store, to a tarball at path,
 // which `docker load` imports, recording name in it unless name is nil, and returns its image ID there.
-// It writes a temporary file beside path, created only once res is built,
-// and renames it into place, so that an existing file is replaced only by a complete image.
-// The executor sends the spans of its part, if ctx is traced, to ev.
-func Save(ctx context.Context, ex run.Executor, res run.Result, path string, name reference.NamedTagged,
-	sys *types.SystemContext, ev run.Events) (_ string, err error) {
+// It writes a temporary file beside path and renames it into place,
+// so that an existing file is replaced only by a complete image.
+func Save(ctx context.Context, store cache.ContentStore, exp api.Exported, path string, name reference.NamedTagged,
+	sys *types.SystemContext) (_ string, err error) {
 	tmp, err := createTempBeside(path)
 	if err != nil {
 		return "", err
@@ -79,7 +137,7 @@ func Save(ctx context.Context, ex run.Executor, res run.Result, path string, nam
 	if err != nil {
 		return "", err
 	}
-	id, err := copyTo(ctx, ex, res, ref, sys, ev)
+	id, err := copyTo(ctx, store, exp, ref, sys)
 	if err != nil {
 		return "", err
 	}
@@ -89,13 +147,12 @@ func Save(ctx context.Context, ex run.Executor, res run.Result, path string, nam
 	return id, os.Rename(tmp.Name(), path)
 }
 
-// LoadDocker loads the image of res into the Docker daemon at $DOCKER_HOST,
+// LoadDocker loads the image that exp holds, read from store, into the Docker daemon at $DOCKER_HOST,
 // or the local socket, named name, and returns its image ID.
 // It writes a tarball and sends it with the Docker client rather than use the docker-daemon transport,
 // which can't reach a daemon over plain HTTP on tcp://, and ignores $DOCKER_CERT_PATH and $DOCKER_TLS_VERIFY.
-// The executor sends the spans of its part, if ctx is traced, to ev.
-func LoadDocker(ctx context.Context, ex run.Executor, res run.Result, name reference.NamedTagged,
-	sys *types.SystemContext, ev run.Events) (string, error) {
+func LoadDocker(ctx context.Context, store cache.ContentStore, exp api.Exported, name reference.NamedTagged,
+	sys *types.SystemContext) (string, error) {
 	tmp, err := os.CreateTemp("", "vamos-load-*.tar")
 	if err != nil {
 		return "", err
@@ -108,7 +165,7 @@ func LoadDocker(ctx context.Context, ex run.Executor, res run.Result, name refer
 	if err != nil {
 		return "", err
 	}
-	id, err := copyTo(ctx, ex, res, ref, sys, ev)
+	id, err := copyTo(ctx, store, exp, ref, sys)
 	if err != nil {
 		return "", err
 	}
@@ -118,7 +175,7 @@ func LoadDocker(ctx context.Context, ex run.Executor, res run.Result, name refer
 // SavePlatform returns the platform of the image that save writes for an index:
 // the host's, whose Docker daemon is likely to load it.
 func SavePlatform(context.Context) (imgspecv1.Platform, string, error) {
-	return run.HostPlatform, "the host's platform", nil
+	return platforms.Normalize(platforms.DefaultSpec()), "the host's platform", nil
 }
 
 // archiveReference returns a docker-archive reference for writing an image to f,
