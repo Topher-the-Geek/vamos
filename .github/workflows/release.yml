@@ -1,8 +1,8 @@
 # Publishes the vamos image, built from the repository's Dockerfile, to GitHub Packages
 # as one index for linux/amd64 and linux/arm64.
-# It runs only when started by hand: Actions > image > Run workflow, or `gh workflow run image.yml -f tag=0.1.0`.
+# It runs only when started by hand: Actions > release > Run workflow, or `gh workflow run release.yml -f tag=0.1.0`.
 # See .agents/kb/remote-environment.md for when to publish and how the chart names the image.
-name: image
+name: release
 
 on:
   workflow_dispatch:
@@ -17,7 +17,7 @@ permissions:
   packages: write
 
 concurrency:
-  group: image-${{ github.ref }}
+  group: release-${{ github.ref }}
 
 jobs:
   # Each platform builds on a runner of its own architecture: the build uses cgo against gpgme and btrfs,

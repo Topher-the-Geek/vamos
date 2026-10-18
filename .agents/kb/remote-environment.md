@@ -114,11 +114,11 @@ since `kubectl exec` enters the container's other namespaces but not that one.
 ## Published image
 
 The chart's default image is `ghcr.io/topher-the-geek/vamos`,
-which the [image workflow](../../.github/workflows/image.yml) publishes as an index for `linux/amd64` and `linux/arm64`,
+which the [release workflow](../../.github/workflows/release.yml) publishes as an index for `linux/amd64` and `linux/arm64`,
 since developers and clusters run both.
 It runs only when started by hand, never on a push or pull request,
 because each run builds the Dockerfile twice and a cluster should take a new image deliberately:
-start it from the Actions tab, or with `gh workflow run image.yml --ref <branch> -f tag=<tag>`.
+start it from the Actions tab, or with `gh workflow run release.yml --ref <branch> -f tag=<tag>`.
 Each run tags the index `sha-<commit>` besides the requested tag, which defaults to `latest`.
 
 Each platform builds natively on a runner of its architecture, `ubuntu-24.04` and `ubuntu-24.04-arm`,
