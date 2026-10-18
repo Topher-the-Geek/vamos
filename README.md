@@ -30,3 +30,7 @@ Image builds use `busybox` from Docker Hub.
 if a real Docker daemon is running, `load` is also checked against it.
 The tests use the machine's build cache, and one of them empties it,
 so the next build of your own project runs every target again.
+
+## License
+
+vamos is released under the [MIT License](LICENSE).
