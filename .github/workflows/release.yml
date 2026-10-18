@@ -1,11 +1,116 @@
-# Placeholder so GitHub can dispatch this workflow; the real one lives on release-deploy.
-# Run it there with `gh workflow run release.yml --ref release-deploy -f tag=...`.
-name: release
+# Publishes the vamos image, built from the repository's Dockerfile, to GitHub Packages
+# as one index for linux/amd64 and linux/arm64.
+# It runs only when started by hand: Actions > image > Run workflow, or `gh workflow run image.yml -f tag=0.1.0`.
+# See .agents/kb/remote-environment.md for when to publish and how the chart names the image.
+name: image
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Image tag, besides the commit's sha-<short> tag
+        default: latest
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: image-${{ github.ref }}
 
 jobs:
-  hola:
+  # Each platform builds on a runner of its own architecture: the build uses cgo against gpgme and btrfs,
+  # so cross-compiling is impractical and QEMU makes the Go build many times slower.
+  # Each pushes its image by digest alone; merge tags the index of both.
+  build:
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      # ghcr.io requires a lowercase repository name.
+      - run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+
+      - id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,scope=${{ matrix.arch }},mode=max
+
+      - run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          digest='${{ steps.build.outputs.digest }}'
+          touch "$RUNNER_TEMP/digests/${digest#sha256:}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: digests-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: build
     runs-on: ubuntu-24.04
     steps:
-      - run: echo hola
+      - run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=${{ inputs.tag }}
+            type=sha
+
+      # The source annotation on the index is what ghcr.io shows and links the package by.
+      - working-directory: ${{ runner.temp }}/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            --annotation "index:org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --annotation "index:org.opencontainers.image.revision=$GITHUB_SHA" \
+            --annotation "index:org.opencontainers.image.licenses=MIT" \
+            $(printf "$IMAGE@sha256:%s " *)
+
+      - run: docker buildx imagetools inspect "$IMAGE:${{ steps.meta.outputs.version }}"
