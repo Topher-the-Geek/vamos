@@ -20,7 +20,7 @@ concurrency:
   group: release-${{ github.ref }}
 
 jobs:
-  # Each platform builds on a runner of its own architecture: the build uses cgo against gpgme and btrfs,
+  # Each platform builds on a runner of its own architecture: buildah needs cgo,
   # so cross-compiling is impractical and QEMU makes the Go build many times slower.
   # Each pushes its image by digest alone; merge tags the index of both.
   build:
