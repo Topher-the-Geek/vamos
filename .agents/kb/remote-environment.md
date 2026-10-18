@@ -57,3 +57,55 @@ a worker is lost with `docker restart -t 0`, which kills its process and brings 
 policy ignores a `docker kill`; a client is disconnected with `docker network disconnect`; and the coordinator
 restarts with `docker restart`.
 The checks themselves are in [smoke-checks.md](smoke-checks.md).
+
+## Kubernetes
+
+[remote/helm/vamos](../../remote/helm/vamos/values.yaml) is a Helm chart for the same services on a cluster,
+with each object named after the release, as `vamos-coordinator:8080`, `vamos-registry:5000` and
+`vamos-hub-proxy:5000` for a release named `vamos`.
+Its values file documents every setting; what differs from the compose file is below.
+
+| Object | Notes |
+| --- | --- |
+| Coordinator | A StatefulSet of one, so that a replacement starts only once the old instance has stopped; its build cache on a volume claim; not root |
+| Workers | A Deployment per pool in `workers.pools`, each pool one platform, on nodes of that architecture; the coordinator offers every pool's platform |
+| Registries | A StatefulSet each with a volume claim: the cache registry, and a proxy per entry of `pullThrough.caches`; either can be replaced by one elsewhere |
+| Registry settings | One ConfigMap, generated from the registries' addresses, as `$CONTAINERS_REGISTRIES_CONF` for the coordinator and the workers |
+
+Kubernetes runs a privileged container in the node's cgroup namespace, unlike Docker,
+so `/sys/fs/cgroup` in a worker is the node's whole hierarchy:
+workers on one node would share `/sys/fs/cgroup/vamos`, each cleaning up the others' attempts as its own leftovers,
+and attempts would run outside the pod's cgroup and the limits set on it.
+The worker's command therefore starts it in a cgroup namespace of its own with `unshare --cgroup --mount`,
+with cgroup2 mounted over `/sys/fs/cgroup`, which puts the root at its container's cgroup, as Docker does.
+The container store is an emptyDir, which outlives a restart of the container but not the pod,
+so a worker that crashed cleans up after its attempts, and a deleted pod takes its store with it.
+
+Clients reach the coordinator and the registries by the names above, which resolve only inside the cluster
+unless the values give `cacheRegistry.address` and each cache's `address` as names that clients resolve as well.
+`vamos build` needs the coordinator alone, which `kubectl port-forward` gives a client outside the cluster;
+`load`, `save` and `push --push-from=client` need the registries by the same names the workers use.
+
+The devcontainer has `kind`, `kubectl`, `helm` and `kubeconform`.
+kind runs the cluster's node as a container on the host's Docker, on a network named `kind`,
+which the devcontainer joins to reach the API server and the node, as it joins the compose network.
+The chart deploys the release image under the name `vamos:latest`, which no registry serves,
+so it is built and loaded into the node; on an arm64 host the pool is `linux/arm64`.
+
+```sh
+kind create cluster --name vamos                             # once; skip if `kind get clusters` lists it
+docker network connect kind "vamos_$(basename "$WORKSPACE_FOLDER")"
+kind export kubeconfig --name vamos --internal               # the API server by its name on the kind network
+docker build -q . -t vamos:latest && kind load docker-image vamos:latest --name vamos
+helm install vamos remote/helm/vamos -n vamos --create-namespace --wait \
+  --set workers.pools.amd64=null --set workers.pools.arm64.platform=linux/arm64   # on an arm64 host
+helm test vamos -n vamos
+kubectl -n vamos port-forward svc/vamos-coordinator 18080:8080 &
+./vamos build server -C examples/typescript-mcp --coordinator http://127.0.0.1:18080
+helm uninstall vamos -n vamos && kubectl delete namespace vamos   # the namespace takes the volume claims
+```
+
+A worker is lost with `crictl stop --timeout 0` on its container, run in the node with `docker exec`:
+the kubelet starts it again in the same pod, as Docker's restart policy does.
+A worker's cgroups are seen from its own namespace, `kubectl exec <pod> -- nsenter -t 1 -C -m ls /sys/fs/cgroup/vamos`,
+since `kubectl exec` enters the container's other namespaces but not that one.

@@ -1,0 +1,121 @@
+{{- /*
+The workers: a Deployment per pool, each of one platform, on nodes of that platform.
+They run privileged, as buildah needs, with a container store of their own in an emptyDir, and make a cgroup for
+each attempt beneath their container's cgroup, which a privileged container may write.
+*/}}
+{{- $defaults := omit .Values.workers "pools" }}
+{{- range $name, $pool := .Values.workers.pools }}
+{{- if $pool }}{{/* a pool set to null is turned off */}}
+{{- $w := mergeOverwrite (deepCopy $defaults) (deepCopy $pool) }}
+{{- if not $w.platform }}
+{{- fail (printf "workers.pools.%s.platform is required, such as linux/amd64" $name) }}
+{{- end }}
+{{- $platform := splitList "/" $w.platform }}
+{{- if lt (len $platform) 2 }}
+{{- fail (printf "workers.pools.%s.platform %s: want os/arch, such as linux/amd64" $name $w.platform) }}
+{{- end }}
+{{- $component := printf "worker-%s" $name }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vamos.fullname" $ }}-{{ $component }}
+  labels:
+    {{- include "vamos.labels" $ | nindent 4 }}
+    {{- include "vamos.selectorLabels" (dict "root" $ "component" $component) | nindent 4 }}
+spec:
+  replicas: {{ $w.replicas }}
+  selector:
+    matchLabels:
+      {{- include "vamos.selectorLabels" (dict "root" $ "component" $component) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "vamos.labels" $ | nindent 8 }}
+        {{- include "vamos.selectorLabels" (dict "root" $ "component" $component) | nindent 8 }}
+        {{- with $w.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/registries: {{ include (print $.Template.BasePath "/registries-configmap.yaml") $ | sha256sum }}
+        {{- with $w.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with $.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ $w.terminationGracePeriodSeconds }}
+      containers:
+        - name: worker
+          image: {{ include "vamos.image" $ }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          # Kubernetes runs a privileged container in the node's cgroup namespace, where /sys/fs/cgroup is the node's
+          # whole hierarchy: workers on one node would share /sys/fs/cgroup/vamos, each taking the others' attempts
+          # for its own leftovers, and attempts would run outside the pod's cgroup and its limits. A cgroup namespace
+          # of the worker's own, rooted at its container's cgroup and mounted over /sys/fs/cgroup, gives it what Docker
+          # gives it: its own cgroup as the root.
+          command:
+            - unshare
+            - --cgroup
+            - --mount
+            - --
+            - sh
+            - -c
+            - mount -t cgroup2 cgroup2 /sys/fs/cgroup && exec vamos "$@"
+            - vamos
+          args:
+            - worker
+            - --capacity={{ $w.capacity }}
+            {{- with $w.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            - name: VAMOS_COORDINATOR
+              value: {{ include "vamos.coordinatorURL" $ }}
+            - name: CONTAINERS_REGISTRIES_CONF
+              value: /etc/vamos/registries.conf
+            {{- if $w.authSecret }}
+            {{- include "vamos.authEnv" (dict "secret" $w.authSecret) | nindent 12 }}
+            {{- end }}
+            {{- with $w.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          securityContext:
+            privileged: true
+          {{- with $w.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: containers
+              mountPath: /var/lib/containers
+            {{- include "vamos.registriesMount" $ | nindent 12 }}
+            {{- if $w.authSecret }}
+            {{- include "vamos.authMount" (dict "secret" $w.authSecret) | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: containers
+          emptyDir: {{- include "vamos.emptyDir" $w.containerStore | nindent 12 }}
+        {{- include "vamos.registriesVolume" $ | nindent 8 }}
+        {{- if $w.authSecret }}
+        {{- include "vamos.authVolume" (dict "secret" $w.authSecret) | nindent 8 }}
+        {{- end }}
+      nodeSelector:
+        kubernetes.io/os: {{ index $platform 0 }}
+        kubernetes.io/arch: {{ index $platform 1 }}
+        {{- with $w.nodeSelector }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with $w.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $w.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- end }}

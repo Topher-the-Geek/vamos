@@ -1,0 +1,181 @@
+# Values for the vamos remote execution chart.
+# See .agents/kb/remote-environment.md for how the pieces fit together, and docs/reference/cli.md for the flags.
+#
+# Nothing here authenticates: the coordinator and the registries are for a trusted network alone.
+# Anyone who can reach the coordinator can build on it and read its cache, and anyone who can reach a pull-through
+# cache reads whatever its upstream credentials can.
+
+# The vamos image, built from the repository's Dockerfile, which both the coordinator and the workers run.
+# No image is published: push one where the nodes can pull it, or `kind load docker-image vamos:latest` on kind.
+image:
+  repository: vamos
+  tag: latest
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+commonLabels: {}
+
+# The coordinator: one instance, since it keeps its state in memory and a client refuses a coordinator that has
+# restarted under it. Its build cache is on a volume, so a restart fails the builds in flight but keeps what finished.
+coordinator:
+  # Flags the coordinator takes; the chart derives --listen, --cache-dir, --cache-repository, --pull-through and
+  # --offer. Unset values keep vamos's defaults.
+  grace: ""         # --grace, such as 5m
+  window: ""        # --window
+  lease: ""         # --lease, such as 30s
+  retries: null     # --retries
+  bound: null       # --bound
+  maxBuilds: null   # --max-builds
+  # Platforms offered besides those of the worker pools below, such as a pool that runs elsewhere.
+  offer: []
+  # Platforms that workers emulate, as `--offer-emulated` says; workers report their emulators themselves.
+  offerEmulated: []
+  extraArgs: []
+  extraEnv: []
+
+  # Registry credentials of the coordinator, which needs read and delete access to the cache repository:
+  # the name of a kubernetes.io/dockerconfigjson Secret, mounted as $REGISTRY_AUTH_FILE.
+  authSecret: ""
+
+  service:
+    type: ClusterIP
+    port: 8080
+    nodePort: null
+    annotations: {}
+
+  # The build cache: sources, trees, logs and results.
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClass: ""
+    accessModes: [ReadWriteOnce]
+
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+  podLabels: {}
+  # The coordinator has no need to be root.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: [ALL]
+
+# The workers, in one Deployment per pool. Each pool's platform is offered by the coordinator and selects nodes of
+# that architecture, so a build for it waits for a worker rather than being refused while the pool scales up.
+workers:
+  # Defaults for every pool; a pool overrides any of these.
+  capacity: 2       # --capacity: attempts at once
+  replicas: 2
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+  podLabels: {}
+  extraArgs: []
+  extraEnv: []
+  # The worker kills its attempts on shutdown and waits for them for a lease at most.
+  terminationGracePeriodSeconds: 60
+  # The container store: a disposable cache of base images and built layers, which must not be on the container's
+  # own overlay filesystem. An emptyDir keeps it across restarts of the container, so a worker that crashed cleans
+  # up after its attempts; give sizeLimit to bound it, or medium: Memory for a tmpfs.
+  containerStore:
+    sizeLimit: ""
+    medium: ""
+
+  # Registry credentials of the workers, which need push access to the cache repository and read access to the
+  # pull-through caches: the name of a kubernetes.io/dockerconfigjson Secret, mounted as $REGISTRY_AUTH_FILE.
+  authSecret: ""
+
+  # Pools by name; set one to null to turn it off, as --set workers.pools.amd64=null does.
+  pools:
+    amd64:
+      platform: linux/amd64
+    # arm64:
+    #   platform: linux/arm64
+    #   replicas: 1
+
+# The cache registry, which holds the layers workers build, tagged by image ID.
+# Clients read built images from it too, by the name below, so they must resolve and reach that name.
+cacheRegistry:
+  # Deploy a CNCF Distribution registry; false to use registry.address as it is.
+  enabled: true
+  # host:port of the registry as everyone names it; the chart's Service, <release>-registry:5000, when empty.
+  address: ""
+  repository: vamos-cache
+  # Plain HTTP, as the chart's registry speaks: marks the address insecure in everyone's registries.conf.
+  insecure: true
+  image:
+    repository: registry
+    tag: "3"
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 5000
+    nodePort: null
+    annotations: {}
+  persistence:
+    enabled: true
+    size: 50Gi
+    storageClass: ""
+    accessModes: [ReadWriteOnce]
+  logLevel: warn
+  extraEnv: []
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# The pull-through caches that workers pull base images through, and clients read pulled bases from.
+# Each deployed cache is a registry in proxy mode, which mirrors one upstream and refuses pushes.
+pullThrough:
+  caches:
+    hub-proxy:
+      enabled: true
+      upstream: docker.io
+      remoteURL: https://registry-1.docker.io
+      # host:port as everyone names it; the chart's Service, <release>-hub-proxy:5000, when empty.
+      address: ""
+      insecure: true
+      # Upstream credentials belong on the proxy: a Secret with the keys below, read as
+      # REGISTRY_PROXY_USERNAME and REGISTRY_PROXY_PASSWORD.
+      credentials:
+        secret: ""
+        usernameKey: username
+        passwordKey: password
+      service:
+        type: ClusterIP
+        port: 5000
+        nodePort: null
+        annotations: {}
+      persistence:
+        enabled: true
+        size: 50Gi
+        storageClass: ""
+        accessModes: [ReadWriteOnce]
+      resources: {}
+  # Caches that run elsewhere, as upstream: host:port; a pull() from an unmapped registry fails.
+  external: {}
+  #   quay.io: quay-mirror.example.com:5000
+  # The image, log level and placement of every deployed cache.
+  image:
+    repository: registry
+    tag: "3"
+    pullPolicy: IfNotPresent
+  logLevel: warn
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# Extra registries.conf content, appended to the entries the chart writes for the registries above.
+registriesConf: ""

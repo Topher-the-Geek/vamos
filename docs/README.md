@@ -33,3 +33,4 @@ A build runs its commands on the platform the coordinator's workers have; see
 [platforms](reference/configuration.md#platforms) for how that platform is chosen and what happens when the image
 being built is for another one.
 The `remote/` directory holds a Docker Compose file that runs the whole arrangement on one machine, for trying it.
+`remote/helm/vamos` is a Helm chart that deploys it on Kubernetes, documented by its values file.
