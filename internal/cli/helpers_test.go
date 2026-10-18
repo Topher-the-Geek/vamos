@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/Topher-the-Geek/vamos/internal/testenv"
+	"github.com/Topher-the-Geek/vamos/internal/worker"
 	"github.com/google/go-containerregistry/pkg/registry"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
@@ -42,8 +43,8 @@ var (
 )
 
 func TestMain(m *testing.M) {
-	// buildah re-executes the test binary to run build steps.
-	if buildah.InitReexec() {
+	// buildah re-executes the test binary to run build steps, and a worker in a test runs it as an attempt.
+	if buildah.InitReexec() || worker.ChildFromEnv() {
 		return
 	}
 	if os.Getenv("BUILDAH_ISOLATION") == "" {

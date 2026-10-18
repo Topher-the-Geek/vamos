@@ -24,6 +24,7 @@ func (stub) Watch(context.Context, JobID, int64, func(Event) error) error { retu
 func (stub) Cancel(context.Context, JobID) error                          { return nil }
 func (stub) Result(context.Context, JobID) (Outcome, error)               { return Outcome{}, nil }
 func (stub) Prune(context.Context) (JobID, error)                         { return "", nil }
+func (stub) Release(context.Context, JobID) error                         { return nil }
 
 // TestNoHandles checks that no field of a value that crosses the executor boundary, however deep,
 // has a type that names a host-local resource or can't cross as JSON: a file, a reader, a function, a channel,

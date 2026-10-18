@@ -17,7 +17,11 @@ func main() {
 	if buildah.InitReexec() {
 		return
 	}
-	unshare.MaybeReexecUsingUserNamespace(false)
+	// A root without the capabilities to use container storage is re-executed in a user namespace that has them;
+	// a coordinator opens no container storage, and may run without any such capability.
+	if cli.UsesContainerStore(os.Args[1:]) {
+		unshare.MaybeReexecUsingUserNamespace(false)
+	}
 
 	// On Ctrl-C or SIGTERM, cancel the build so its deferred cleanup runs:
 	// the temporary tarball, the working container and the copied sources.

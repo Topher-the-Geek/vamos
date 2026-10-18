@@ -11,5 +11,7 @@
 // # Changes
 //
 // Image owns the progress events that become blob spans; blobTracker adapts containers/image's incomplete pairs.
-// Layout and WriteLayoutIndex own how an image's blobs are laid out on disk for copying.
+// Layout and WriteLayoutIndex own how an image's blobs are laid out on disk for copying; LayoutIndex assembles an
+// index from members at any source, for both executors' index pushes and the client's delivery.
+// SystemContext builds a process's registry settings from its environment alone.
 package transfer

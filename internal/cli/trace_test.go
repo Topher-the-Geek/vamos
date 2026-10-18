@@ -271,8 +271,8 @@ func TestTraceBuild(t *testing.T) {
 	if pull.track != `pull "busybox"` {
 		t.Errorf("the pull is on track %q, want its own", pull.track)
 	}
-	if got := pull.arg(t, "already present"); got != true {
-		t.Errorf("busybox, pulled before, has already present = %v", got)
+	if got := pull.arg(t, "cached"); got != true {
+		t.Errorf("busybox, pulled before, has cached = %v; want it served from its tag record", got)
 	}
 	if blobs := tr.all("executor", "blob *"); len(blobs) != 0 {
 		t.Errorf("a build pulling only images already present copied %d blobs", len(blobs))

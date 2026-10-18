@@ -89,4 +89,81 @@ S=examples/strawberry-react
 `push` has no manual check here:
 the tests already push to a real (in-process) registry, from the executor and from the client.
 
+## Remote execution
+
+The [remote environment](remote-environment.md) runs the coordinator, two workers and the registries that remote
+builds share.
+
+```sh
+# R1. The registries come up, answer by name from the devcontainer, and the pull-through cache serves Docker Hub.
+# Expect two 200s, then 405: the proxy refuses pushes.
+docker compose -f remote/compose.yaml up -d --wait \
+  && docker network connect remote_default "vamos_$(basename "$WORKSPACE_FOLDER")" \
+  && curl -s -o /dev/null -w 'registry %{http_code}\n' http://registry:5000/v2/ \
+  && curl -s -o /dev/null -w 'hub-proxy %{http_code}\n' \
+    -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json' \
+    http://hub-proxy:5000/v2/library/busybox/manifests/1.36 \
+  && curl -s -X POST -o /dev/null -w 'hub-proxy push %{http_code}\n' http://hub-proxy:5000/v2/x/blobs/uploads/; \
+  docker network disconnect remote_default "vamos_$(basename "$WORKSPACE_FOLDER")"; \
+  docker compose -f remote/compose.yaml down
+
+# R2. A cold build on the coordinator, loaded into Docker from the cache registry, then a warm one: expect the MCP
+# reply, then every target cached. The client reads images from the registry over plain HTTP, which its registry
+# settings must allow. The images are built from the Dockerfile, so this takes a few minutes the first time.
+export CONTAINERS_REGISTRIES_CONF=$PWD/remote/registries.conf
+docker compose -f remote/compose.yaml up -d --build --wait \
+  && docker network connect remote_default "vamos_$(basename "$WORKSPACE_FOLDER")" \
+  && ./vamos load server vamos-example:remote -C examples/typescript-mcp --coordinator http://coordinator:8080 \
+  && docker run -i --rm vamos-example:remote < examples/typescript-mcp/echo-request.jsonl \
+  && ./vamos build server -C examples/typescript-mcp --coordinator http://coordinator:8080; \
+  docker network disconnect remote_default "vamos_$(basename "$WORKSPACE_FOLDER")"; \
+  docker compose -f remote/compose.yaml down
+
+# A coordinator refuses a prune for a lease (30s by default) after it starts, and while any build is held by a
+# client that hasn't released it; a prune in these checks waits that long after `up`.
+# The fault checks need a target that runs long enough to interrupt: with the proxy warm, npm install takes a
+# second, so they use a project of their own whose layer sleeps, and leaves a daemon behind with setsid.
+mkdir -p "$TMP/slow" && printf '%s\n' \
+  'pull(name="busybox", image="docker.io/library/busybox", tag="1.36")' \
+  'layer(name="slow", base="busybox", steps=[run(["sh", "-c", "setsid sleep 300 & sleep 45"])])' \
+  > "$TMP/slow/BUILD"
+
+# R3. A dropped connection: take this container off the coordinator's network while a build runs, for longer than
+# the client's minute-long wait for a line of the event stream, and expect warnings that the connection dropped and
+# came back, then the build's success: the worker finished the target meanwhile, and the resumed watch finds it.
+# A blip shorter than that wait proves nothing, since the stream's TCP connection survives it.
+docker compose -f remote/compose.yaml up -d --wait \
+  && docker network connect remote_default "vamos_$(basename "$WORKSPACE_FOLDER")" \
+  && (sleep 10; docker network disconnect remote_default "vamos_$(basename "$WORKSPACE_FOLDER")"; sleep 75; \
+      docker network connect remote_default "vamos_$(basename "$WORKSPACE_FOLDER")") & \
+  ./vamos build slow --rebuild -C "$TMP/slow" --coordinator http://coordinator:8080; wait; \
+  docker network disconnect remote_default "vamos_$(basename "$WORKSPACE_FOLDER")"; \
+  docker compose -f remote/compose.yaml down
+
+# R4. A worker killed mid-build: the build's running target is tried again on the other worker and the build
+# succeeds, its trace naming the retry; the worker comes back, logs that it registered again, and cleans up after
+# the attempt it was running. `docker restart -t 0` kills the process at once and starts the container again;
+# `docker kill` would leave it stopped, since Docker's restart policy ignores a manual kill. Workers take work as
+# they poll, so the attempt may be on worker-2: if the trace names no retry, run the check again restarting that one.
+docker compose -f remote/compose.yaml up -d --wait \
+  && docker network connect remote_default "vamos_$(basename "$WORKSPACE_FOLDER")" \
+  && (sleep 15; docker restart -t 0 remote-worker-1) & \
+  ./vamos build slow --rebuild -C "$TMP/slow" --coordinator http://coordinator:8080 --trace "$TMP/r4.json"; wait; \
+  grep -o '"retry 1"' "$TMP/r4.json"; \
+  docker compose -f remote/compose.yaml logs worker | grep -i "registered\|cleaning up"; \
+  docker network disconnect remote_default "vamos_$(basename "$WORKSPACE_FOLDER")"; \
+  docker compose -f remote/compose.yaml down
+
+# R5. Ctrl-C kills the running attempt on the worker, and every process it started: expect no attempt cgroup
+# left on either worker a few seconds after interrupting the build (the release image has no ps; the cgroup
+# directory under /sys/fs/cgroup/vamos is the attempt, and it is removed once its processes are gone).
+docker compose -f remote/compose.yaml up -d --wait \
+  && docker network connect remote_default "vamos_$(basename "$WORKSPACE_FOLDER")" \
+  && (./vamos build slow --rebuild -C "$TMP/slow" --coordinator http://coordinator:8080 & \
+      sleep 15; kill -INT $!; wait; sleep 5; \
+      for i in 1 2; do docker compose -f remote/compose.yaml exec --index $i worker ls /sys/fs/cgroup/vamos; done); \
+  docker network disconnect remote_default "vamos_$(basename "$WORKSPACE_FOLDER")"; \
+  docker compose -f remote/compose.yaml down
+```
+
 Remove the temporary artifacts after the checks: `rm -rf -- "$TMP"`.

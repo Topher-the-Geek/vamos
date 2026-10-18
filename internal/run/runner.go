@@ -17,18 +17,20 @@ import (
 	"github.com/Topher-the-Geek/vamos/internal/cache"
 	"github.com/Topher-the-Geek/vamos/internal/fileset"
 	"github.com/Topher-the-Geek/vamos/internal/graph"
+	"github.com/Topher-the-Geek/vamos/internal/sched"
 	"github.com/Topher-the-Geek/vamos/internal/tracing"
 
 	"github.com/containerd/platforms"
 	securejoin "github.com/cyphar/filepath-securejoin"
 	"github.com/docker/distribution/registry/api/errcode"
 	v2 "github.com/docker/distribution/registry/api/v2"
-	"github.com/opencontainers/go-digest"
 	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/spf13/afero"
 	"go.podman.io/buildah"
 	"go.podman.io/buildah/define"
 	"go.podman.io/image/v5/docker"
+	"go.podman.io/image/v5/docker/reference"
+	is "go.podman.io/image/v5/storage"
 	"go.podman.io/image/v5/types"
 	"go.podman.io/storage"
 )
@@ -44,28 +46,40 @@ func cacheDir(options storage.StoreOptions) string {
 // which have their digest names too, so that every image is located one way, by its image ID.
 const CacheRepository = "localhost/vamos-cache"
 
-// scratch is the name buildah starts an empty image from, as in a Dockerfile's "FROM scratch".
-const scratch = "scratch"
-
 // localRunner executes actions with buildah, on the local container store, and publishes their results.
 // It never reads the graph: an action carries everything it needs.
 type localRunner struct {
 	store         storage.Store
 	content       cache.ContentStore
-	records       cache.RecordStore
 	systemContext *types.SystemContext
 	capabilities  []string // given to run() steps, as root
 	isolation     define.Isolation
+	// attempt names the attempt this runner runs, on a worker, so that its container is named for it and found
+	// after a kill; "" for the local executor, whose containers buildah names.
+	attempt string
+	// cacheRepository is the registry repository that built layers are pushed to, tagged by image ID, before their
+	// result is reported, so that any worker can fetch them; "" pushes nothing, as the local executor does.
+	cacheRepository string
+	// pullThrough maps each upstream registry to the pull-through cache that mirrors it, by host; empty pulls
+	// from upstream directly, as the local executor does.
+	pullThrough map[string]string
 }
 
-// check reports why result, the action a's, can't be used, if it can't:
+// attemptPrefix starts the name of an attempt's container, so that a worker finds what a killed attempt left.
+const attemptPrefix = "vamos-attempt-"
+
+// Check reports why result, the action a's, can't be used, if it can't:
 // something it names may have been removed since, from the content store or the container store, or corrupted.
 // A store that can't be reached is an error instead.
 // The files of a task's tree are checked to be present, but read, and so verified, only when a target adds them.
 // The log isn't checked: the scheduler reads it, and so verifies it, whenever it uses the result.
-func (r *localRunner) check(ctx context.Context, a *action, result *cache.ActionResult) (problem, err error) {
+// A layer's or a resolve's image must be in the container store, for the action's platform,
+// whatever locations the result names:
+// the local executor pulls through a resolve alone, so a cached resolve whose image is gone resolves again,
+// as TestPullTag requires, from the images pulled before if the store still holds them by digest.
+func (r *localRunner) Check(ctx context.Context, a *sched.Action, result *cache.ActionResult) (problem, err error) {
 	switch a.Kind {
-	case kindTask:
+	case sched.KindTask:
 		if a.Output == nil {
 			break
 		}
@@ -73,9 +87,9 @@ func (r *localRunner) check(ctx context.Context, a *action, result *cache.Action
 			return errors.New("it has no files"), nil
 		}
 		if err := cache.CheckTree(ctx, r.content, *result.Output); err != nil {
-			return storeProblem("its files can't be used from the cache", err)
+			return sched.StoreProblem("its files can't be used from the cache", err)
 		}
-	case kindLayer:
+	case sched.KindLayer, sched.KindResolve:
 		if result.Image == "" {
 			return errors.New("it has no image"), nil
 		}
@@ -83,44 +97,42 @@ func (r *localRunner) check(ctx context.Context, a *action, result *cache.Action
 			return errors.New("it doesn't record its image's platform"), nil
 		}
 		id := result.Image.Encoded()
-		if _, _, err := locateImage(ctx, r.store, id); errors.Is(err, storage.ErrImageUnknown) {
+		_, got, err := locateImage(ctx, r.store, id)
+		if errors.Is(err, storage.ErrImageUnknown) {
 			return fmt.Errorf("its image %s is no longer in the container store", shortID(id)), nil
 		} else if errors.Is(err, errWrongImage) {
 			return fmt.Errorf("its image %s in the container store: %w", shortID(id), err), nil
 		} else if err != nil {
 			return nil, err
 		}
+		// A record that names another platform's image, as no writer makes, is a miss rather than a wrong base.
+		if want, err := graph.ParsePlatform(a.Platform); err != nil {
+			return nil, err
+		} else if !platforms.NewMatcher(want).Match(got) {
+			return fmt.Errorf("its image %s is for %s, not %s", shortID(id), platforms.Format(got), a.Platform), nil
+		}
 	}
 	return nil, nil
 }
 
-// storeProblem tells a store's err apart: content that is missing, corrupt or too large makes a result unusable,
-// described by what, while any other error means the store couldn't be reached, which fails the operation.
-func storeProblem(what string, err error) (problem, unavailable error) {
-	if errors.Is(err, cache.ErrMissing) || errors.Is(err, cache.ErrCorrupt) || errors.Is(err, cache.ErrOverLimit) {
-		return fmt.Errorf("%s: %w", what, err), nil
-	}
-	return nil, err
-}
-
-// run executes req: a resolve through the puller, or a layer or task in a container,
-// publishing a layer's or task's result under req.key once its artifact is published.
-func (r *localRunner) run(ctx context.Context, req actionRequest, ev actionEvents) (*cache.ActionResult, error) {
-	switch req.action.Kind {
-	case kindResolve:
-		// A resolve's result isn't published: the tag record is, and it carries no provenance.
-		pl := &puller{store: r.store, records: r.records, systemContext: r.systemContext}
+// Run executes req: a resolve through the puller, or a layer or task in a container, publishing its artifact,
+// and returns what to record: the result, and for a resolve the tag record, which the caller writes.
+func (r *localRunner) Run(ctx context.Context, req sched.Request, ev sched.Output) (*sched.Report, error) {
+	switch req.Action.Kind {
+	case sched.KindResolve:
+		// A resolve's result isn't recorded: the tag record is, and it carries no provenance.
+		pl := &puller{store: r.store, systemContext: r.systemContext, pullThrough: r.pullThrough}
 		return pl.resolve(ctx, req)
-	case kindTask:
+	case sched.KindTask:
 		return r.runTarget(ctx, req, ev, func(st *targetState, result *cache.ActionResult) error {
-			a := req.action
+			a := req.Action
 			if a.Output == nil {
 				return nil
 			}
 			_, span := tracing.Start(ctx, "collect output", "source", a.Source,
 				"include", a.Output.Include, "exclude", a.Output.Exclude)
 			output, stats, err := collectOutput(ctx, st.mountPoint, a.Source, a.Output,
-				rewriting{ContentStore: r.content, corrupt: req.rewrite})
+				sched.Rewriting{ContentStore: r.content, Corrupt: req.Rewrite})
 			result.Output = &output
 			if err == nil {
 				span.Set(stats.Args()...)
@@ -130,22 +142,23 @@ func (r *localRunner) run(ctx context.Context, req actionRequest, ev actionEvent
 			span.EndWith(err)
 			return err
 		})
-	case kindLayer:
+	case sched.KindLayer:
 		return r.runTarget(ctx, req, ev, func(st *targetState, result *cache.ActionResult) error {
 			return r.commitLayer(ctx, st.builder, result)
 		})
 	}
-	return nil, fmt.Errorf("unknown action kind %q", req.action.Kind)
+	return nil, fmt.Errorf("unknown action kind %q", req.Action.Kind)
 }
 
 // runTarget runs req, a layer or task, and saves what it printed to the content store.
 // It then calls finish with the target's container, still mounted, to complete its result:
-// to commit a layer's image, or collect a task's files; then it publishes the result.
+// to commit a layer's image, or collect a task's files; the result is returned for the caller to record,
+// so that the artifact is published before the result is.
 // The container is removed whatever happens, and a failure to do so is reported with the primary error.
 func (r *localRunner) runTarget(
-	ctx context.Context, req actionRequest, ev actionEvents,
+	ctx context.Context, req sched.Request, ev sched.Output,
 	finish func(*targetState, *cache.ActionResult) error,
-) (_ *cache.ActionResult, err error) {
+) (_ *sched.Report, err error) {
 	log, err := cache.NewLog()
 	if err != nil {
 		return nil, fmt.Errorf("recording its output: %w", err)
@@ -157,11 +170,11 @@ func (r *localRunner) runTarget(
 			return
 		}
 		cerr := st.delete()
-		var se *stepError
+		var se *sched.StepError
 		switch {
 		case cerr == nil:
 		case errors.As(err, &se):
-			se.cleanup = cerr // the scheduler describes the step, and this with it
+			se.Cleanup = cerr // the scheduler describes the step, and this with it
 		default:
 			err = errors.Join(err, fmt.Errorf("removing its container: %w", cerr))
 		}
@@ -173,72 +186,35 @@ func (r *localRunner) runTarget(
 		if serr != nil {
 			tracing.Current(ctx).Set("log not saved", serr.Error())
 		}
-		var se *stepError
+		var se *sched.StepError
 		if errors.As(err, &se) {
-			se.log = saved
+			se.Log = saved
 			return nil, err
 		}
-		return nil, withLog(err, saved)
+		return nil, sched.WithLog(err, saved)
 	}
 
-	result := &cache.ActionResult{Epoch: req.epoch.Unix(), Provenance: r.provenance()}
+	result := &cache.ActionResult{Epoch: req.Epoch.Unix(), Provenance: r.provenance(st.emulated)}
 	// Save the log first, so that a failure saving it can't leave an image no result names.
 	if result.Log, err = log.Save(ctx, r.content); err != nil {
 		return nil, fmt.Errorf("saving to the build cache: %w", err)
 	}
 	// A failure from here on keeps the log too, since what the attempt printed may explain it.
 	if err := finish(st, result); err != nil {
-		return nil, withLog(err, result.Log)
+		return nil, sched.WithLog(err, result.Log)
 	}
-	if err := r.saveResult(ctx, req.key, result); err != nil {
-		return nil, withLog(fmt.Errorf("saving to the build cache: %w", err), result.Log)
-	}
-	return result, nil
+	return &sched.Report{Result: result}, nil
 }
 
-// loggedError is a failure of an attempt other than at a step, such as its cancellation
-// or a failure to collect its output or commit its image, with what the attempt printed, saved.
-type loggedError struct {
-	err error
-	log *cache.Blob
-}
-
-// withLog returns err with log, the attempt's saved output, or err alone if no log was saved.
-func withLog(err error, log *cache.Blob) error {
-	if log == nil {
-		return err
-	}
-	return &loggedError{err: err, log: log}
-}
-
-// Error describes the failure.
-func (e *loggedError) Error() string {
-	return e.err.Error()
-}
-
-// Unwrap returns the failure.
-func (e *loggedError) Unwrap() error {
-	return e.err
-}
-
-// provenance describes this executor, for the results it makes.
-func (r *localRunner) provenance() *cache.Provenance {
+// provenance describes this executor, for the results it makes, and whether a result's commands ran emulated.
+func (r *localRunner) provenance(emulated bool) *cache.Provenance {
 	return &cache.Provenance{
 		Platform:     platforms.Format(HostPlatform),
 		Isolation:    r.isolation.String(),
 		Capabilities: r.capabilities,
 		Version:      vamosVersion(),
+		Emulated:     emulated,
 	}
-}
-
-// saveResult publishes result under key.
-func (r *localRunner) saveResult(ctx context.Context, key digest.Digest, result *cache.ActionResult) (err error) {
-	_, span := tracing.Start(ctx, "cache write", "key", key.String())
-	defer func() { span.EndWith(err) }()
-	if result.Log != nil {
-		span.Set("log", result.Log.Digest.String(), "log bytes", result.Log.Size)
-	}
-	return r.records.SetResult(ctx, key, result)
 }
 
 // commitLayer commits the image of a layer from builder to the container store.
@@ -280,7 +256,17 @@ func (r *localRunner) commitLayer(ctx context.Context, builder *buildah.Builder,
 	}
 	result.Image = id
 	result.Platform = platforms.Format(platform)
+	result.Locations = []cache.Location{storeLocation(id.Encoded())}
 	span.Set("image ID", id.Encoded(), "name", cacheName(id.Encoded()))
+	if r.cacheRepository != "" {
+		// The image is published to the cache registry before its result is reported, so that a result never names
+		// an image other workers can't fetch, and survives this worker.
+		location, err := r.publish(ctx, img.ID, id.Encoded())
+		if err != nil {
+			return fmt.Errorf("pushing the image to %s: %w", r.cacheRepository, err)
+		}
+		result.Locations = append(result.Locations, location)
+	}
 	if tracing.Enabled(ctx) {
 		if layer, err := r.store.Layer(img.TopLayer); err == nil {
 			span.Set("top layer", layer.ID, "layer digest", layer.UncompressedDigest.String(),
@@ -291,46 +277,79 @@ func (r *localRunner) commitLayer(ctx context.Context, builder *buildah.Builder,
 	return nil
 }
 
+// publish pushes the image storeID, whose ID is id, to the cache repository, tagged by its ID, and returns its
+// location there; what arrives must have the ID it was pushed under.
+func (r *localRunner) publish(ctx context.Context, storeID, id string) (_ cache.Location, err error) {
+	_, span := tracing.Start(ctx, "publish", "repository", r.cacheRepository)
+	defer func() { span.EndWith(err) }()
+	named, err := reference.ParseNamed(r.cacheRepository)
+	if err != nil {
+		return cache.Location{}, fmt.Errorf("cache repository %q: %w", r.cacheRepository, err)
+	}
+	dest, err := reference.WithTag(reference.TrimNamed(named), id)
+	if err != nil {
+		return cache.Location{}, err
+	}
+	src, err := is.Transport.NewStoreReference(r.store, nil, storeID)
+	if err != nil {
+		return cache.Location{}, err
+	}
+	pushed, err := pushImageFrom(ctx, r.systemContext, src, dest)
+	if err != nil {
+		return cache.Location{}, err
+	}
+	if pushed != id {
+		return cache.Location{}, fmt.Errorf("the registry holds image %s under %s, not %s", shortID(pushed), dest,
+			shortID(id))
+	}
+	return registryLocation(dest), nil
+}
+
 // start makes a container for req, a layer or task, from its base image, mounts it,
 // and applies its steps, recording what they print in log and passing it on to ev.
 // A layer's default command is set too.
 // The caller must delete the returned target's container, which is returned, to be deleted, even on failure,
 // once it exists.
 func (r *localRunner) start(
-	ctx context.Context, req actionRequest, log *cache.LogRecorder, ev actionEvents,
+	ctx context.Context, req sched.Request, log *cache.LogRecorder, ev sched.Output,
 ) (_ *targetState, err error) {
-	a := req.action
+	a := req.Action
 	sys := r.systemContext
-	if req.platform != "" {
-		platform, err := graph.ParsePlatform(req.platform)
-		if err != nil {
+	var platform imgspecv1.Platform
+	if req.Platform != "" {
+		if platform, err = graph.ParsePlatform(req.Platform); err != nil {
 			return nil, err
 		}
 		sys = forPlatform(sys, platform)
 	}
 	_, startSpan := tracing.Start(ctx, "start", "base", a.Base)
-	if a.Base != scratch {
+	if a.Base != sched.Scratch {
 		startSpan.Use(graph.ImageFlow(a.Base))
 	}
 	defer func() { startSpan.EndWith(err) }() // if it fails before the container is mounted
 	from := a.Base
-	if from != scratch {
-		// The image is located by its ID through the cache repository, and used by the store's ID found.
-		if from, _, err = locateImage(ctx, r.store, a.Base); err != nil {
+	if from != sched.Scratch {
+		// The image is located by its ID through the cache repository, and used by the store's ID found,
+		// or else fetched from one of the locations the request names.
+		if from, err = r.materialize(ctx, a.Base, platform, req.Bases); err != nil {
 			return nil, fmt.Errorf("base image %s: %w", shortID(a.Base), err)
 		}
 	}
-	builder, err := buildah.NewBuilder(ctx, r.store, buildah.BuilderOptions{
+	options := buildah.BuilderOptions{
 		FromImage:     from,
 		PullPolicy:    buildah.PullNever, // only resolve actions reach registries
 		Capabilities:  r.capabilities,
 		SystemContext: sys,
-	})
+	}
+	if r.attempt != "" {
+		options.Container = attemptPrefix + r.attempt
+	}
+	builder, err := buildah.NewBuilder(ctx, r.store, options)
 	if err != nil {
 		return nil, err
 	}
 	st := &targetState{runner: r, builder: builder, log: log, events: ev, buildEnv: map[string]string{}}
-	if a.Kind == kindLayer {
+	if a.Kind == sched.KindLayer {
 		if err := setPlatform(builder, a); err != nil {
 			return st, err
 		}
@@ -349,32 +368,35 @@ func (r *localRunner) start(
 			return st, err
 		}
 		display := in.Op
-		if i < len(req.displays) {
-			display = req.displays[i]
+		if i < len(req.Displays) {
+			display = req.Displays[i]
+		}
+		if in.Op == graph.OpRun && emulated(builder) {
+			st.emulated = true
 		}
 		if err := st.tracedApply(ctx, in, display); err != nil {
-			return st, &stepError{step: i, err: err, hint: emulatorHint(in, builder)}
+			return st, &sched.StepError{Step: i, Err: err, Hint: emulatorHint(in, builder)}
 		}
 	}
 	if err := ctx.Err(); err != nil {
 		return st, err
 	}
 
-	if a.Kind == kindLayer && len(a.Command) > 0 {
+	if a.Kind == sched.KindLayer && len(a.Command) > 0 {
 		builder.SetCmd(a.Command)
 	}
 	return st, nil
 }
 
-// setPlatform makes the image of the layer a say it is for its platform: an image on scratch,
+// setPlatform makes the image of the layer a say it is for its platform: an image on sched.Scratch,
 // which has none, says so once set, and one on another image must already be for it, since the base's files are;
 // the scheduler checks that before running the layer, naming the base.
-func setPlatform(builder *buildah.Builder, a *action) error {
+func setPlatform(builder *buildah.Builder, a *sched.Action) error {
 	want, err := graph.ParsePlatform(a.Platform)
 	if err != nil {
 		return err
 	}
-	if a.Base == scratch {
+	if a.Base == sched.Scratch {
 		builder.SetOS(want.OS)
 		builder.SetArchitecture(want.Architecture)
 		builder.SetVariant(want.Variant)
@@ -397,19 +419,22 @@ func builderPlatform(builder *buildah.Builder) imgspecv1.Platform {
 	})
 }
 
+// emulated reports whether builder's image is for another platform than the host's,
+// so that its programs run under emulation.
+func emulated(builder *buildah.Builder) bool {
+	return !platforms.NewMatcher(HostPlatform).Match(builderPlatform(builder))
+}
+
 // emulatorHint explains, if in is a run() step in an image for another platform than the host's,
 // that its programs run under emulation, which may be why it failed.
 // The error that says so, "exec format error", is printed by buildah, not returned.
-func emulatorHint(in actionStep, builder *buildah.Builder) string {
-	if in.Op != graph.OpRun {
-		return ""
-	}
-	p := builderPlatform(builder)
-	if platforms.NewMatcher(HostPlatform).Match(p) {
+func emulatorHint(in sched.Step, builder *buildah.Builder) string {
+	if in.Op != graph.OpRun || !emulated(builder) {
 		return ""
 	}
 	return fmt.Sprintf(`the image is for %s, which runs here under emulation: "exec format error" above means `+
-		"no emulator for it is registered (tonistiigi/binfmt registers them)", platforms.Format(p))
+		"no emulator for it is registered (tonistiigi/binfmt registers them)",
+		platforms.Format(builderPlatform(builder)))
 }
 
 // delete unmounts and removes the target's container, once, reporting what it couldn't.
@@ -555,21 +580,6 @@ func addPaths(builder *buildah.Builder, dir, parent string, srcs []string, desti
 	}
 	// A trailing slash makes the destination a directory, keeping each source's own name within it.
 	return builder.Add(path.Join(destination, parent)+"/", false, options, sources...)
-}
-
-// rewriting is a content store that reports the blobs found corrupt in this run as corrupt even when their size
-// is right, so that a task which makes them again writes them again instead of finding them present.
-type rewriting struct {
-	cache.ContentStore
-	corrupt map[digest.Digest]bool
-}
-
-// Has reports b as corrupt if it was found so in this run.
-func (r rewriting) Has(ctx context.Context, b cache.Blob) error {
-	if r.corrupt[b.Digest] {
-		return cache.Corrupt(b, "it was found corrupt earlier in this build")
-	}
-	return r.ContentStore.Has(ctx, b)
 }
 
 // collectOutput saves the files that sel selects within source in a task's container,

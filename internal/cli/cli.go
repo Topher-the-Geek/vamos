@@ -7,7 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
+	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,13 +19,17 @@ import (
 
 	"github.com/Topher-the-Geek/vamos/internal/api"
 	"github.com/Topher-the-Geek/vamos/internal/cache"
+	"github.com/Topher-the-Geek/vamos/internal/coord"
 	"github.com/Topher-the-Geek/vamos/internal/fileset"
 	"github.com/Topher-the-Geek/vamos/internal/finish"
 	"github.com/Topher-the-Geek/vamos/internal/graph"
 	"github.com/Topher-the-Geek/vamos/internal/load"
+	"github.com/Topher-the-Geek/vamos/internal/remote"
 	"github.com/Topher-the-Geek/vamos/internal/run"
 	"github.com/Topher-the-Geek/vamos/internal/tracing"
+	"github.com/Topher-the-Geek/vamos/internal/worker"
 
+	"github.com/containerd/platforms"
 	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
@@ -52,21 +60,52 @@ type app struct {
 // options are the flags of one invocation; each command reads the ones it takes.
 // defaultOptions gives their defaults, which the root command's flags show.
 type options struct {
-	dir       string        // -C
-	tlsVerify tlsVerifyFlag // --tls-verify, which applies to the client's own registry access
-	timestamp timestampFlag // --timestamp
-	sets      []string      // --set
-	platform  string        // --platform
-	trace     string        // --trace
-	rebuild   bool          // build --rebuild
-	replace   bool          // export --replace
-	tag       string        // save --tag
-	pushFrom  pushFromFlag  // push --push-from
+	dir           string        // -C
+	tlsVerify     tlsVerifyFlag // --tls-verify, which applies to the client's own registry access
+	timestamp     timestampFlag // --timestamp
+	sets          []string      // --set
+	platform      string        // --platform
+	trace         string        // --trace
+	execPlatform  string        // --exec-platform
+	emulate       bool          // --emulate
+	coordinator   string        // --coordinator, or $VAMOS_COORDINATOR
+	rebuild       bool          // build --rebuild
+	replace       bool          // export --replace
+	tag           string        // save --tag
+	pushFrom      pushFromFlag  // push --push-from
+	listen        string        // coordinator --listen
+	grace         time.Duration // coordinator --grace
+	window        time.Duration // coordinator --window
+	local         bool          // coordinator --local
+	cacheDir      string        // coordinator --cache-dir
+	offer         []string      // coordinator --offer
+	offerEmulated []string      // coordinator --offer-emulated
+	lease         time.Duration // coordinator --lease
+	retries       int           // coordinator --retries
+	bound         int           // coordinator --bound
+	maxBuilds     int           // coordinator --max-builds
+	cacheRepo     string        // coordinator --cache-repository
+	pullThrough   []string      // coordinator --pull-through
+	capacity      int           // worker --capacity
+	graphRoot     string        // attempt --graph-root
+	runRoot       string        // attempt --run-root
 }
 
 // defaultOptions returns the options as they are before any flag is given.
 func defaultOptions() options {
-	return options{dir: ".", pushFrom: pushFromFlag(finish.FromExecutor)}
+	return options{
+		dir:         ".",
+		pushFrom:    pushFromFlag(finish.FromExecutor),
+		coordinator: os.Getenv("VAMOS_COORDINATOR"),
+		listen:      ":8080",
+		grace:       5 * time.Minute,
+		cacheDir:    "/var/lib/vamos",
+		lease:       30 * time.Second,
+		retries:     2,
+		bound:       4,
+		maxBuilds:   64,
+		capacity:    1,
+	}
 }
 
 // invocation is one run of a command: its context, its writers, its options and, if --trace is given,
@@ -78,6 +117,60 @@ type invocation struct {
 	opts           options
 	command        string        // as the trace names it: "vamos build app"
 	session        *traceSession // of the trace, if --trace is given, once started
+	holds          []*hold       // the builds held open on the executor until it is closed
+	grace          time.Duration // the executor's grace period, from its capabilities
+	generation     uint64        // the executor's cache generation, from its capabilities, read before capture
+}
+
+// hold keeps a build open on its executor while the command delivers its result: a watch past the terminal
+// event, which delivers nothing, renews the hold every third of the grace period, and closing the executor
+// releases the build.
+type hold struct {
+	id   api.JobID
+	stop context.CancelFunc
+	done chan struct{}
+}
+
+// hold starts holding the build id open on ex, once its terminal event has been seen at position end.
+func (inv *invocation) hold(ex api.Executor, id api.JobID, end int64) {
+	ctx, stop := context.WithCancel(context.WithoutCancel(inv.ctx))
+	h := &hold{id: id, stop: stop, done: make(chan struct{})}
+	inv.holds = append(inv.holds, h)
+	interval := inv.grace / 3
+	go func() {
+		defer close(h.done)
+		if interval <= 0 {
+			return // the executor holds builds as long as it lives
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if err := ex.Watch(ctx, id, end+1, func(api.Event) error { return nil }); err != nil &&
+					ctx.Err() == nil {
+					inv.warn(fmt.Errorf("holding the build open on the executor: %w", err))
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+}
+
+// release lets go of every build held on ex, so that a prune may run and the coordinator may free its state;
+// a failure to release is a warning, since the hold lapses on its own.
+func (inv *invocation) release(ex api.Executor) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(inv.ctx), 10*time.Second)
+	defer cancel()
+	for _, h := range inv.holds {
+		h.stop()
+		<-h.done
+		if err := ex.Release(ctx, h.id); err != nil && !errors.Is(err, api.ErrExpired) {
+			inv.warn(fmt.Errorf("releasing the build on the executor: %w", err))
+		}
+	}
+	inv.holds = nil
 }
 
 // NewRootCommand returns the vamos command line, with its subcommands, as cfg says.
@@ -115,8 +208,9 @@ func NewRootCommand(cfg Config) *cobra.Command {
 	root.PersistentFlags().StringVarP(&opts.dir, "dir", "C", opts.dir,
 		"directory of the BUILD file whose targets are named without a label, such as //dir:name")
 	root.PersistentFlags().Var(&opts.tlsVerify, "tls-verify",
-		"require HTTPS and verify certificates when vamos itself contacts a registry, as --push-from=client does; "+
-			"the executor follows its registries.conf")
+		"require HTTPS and verify certificates when vamos itself contacts a registry: pushing with "+
+			"--push-from=client, and reading a coordinator's images to load, save or push; the executor follows "+
+			"its registries.conf, and so does vamos where this is unset")
 	root.PersistentFlags().Lookup("tls-verify").NoOptDefVal = "true"
 	root.PersistentFlags().Var(&opts.timestamp, "timestamp",
 		"stamp the files of targets that run no earlier than this time, in Unix seconds or RFC 3339")
@@ -125,6 +219,16 @@ func NewRootCommand(cfg Config) *cobra.Command {
 			"build gives it to each named target that has the parameter")
 	root.PersistentFlags().StringVar(&opts.platform, "platform", "",
 		"build for this `os/arch`, such as linux/arm64, rather than the host's")
+	root.PersistentFlags().StringVar(&opts.execPlatform, "exec-platform", "",
+		"run commands on this `os/arch`, which the executor must offer, rather than this machine's, "+
+			"or the only one offered")
+	// Emulation needs no permission from a local build yet; the flag takes effect once an executor requires it.
+	root.PersistentFlags().BoolVar(&opts.emulate, "emulate", false,
+		"allow commands in images for another platform than the execution platform to run under emulation")
+	root.PersistentFlags().MarkHidden("emulate")
+	root.PersistentFlags().StringVar(&opts.coordinator, "coordinator", opts.coordinator,
+		"build on the coordinator at this `URL`, such as http://coordinator:8080, rather than in this process; "+
+			"$VAMOS_COORDINATOR gives the default")
 
 	// handle returns a RunE that runs the command through an invocation made from cmd and opts.
 	handle := func(h func(inv *invocation, args []string) error) func(*cobra.Command, []string) error {
@@ -232,8 +336,95 @@ func NewRootCommand(cfg Config) *cobra.Command {
 			"write a trace of the command, which Perfetto (ui.perfetto.dev) opens, to `file.json`")
 	}
 
-	root.AddCommand(buildCmd, pushCmd, loadCmd, saveCmd, writeCmd, exportCmd, pruneCmd, graphCmd)
+	coordinatorCmd := &cobra.Command{
+		Use:   "coordinator",
+		Short: "Coordinate builds across workers for clients that give --coordinator, until interrupted",
+		Long: "Run as a coordinator: schedule what clients on the network submit across the workers that register,\n" +
+			"keep the build cache they share, and serve the clients their results. Workers push the layers they\n" +
+			"build to --cache-repository and pull bases through the caches that --pull-through maps. There is no\n" +
+			"authentication: run it on a trusted network alone. Clients name it with --coordinator or\n" +
+			"$VAMOS_COORDINATOR; workers with `vamos worker --coordinator`.",
+		Example: "  vamos coordinator --listen :8080 --cache-repository registry:5000/vamos-cache \\\n" +
+			"    --pull-through docker.io=hub-proxy:5000",
+		Args: noArgs,
+		RunE: handle(func(inv *invocation, args []string) error { return inv.coordinator() }),
+	}
+	coordinatorCmd.Flags().StringVar(&opts.listen, "listen", opts.listen, "the `address` to listen on")
+	coordinatorCmd.Flags().DurationVar(&opts.grace, "grace", opts.grace,
+		"how long a build goes unwatched before nothing more of it starts, and how long clients keep retrying "+
+			"after a drop")
+	coordinatorCmd.Flags().DurationVar(&opts.window, "window", 0,
+		"how long a finished build stays readable before the coordinator forgets it; --grace if shorter or unset")
+	coordinatorCmd.Flags().StringVar(&opts.cacheDir, "cache-dir", opts.cacheDir,
+		"the `directory` of the build cache: sources, trees, logs and results")
+	coordinatorCmd.Flags().StringArrayVar(&opts.offer, "offer", nil,
+		"an `os/arch` the deployment offers workers for, besides those registered now; repeat for several")
+	coordinatorCmd.Flags().StringArrayVar(&opts.offerEmulated, "offer-emulated", nil,
+		"an `os/arch` the deployment has workers with emulators for, besides what registered workers report; "+
+			"a build that --emulate lets run commands for it waits for such a worker")
+	coordinatorCmd.Flags().DurationVar(&opts.lease, "lease", opts.lease,
+		"how long an attempt lives without a heartbeat from its worker")
+	coordinatorCmd.Flags().IntVar(&opts.retries, "retries", opts.retries,
+		"how many times work whose worker is lost is tried again elsewhere")
+	coordinatorCmd.Flags().IntVar(&opts.bound, "bound", opts.bound, "how many targets of one build run at once")
+	coordinatorCmd.Flags().IntVar(&opts.maxBuilds, "max-builds", opts.maxBuilds,
+		"how many builds may be open at once before submissions are refused as busy")
+	coordinatorCmd.Flags().StringVar(&opts.cacheRepo, "cache-repository", "",
+		"the registry `repository` that workers push built layers to, tagged by image ID")
+	coordinatorCmd.Flags().StringArrayVar(&opts.pullThrough, "pull-through", nil,
+		"map an upstream registry to the pull-through cache that mirrors it, as `registry=cache`; repeat for several")
+	// --local serves a local executor instead, building in this process: the step before workers existed,
+	// kept for a coordinator with no workers at hand, such as a test's.
+	coordinatorCmd.Flags().BoolVar(&opts.local, "local", false,
+		"build in this process, with its container store, rather than on workers")
+	coordinatorCmd.Flags().MarkHidden("local")
+
+	workerCmd := &cobra.Command{
+		Use:   "worker",
+		Short: "Run builds that a coordinator assigns, until interrupted",
+		Long: "Run as a worker of the coordinator that --coordinator names: register, run the attempts it assigns,\n" +
+			"each in a contained subprocess of this binary, in this machine's container store, and report what\n" +
+			"they made. It needs root, cgroup v2 and buildah's chroot isolation, as building does.",
+		Example: "  vamos worker --coordinator http://coordinator:8080 --capacity 2",
+		Args:    noArgs,
+		RunE:    handle(func(inv *invocation, args []string) error { return inv.worker() }),
+	}
+	workerCmd.Flags().IntVar(&opts.capacity, "capacity", opts.capacity, "how many attempts to run at once")
+
+	// attempt runs one attempt as the subprocess that a worker starts: hidden, since only workers run it.
+	attemptCmd := &cobra.Command{
+		Use:    "attempt",
+		Short:  "Run one attempt for a worker, from its standard input",
+		Hidden: true,
+		Args:   noArgs,
+		RunE:   handle(func(inv *invocation, args []string) error { return inv.attempt() }),
+	}
+	attemptCmd.Flags().StringVar(&opts.graphRoot, "graph-root", "", "the container store's graph root")
+	attemptCmd.Flags().StringVar(&opts.runRoot, "run-root", "", "the container store's run root")
+	attemptCmd.Flags().MarkHidden("graph-root")
+	attemptCmd.Flags().MarkHidden("run-root")
+
+	root.AddCommand(buildCmd, pushCmd, loadCmd, saveCmd, writeCmd, exportCmd, pruneCmd, graphCmd, coordinatorCmd,
+		workerCmd, attemptCmd)
 	return root
+}
+
+// UsesContainerStore reports whether the command line args names a command that opens container storage:
+// every command but a coordinator, which schedules builds and keeps no images, unless it builds locally.
+// main consults it before the re-exec that container storage needs from a root without capabilities.
+// The command is found as cobra finds it, so that a target or directory named "coordinator" isn't mistaken for it;
+// a command line that doesn't parse is left to Execute to refuse, after the re-exec, which is harmless.
+func UsesContainerStore(args []string) bool {
+	root := NewRootCommand(Config{Fs: afero.NewMemMapFs()})
+	cmd, rest, err := root.Traverse(args)
+	if err != nil || cmd.Name() != "coordinator" {
+		return true
+	}
+	if err := cmd.ParseFlags(rest); err != nil {
+		return true
+	}
+	local, err := cmd.Flags().GetBool("local")
+	return err != nil || local
 }
 
 // printf writes to the command's output, returning a failure to write, which the command reports.
@@ -260,6 +451,43 @@ func (inv *invocation) request(names []string, want load.Want, execPlatform imgs
 	}
 }
 
+// execPlatform returns the execution platform to configure the graph for, among those the executor offers, caps:
+// the one --exec-platform names, or else this machine's, if offered, or else the only one offered.
+// Several offered, none of them this machine's, must be chosen between.
+func (inv *invocation) execPlatform(caps api.Capabilities) (imgspecv1.Platform, error) {
+	var offered []string
+	for _, p := range caps.Platforms {
+		offered = append(offered, platforms.Format(platforms.Normalize(p)))
+	}
+	if text := inv.opts.execPlatform; text != "" {
+		// platforms.Parse takes an OS alone, filling in this machine's architecture, which isn't what was asked.
+		p, err := graph.ParsePlatform(text)
+		if err != nil || !strings.Contains(text, "/") {
+			return imgspecv1.Platform{}, fmt.Errorf("--exec-platform %s: platform %q: want os/arch or "+
+				"os/arch/variant, such as \"linux/arm64\"", text, text)
+		}
+		switch {
+		case len(offered) == 0:
+			return imgspecv1.Platform{}, errors.New("the executor offers no platform to run commands on")
+		case !caps.Offers(p):
+			return imgspecv1.Platform{}, fmt.Errorf("--exec-platform %s: the executor doesn't run commands on %s; "+
+				"it offers %s", inv.opts.execPlatform, platforms.Format(p), fileset.QuoteNames(offered))
+		}
+		return p, nil
+	}
+	if caps.Offers(run.HostPlatform) {
+		return run.HostPlatform, nil
+	}
+	switch len(caps.Platforms) {
+	case 0:
+		return imgspecv1.Platform{}, errors.New("the executor offers no platform to run commands on")
+	case 1:
+		return platforms.Normalize(caps.Platforms[0]), nil
+	}
+	return imgspecv1.Platform{}, fmt.Errorf("the executor doesn't run commands on this machine's platform, %s; "+
+		"choose among %s with --exec-platform", platforms.Format(run.HostPlatform), fileset.QuoteNames(offered))
+}
+
 // storeOptions returns the container store to build in.
 func (inv *invocation) storeOptions() (storage.StoreOptions, error) {
 	if store := inv.app.store; store != nil {
@@ -275,12 +503,30 @@ func (inv *invocation) storeOptions() (storage.StoreOptions, error) {
 	return run.DefaultStoreOptions()
 }
 
+// executor is what a command builds with: an executor and the content store it reads submitted content from,
+// which the client captures sources into and delivers from.
+// The local executor's store is the build cache beside its container store; a coordinator's is served over HTTP.
+type executor interface {
+	api.Executor
+	ContentStore() (cache.ContentStore, error)
+	Close() error
+}
+
 // executor returns the executor to build with, which the caller must close with closeExecutor,
 // and the client's own registry settings, for finish; the executor builds its own from its environment.
-func (inv *invocation) executor() (*run.Local, *types.SystemContext, error) {
+// With --coordinator, it is the coordinator named, which this process reaches over HTTP and opens no store for.
+func (inv *invocation) executor() (executor, *types.SystemContext, error) {
 	sys, err := inv.systemContext()
 	if err != nil {
 		return nil, nil, err
+	}
+	if inv.opts.coordinator != "" {
+		client, err := remote.NewClient(inv.opts.coordinator)
+		if err != nil {
+			return nil, nil, fmt.Errorf("--coordinator: %w", err)
+		}
+		client.Warn = func(msg string) { inv.warn(errors.New(msg)) }
+		return &remoteExecutor{client}, sys, nil
 	}
 	options, err := inv.storeOptions()
 	if err != nil {
@@ -293,11 +539,222 @@ func (inv *invocation) executor() (*run.Local, *types.SystemContext, error) {
 	return ex, sys, nil
 }
 
+// remoteExecutor is a coordinator as an executor: its content store is the coordinator's, over HTTP.
+type remoteExecutor struct {
+	*remote.Client
+}
+
+// ContentStore returns the coordinator's content store.
+func (r *remoteExecutor) ContentStore() (cache.ContentStore, error) {
+	return r.Client, nil
+}
+
 // closeExecutor shuts ex down, warning about what failed: the command's own outcome stands.
-func (inv *invocation) closeExecutor(ex *run.Local) {
+func (inv *invocation) closeExecutor(ex executor) {
+	inv.release(ex)
 	if err := ex.Close(); err != nil {
 		inv.warn(fmt.Errorf("shutting the executor down: %w", err))
 	}
+}
+
+// coordinator coordinates builds for clients on the network, at --listen, until the command is interrupted:
+// across the workers that register, or, with --local, in this process with the local executor.
+func (inv *invocation) coordinator() error {
+	var server *remote.Server
+	var closer executor
+	if inv.opts.local {
+		options, err := inv.storeOptions()
+		if err != nil {
+			return err
+		}
+		local, err := run.NewLocal(options)
+		if err != nil {
+			return err
+		}
+		content, err := local.ContentStore()
+		if err != nil {
+			inv.closeExecutor(local)
+			return err
+		}
+		server, closer = &remote.Server{Executor: local, Content: content, GracePeriod: inv.opts.grace}, local
+	} else {
+		c, err := inv.newCoordinator()
+		if err != nil {
+			return err
+		}
+		server, closer = &remote.Server{Executor: c, Content: c.content, Workers: c.Workers()}, c
+	}
+	return inv.serve(server, closer)
+}
+
+// coordinatorStores is a coordinator with the build cache it keeps, closed together.
+type coordinatorStores struct {
+	*coord.Coordinator
+	directory *cache.Directory
+	content   cache.ContentStore
+}
+
+// ContentStore returns the coordinator's content store.
+func (c *coordinatorStores) ContentStore() (cache.ContentStore, error) {
+	return c.content, nil
+}
+
+// Close closes the coordinator, then its build cache.
+func (c *coordinatorStores) Close() error {
+	return errors.Join(c.Coordinator.Close(), c.directory.Close())
+}
+
+// newCoordinator returns the coordinator the options describe, over the build cache at --cache-dir.
+func (inv *invocation) newCoordinator() (*coordinatorStores, error) {
+	offered, err := parsePlatforms("--offer", inv.opts.offer)
+	if err != nil {
+		return nil, err
+	}
+	emulated, err := parsePlatforms("--offer-emulated", inv.opts.offerEmulated)
+	if err != nil {
+		return nil, err
+	}
+	retries := inv.opts.retries
+	switch {
+	case retries < 0:
+		return nil, fmt.Errorf("--retries %d: want zero or more", retries)
+	case retries == 0:
+		retries = coord.NoRetries // the coordinator's zero is its default, which an explicit zero isn't
+	}
+	pullThrough := map[string]string{}
+	for _, mapping := range inv.opts.pullThrough {
+		upstream, through, ok := strings.Cut(mapping, "=")
+		if !ok || upstream == "" || through == "" {
+			return nil, fmt.Errorf("--pull-through %s: want registry=cache, such as docker.io=hub-proxy:5000", mapping)
+		}
+		for _, host := range []string{upstream, through} {
+			if err := checkRegistryHost(host); err != nil {
+				return nil, fmt.Errorf("--pull-through %s: %w", mapping, err)
+			}
+		}
+		pullThrough[upstream] = through
+	}
+	if inv.opts.cacheRepo == "" {
+		inv.warn(errors.New("--cache-repository is unset: workers push no layers, so a build's images stay on " +
+			"the worker that made them, where neither the client nor another worker can read them"))
+	}
+	sys, err := inv.systemContext()
+	if err != nil {
+		return nil, err
+	}
+	directory, err := cache.OpenDirectory(inv.opts.cacheDir)
+	if err != nil {
+		return nil, fmt.Errorf("--cache-dir %s: %w", inv.opts.cacheDir, err)
+	}
+	c := coord.New(directory, directory, coord.Config{
+		Platforms:       offered,
+		Emulated:        emulated,
+		Lease:           inv.opts.lease,
+		Grace:           inv.opts.grace,
+		Window:          inv.opts.window,
+		Retries:         retries,
+		Bound:           inv.opts.bound,
+		MaxBuilds:       inv.opts.maxBuilds,
+		CacheRepository: inv.opts.cacheRepo,
+		PullThrough:     pullThrough,
+		Version:         run.Version(),
+		Images:          &coord.Registry{Sys: sys},
+	})
+	return &coordinatorStores{Coordinator: c, directory: directory, content: directory}, nil
+}
+
+// checkRegistryHost checks that host names a registry as an image reference would: with a dot or a port, or as
+// localhost, so that a bare name isn't taken for a Docker Hub path.
+func checkRegistryHost(host string) error {
+	named, err := reference.ParseNormalizedNamed(host + "/x")
+	if err != nil || (reference.Domain(named) != host && host != "index.docker.io") {
+		return fmt.Errorf("%q isn't a registry host; want one with a dot or a port, or localhost, such as docker.io "+
+			"or hub-proxy:5000", host)
+	}
+	return nil
+}
+
+// parsePlatforms parses the platforms given to the flag named flag.
+func parsePlatforms(flag string, texts []string) ([]imgspecv1.Platform, error) {
+	var parsed []imgspecv1.Platform
+	for _, text := range texts {
+		p, err := graph.ParsePlatform(text)
+		if err != nil || !strings.Contains(text, "/") {
+			return nil, fmt.Errorf("%s %s: platform %q: want os/arch or os/arch/variant, such as \"linux/arm64\"",
+				flag, text, text)
+		}
+		parsed = append(parsed, p)
+	}
+	return parsed, nil
+}
+
+// serve serves s at --listen until the command is interrupted, then closes closer, the executor it serves,
+// so that its jobs are cancelled and cleaned up, which ends the watches that clients hold open, and shuts down.
+func (inv *invocation) serve(s *remote.Server, closer executor) error {
+	server := &http.Server{Handler: s.Handler()}
+	listener, err := net.Listen("tcp", inv.opts.listen)
+	if err != nil {
+		inv.closeExecutor(closer)
+		return fmt.Errorf("--listen %s: %w", inv.opts.listen, err)
+	}
+	if err := inv.printf("Coordinating builds at %s\n", listener.Addr()); err != nil {
+		inv.closeExecutor(closer)
+		return err
+	}
+	served := make(chan error, 1)
+	go func() { served <- server.Serve(listener) }()
+	select {
+	case err := <-served:
+		inv.closeExecutor(closer)
+		return err
+	case <-inv.ctx.Done():
+	}
+	inv.closeExecutor(closer)
+	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdown); err != nil {
+		server.Close() // whatever is still connected is cut off
+	}
+	return nil
+}
+
+// worker runs attempts for the coordinator that --coordinator names, until the command is interrupted.
+func (inv *invocation) worker() error {
+	if inv.opts.coordinator == "" {
+		return errors.New("a worker needs the coordinator to work for: give --coordinator or $VAMOS_COORDINATOR")
+	}
+	options, err := inv.storeOptions()
+	if err != nil {
+		return err
+	}
+	w, err := worker.New(worker.Config{
+		Coordinator: inv.opts.coordinator,
+		Store:       options,
+		Capacity:    inv.opts.capacity,
+		Log:         inv.stderr,
+	})
+	if err != nil {
+		return err
+	}
+	return w.Run(inv.ctx)
+}
+
+// attempt runs one attempt as a worker's subprocess: the assignment comes on standard input, and what it does goes
+// to standard output, the report last. The worker names the roots of its container store, so that the attempt builds
+// where the worker cleans up.
+func (inv *invocation) attempt() error {
+	options, err := inv.storeOptions()
+	if err != nil {
+		return err
+	}
+	if inv.opts.graphRoot != "" || inv.opts.runRoot != "" {
+		if !filepath.IsAbs(inv.opts.graphRoot) || !filepath.IsAbs(inv.opts.runRoot) {
+			return fmt.Errorf("the container store's graph root %q and run root %q must both be absolute paths",
+				inv.opts.graphRoot, inv.opts.runRoot)
+		}
+		options.GraphRoot, options.RunRoot = inv.opts.graphRoot, inv.opts.runRoot
+	}
+	return run.Attempt(inv.ctx, os.Stdin, inv.stdout, options)
 }
 
 // systemContext returns the client's settings for reaching registries, for a push from the client,
@@ -312,6 +769,26 @@ func (inv *invocation) systemContext() (*types.SystemContext, error) {
 		sys.DockerInsecureSkipTLSVerify = types.NewOptionalBool(!inv.opts.tlsVerify.verify)
 	}
 	return sys, nil
+}
+
+// capabilities asks ex what it offers, before the graph is loaded, refuses an executor that doesn't run this
+// vamos's graphs, as Submit would, and returns the execution platform to configure the graph for,
+// which EXEC_PLATFORM names.
+func (inv *invocation) capabilities(ex api.Executor) (imgspecv1.Platform, error) {
+	caps, err := ex.Capabilities(inv.ctx)
+	if err != nil {
+		return imgspecv1.Platform{}, err
+	}
+	inv.grace, inv.generation = caps.GracePeriod, caps.Generation
+	if !slices.Contains(caps.GraphVersions, graph.Version) {
+		who := "the executor"
+		if inv.opts.coordinator != "" {
+			who = "the coordinator at " + inv.opts.coordinator
+		}
+		return imgspecv1.Platform{}, fmt.Errorf("%s runs graph versions %v, not this vamos's, %d; "+
+			"use a vamos of its version", who, caps.GraphVersions, graph.Version)
+	}
+	return inv.execPlatform(caps)
 }
 
 // events returns what prints a run's progress, and passes the executor's spans on to the trace.
@@ -392,11 +869,13 @@ func (inv *invocation) runGraph(
 		return nil, nil, err
 	}
 	runReq := api.GraphRequest{
-		Graph:     stored,
-		Version:   g.Version,
-		Platform:  execPlatform,
-		Rebuild:   rebuild,
-		Timestamp: time.Time(inv.opts.timestamp),
+		Graph:      stored,
+		Version:    g.Version,
+		Platform:   execPlatform,
+		Rebuild:    rebuild,
+		Timestamp:  time.Time(inv.opts.timestamp),
+		Emulate:    inv.opts.emulate,
+		Generation: inv.generation, // read before the sources were captured: a prune since refuses the build
 	}
 	events.graph = g
 	var runSpan *tracing.Active
@@ -419,10 +898,18 @@ func (inv *invocation) runGraph(
 		runSpan.EndWith(err)
 		return nil, nil, err
 	}
-	outcome, err := watchJob(ctx, ex, id, events)
+	outcome, end, err := watchJob(ctx, ex, id, events)
 	runSpan.EndWith(err)
+	if err == nil {
+		inv.hold(ex, id, end) // through delivery, until the executor is closed
+	} else {
+		inv.holds = append(inv.holds, &hold{id: id, stop: func() {}, done: closedChan})
+	}
 	return outcome.Results, c, err
 }
+
+// closedChan is a channel that is closed, for a hold that renews nothing.
+var closedChan = func() chan struct{} { ch := make(chan struct{}); close(ch); return ch }()
 
 // deliver has the executor export res to the content store, and returns what it exported there.
 func (inv *invocation) deliver(
@@ -432,7 +919,7 @@ func (inv *invocation) deliver(
 	if err != nil {
 		return api.Exported{}, err
 	}
-	outcome, err := watchJob(ctx, ex, id, events)
+	outcome, _, err := watchJob(ctx, ex, id, events)
 	if err != nil {
 		return api.Exported{}, err
 	}
@@ -450,11 +937,11 @@ func (inv *invocation) buildImage(target string, dest destination) error {
 			return err
 		}
 		defer inv.closeExecutor(ex)
-		caps, err := ex.Capabilities(inv.ctx)
+		execPlatform, err := inv.capabilities(ex)
 		if err != nil {
 			return err
 		}
-		req := inv.request([]string{target}, load.WantImage, caps.Platform)
+		req := inv.request([]string{target}, load.WantImage, execPlatform)
 		if dest.platform != nil {
 			req.DestPlatform = func(ctx context.Context) (imgspecv1.Platform, string, error) {
 				p, why, err := dest.platform(ctx)
@@ -480,7 +967,7 @@ func (inv *invocation) buildImage(target string, dest destination) error {
 			}})
 			var outcome api.Outcome
 			if err == nil {
-				outcome, err = watchJob(ctx, ex, id, events)
+				outcome, _, err = watchJob(ctx, ex, id, events)
 			}
 			if err == nil && outcome.Pushed != nil {
 				imageId = outcome.Pushed.Image
@@ -489,9 +976,22 @@ func (inv *invocation) buildImage(target string, dest destination) error {
 				}
 			}
 		} else {
-			var exp api.Exported
-			if exp, err = inv.deliver(ctx, ex, res, events); err == nil {
-				imageId, err = dest.send(ctx, content, exp, sys)
+			// An image at a registry, as a coordinator's workers leave it, is read from there; the local executor
+			// exports from its store to the content store first, even what it pulled from a registry, so that a
+			// local delivery needs no network.
+			var img finish.Image
+			located := false
+			if inv.opts.coordinator != "" {
+				img, located, err = finish.FromLocations(res)
+			}
+			if err == nil && !located {
+				var exp api.Exported
+				if exp, err = inv.deliver(ctx, ex, res, events); err == nil {
+					img = finish.Exported(content, exp)
+				}
+			}
+			if err == nil {
+				imageId, err = dest.send(ctx, img, sys)
 			}
 		}
 		span.Set("result", imageId)
@@ -515,10 +1015,8 @@ func (inv *invocation) push(target, image string) error {
 	}
 	label := reference.FamiliarString(name)
 	dest := destination{
-		send: func(
-			ctx context.Context, content cache.ContentStore, exp api.Exported, sys *types.SystemContext,
-		) (string, error) {
-			return finish.Push(ctx, content, exp, name, sys)
+		send: func(ctx context.Context, img finish.Image, sys *types.SystemContext) (string, error) {
+			return finish.Push(ctx, img, name, sys)
 		},
 		action: "pushing to " + label,
 		label:  label,
@@ -536,10 +1034,8 @@ func (inv *invocation) load(target, image string) error {
 		return err
 	}
 	return inv.buildImage(target, destination{
-		send: func(
-			ctx context.Context, content cache.ContentStore, exp api.Exported, sys *types.SystemContext,
-		) (string, error) {
-			return finish.LoadDocker(ctx, content, exp, name, sys)
+		send: func(ctx context.Context, img finish.Image, sys *types.SystemContext) (string, error) {
+			return finish.LoadDocker(ctx, img, name, sys)
 		},
 		platform: finish.DockerPlatform,
 		action:   "loading into Docker",
@@ -564,10 +1060,8 @@ func (inv *invocation) save(target, file string) error {
 		return err
 	}
 	return inv.buildImage(target, destination{
-		send: func(
-			ctx context.Context, content cache.ContentStore, exp api.Exported, sys *types.SystemContext,
-		) (string, error) {
-			return finish.Save(ctx, content, exp, path, name, sys)
+		send: func(ctx context.Context, img finish.Image, sys *types.SystemContext) (string, error) {
+			return finish.Save(ctx, img, path, name, sys)
 		},
 		output:   path,
 		platform: finish.SavePlatform,
@@ -593,22 +1087,21 @@ func (inv *invocation) export(task, folder string) error {
 			return err
 		}
 		defer inv.closeExecutor(ex)
-		caps, err := ex.Capabilities(inv.ctx)
+		execPlatform, err := inv.capabilities(ex)
 		if err != nil {
 			return err
 		}
 		events := inv.events()
-		results, c, err := inv.runGraph(ex, ex.ContentStore, inv.request([]string{task}, load.WantFiles, caps.Platform),
+		results, c, err := inv.runGraph(ex, ex.ContentStore, inv.request([]string{task}, load.WantFiles, execPlatform),
 			false, events)
 		if err != nil {
 			return err
 		}
 		res := results[0]
 		ctx, span := tracing.Start(inv.ctx, action, "files", res.Files.Digest.String())
-		exp, err := inv.deliver(ctx, ex, res, events)
-		if err == nil {
-			err = finish.Export(ctx, c, exp, dir, inv.opts.replace, inv.warn)
-		}
+		// A task's files are in the content store already, which the client reads: no executor delivers them,
+		// and finish.Export reads every one before it installs any, so a missing or corrupt file fails it there.
+		err = finish.Export(ctx, c, api.Exported{Files: res.Files, Epoch: res.Epoch}, dir, inv.opts.replace, inv.warn)
 		span.EndWith(err)
 		if err != nil {
 			return fmt.Errorf("%s: %w", action, err)
@@ -625,11 +1118,11 @@ func (inv *invocation) build(targets []string) error {
 			return err
 		}
 		defer inv.closeExecutor(ex)
-		caps, err := ex.Capabilities(inv.ctx)
+		execPlatform, err := inv.capabilities(ex)
 		if err != nil {
 			return err
 		}
-		_, _, err = inv.runGraph(ex, ex.ContentStore, inv.request(targets, load.WantBuild, caps.Platform),
+		_, _, err = inv.runGraph(ex, ex.ContentStore, inv.request(targets, load.WantBuild, execPlatform),
 			inv.opts.rebuild, inv.events())
 		return err
 	})
@@ -646,11 +1139,15 @@ func (inv *invocation) prune() error {
 	if err != nil {
 		return err
 	}
-	outcome, err := watchJob(inv.ctx, ex, id, inv.events())
+	outcome, _, err := watchJob(inv.ctx, ex, id, inv.events())
 	if err != nil {
 		return err
 	}
 	p := outcome.Pruned
+	if inv.opts.coordinator != "" {
+		return inv.printf("Removed %d results and %d files from the build cache, and %d image tags from the cache "+
+			"repository\n", p.Results, p.Blobs, p.Tags)
+	}
 	return inv.printf("Removed %d images from the container store, and %d results and %d files "+
 		"from the build cache\n", p.Images, p.Results, p.Blobs)
 }
@@ -663,11 +1160,11 @@ func (inv *invocation) graph(targets []string) error {
 		return err
 	}
 	defer inv.closeExecutor(ex)
-	caps, err := ex.Capabilities(inv.ctx)
+	execPlatform, err := inv.capabilities(ex)
 	if err != nil {
 		return err
 	}
-	req := inv.request(targets, load.WantBuild, caps.Platform)
+	req := inv.request(targets, load.WantBuild, execPlatform)
 	req.Store = func(ctx context.Context, fsys afero.Fs, dir string, sel *fileset.Selection) (
 		cache.Blob, fileset.Stats, error) {
 		return fileset.Hash(ctx, fsys, dir, sel)
@@ -684,11 +1181,12 @@ func (inv *invocation) graph(targets []string) error {
 }
 
 // watchJob watches the job id on ex to its end, printing its events through events,
-// and returns its outcome, read back with Result, or the error its failure reports.
+// and returns its outcome, read back with Result, with the position of its terminal event, or the error its
+// failure reports.
 // If ctx ends first, as on Ctrl-C, or the events can't be written, it cancels the job and waits for it to stop,
 // so that its cleanup runs, and returns ctx's error, or the write's, unless the job had already failed on its own:
 // then the job's failure is returned, joined with the write's.
-func watchJob(ctx context.Context, ex api.Executor, id api.JobID, events *eventPrinter) (api.Outcome, error) {
+func watchJob(ctx context.Context, ex api.Executor, id api.JobID, events *eventPrinter) (api.Outcome, int64, error) {
 	next := int64(0)
 	var unwritten error // the first failure to write an event, after which events are only counted
 	handle := func(e api.Event) error {
@@ -719,30 +1217,30 @@ func watchJob(ctx context.Context, ex api.Executor, id api.JobID, events *eventP
 		// The job is stopped deliberately, and watched to its end so that its cleanup has run.
 		ctx = context.WithoutCancel(ctx)
 		if err := ex.Cancel(ctx, id); err != nil {
-			return api.Outcome{}, errors.Join(cmp.Or(unwritten, context.Canceled), err)
+			return api.Outcome{}, 0, errors.Join(cmp.Or(unwritten, context.Canceled), err)
 		}
 		err = watch(ctx)
 	}
 	if err != nil {
-		return api.Outcome{}, errors.Join(unwritten, err)
+		return api.Outcome{}, 0, errors.Join(unwritten, err)
 	}
 	outcome, err := ex.Result(ctx, id)
 	switch {
 	case err != nil:
-		return api.Outcome{}, errors.Join(unwritten, err)
+		return api.Outcome{}, 0, errors.Join(unwritten, err)
 	case outcome.Failure != nil && !outcome.Cancelled:
 		// The job's own failure is the command's error, and a failure to write its events is reported with it.
-		return api.Outcome{}, errors.Join(errors.New(outcome.Failure.Describe(events.graph)), unwritten)
+		return api.Outcome{}, 0, errors.Join(errors.New(outcome.Failure.Describe(events.graph)), unwritten)
 	case unwritten != nil:
-		return api.Outcome{}, unwritten
+		return api.Outcome{}, 0, unwritten
 	case interrupted:
-		return api.Outcome{}, context.Canceled
+		return api.Outcome{}, 0, context.Canceled
 	case outcome.Failure != nil:
-		return api.Outcome{}, errors.New(outcome.Failure.Describe(events.graph))
+		return api.Outcome{}, 0, errors.New(outcome.Failure.Describe(events.graph))
 	case outcome.Cancelled:
-		return api.Outcome{}, errors.New("the job was cancelled")
+		return api.Outcome{}, 0, errors.New("the job was cancelled")
 	}
-	return outcome, nil
+	return outcome, next - 1, nil
 }
 
 // eventPrinter prints the progress of a run: each status as a line naming its target,
@@ -830,11 +1328,10 @@ func (p *eventPrinter) output(node graph.Ref, stream byte, data []byte) error {
 
 // destination says where build sends an image.
 type destination struct {
-	// send sends exp, the built image as the executor exported it to content, to the destination,
-	// as the client's settings sys describe it, returning its image ID there, or an index's digest.
+	// send sends img, the built image as the client reads it, from a registry or the content store, to the
+	// destination, as the client's settings sys describe it, returning its image ID there, or an index's digest.
 	// If push is set, a full registry reference, the executor pushes there instead, and send isn't called.
-	send func(ctx context.Context, content cache.ContentStore, exp api.Exported, sys *types.SystemContext) (
-		string, error)
+	send func(ctx context.Context, img finish.Image, sys *types.SystemContext) (string, error)
 	push string
 	// platform, if not nil, says the destination takes one image, and for which platform, with why,
 	// so that an index sends only its manifest for that platform.

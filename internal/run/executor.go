@@ -2,6 +2,8 @@ package run
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -13,12 +15,12 @@ import (
 	"github.com/Topher-the-Geek/vamos/internal/api"
 	"github.com/Topher-the-Geek/vamos/internal/cache"
 	"github.com/Topher-the-Geek/vamos/internal/graph"
+	"github.com/Topher-the-Geek/vamos/internal/sched"
 	"github.com/Topher-the-Geek/vamos/internal/tracing"
 	"github.com/Topher-the-Geek/vamos/internal/transfer"
 
 	"github.com/containerd/platforms"
 	"github.com/opencontainers/go-digest"
-	"github.com/opencontainers/image-spec/specs-go"
 	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"go.podman.io/buildah/pkg/parse"
 	containersconfig "go.podman.io/common/pkg/config"
@@ -32,72 +34,6 @@ import (
 	"go.podman.io/storage"
 )
 
-// Events receives a run's progress, within the executor: a job sends them on as api.Events.
-// Its methods may be called from several goroutines.
-type Events interface {
-	// Status reports what is happening to node, such as "building" or "cached".
-	Status(node graph.Ref, status string)
-	// Output passes on what node's run() steps print,
-	// or printed when its cached result was made, to stream: cache.StreamStdout or cache.StreamStderr.
-	// data is valid only during the call.
-	Output(node graph.Ref, stream byte, data []byte)
-	// Spans passes on spans of a trace that the client asked for, in batches, as they end.
-	Spans(spans []tracing.Span)
-}
-
-// executorProcess names the executor's spans' process in a trace.
-const executorProcess = "executor"
-
-// spanBatchSize is how many spans an executor gathers before sending them,
-// so that a remote one needn't send a message for each.
-const spanBatchSize = 256
-
-// forCall returns a context whose spans, if call asks for them, go to ev, in batches,
-// and a function that sends what is left of them, which the call must run, last, before it returns.
-func forCall(ctx context.Context, call *tracing.CallContext, ev Events) (context.Context, func()) {
-	if call == nil {
-		return ctx, func() {}
-	}
-	b := &spanBatch{ev: ev}
-	return tracing.ForCall(ctx, call, b.add, executorProcess), b.flush
-}
-
-// spanBatch gathers spans to send to events.
-// It detaches batches under mu and calls Events.Spans after unlocking,
-// so callbacks may overlap and batches may arrive out of completion order.
-// Detached slices are never reused.
-// The owner must stop producers before the final flush.
-type spanBatch struct {
-	ev    Events
-	mu    sync.Mutex
-	spans []tracing.Span
-}
-
-// add gathers s, sending the batch once it is full.
-func (b *spanBatch) add(s tracing.Span) {
-	b.mu.Lock()
-	b.spans = append(b.spans, s)
-	var full []tracing.Span
-	if len(b.spans) >= spanBatchSize {
-		full, b.spans = b.spans, nil
-	}
-	b.mu.Unlock()
-	if full != nil {
-		b.ev.Spans(full)
-	}
-}
-
-// flush sends the spans gathered and not yet sent.
-func (b *spanBatch) flush() {
-	b.mu.Lock()
-	rest := b.spans
-	b.spans = nil
-	b.mu.Unlock()
-	if len(rest) > 0 {
-		b.ev.Spans(rest)
-	}
-}
-
 // Local is the executor that runs in this process, with buildah, on a container store and the build cache beside it.
 // It opens them only once it needs them, so that commands which fail before building touch neither,
 // and the container store only to run a job, so that capturing sources doesn't need it.
@@ -106,14 +42,16 @@ func (b *spanBatch) flush() {
 type Local struct {
 	systemContext *types.SystemContext
 	storeOptions  storage.StoreOptions
-	jobs          jobTable
+	instance      string // identifies this executor, in its capabilities
+	jobs          sched.Jobs
 
 	mu        sync.Mutex // guards opening the store and cache
 	store     storage.Store
 	directory *cache.Directory   // beside the container store, holding its lock while open
 	content   cache.ContentStore // the directory
 	records   cache.RecordStore  // the directory
-	sharing   *sharing           // runs actions, once for every job that needs the same one
+	runner    *localRunner       // executes actions on the container store, and checks cached results against it
+	sharing   *sched.Sharing     // runs actions through the runner, once for every job that needs the same one
 }
 
 // NewLocal returns a local executor on the container store that options describe, such as DefaultStoreOptions
@@ -125,28 +63,37 @@ func NewLocal(options storage.StoreOptions) (*Local, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Local{systemContext: sys, storeOptions: options}, nil
+	var id [8]byte
+	rand.Read(id[:])
+	return &Local{systemContext: sys, storeOptions: options, instance: hex.EncodeToString(id[:])}, nil
 }
 
-// SystemContext returns the settings for reaching registries that this process's environment gives:
-// containers/image doesn't read $REGISTRY_AUTH_FILE itself; podman and buildah pass it on.
-// The local executor and the client, which share the environment, each build their own.
+// SystemContext returns the settings for reaching registries that this process's environment gives,
+// as transfer.SystemContext does: the local executor and the client, which share the environment, each build their
+// own.
 func SystemContext() (*types.SystemContext, error) {
-	sys := &types.SystemContext{}
-	if path := os.Getenv("REGISTRY_AUTH_FILE"); path != "" {
-		if _, err := os.Stat(path); err != nil {
-			return nil, fmt.Errorf("REGISTRY_AUTH_FILE: %w", err)
-		}
-		sys.AuthFilePath = path
+	return transfer.SystemContext()
+}
+
+// Isolation returns how this process runs commands, such as "chroot", as buildah's environment says.
+func Isolation() string {
+	isolation, err := parse.IsolationOption("")
+	if err != nil {
+		return ""
 	}
-	return sys, nil
+	return isolation.String()
+}
+
+// Version returns the version of vamos, as the Go module that built it records, or "" if that is unknown.
+func Version() string {
+	return vamosVersion()
 }
 
 // RetainEvents makes the executor retain n events of each job for watchers, rather than the default,
 // so that tests can see gaps without long jobs.
 // It is for tests, before any job is submitted.
 func (l *Local) RetainEvents(n int) {
-	l.jobs.retention = n
+	l.jobs.RetainEvents(n)
 }
 
 // DefaultStoreOptions returns the container store that buildah and podman use here, as containers/storage finds it.
@@ -201,14 +148,14 @@ func (l *Local) open() error {
 	if err != nil {
 		return err
 	}
-	l.sharing = newSharing(&localRunner{
+	l.runner = &localRunner{
 		store:         store,
 		content:       l.directory,
-		records:       l.directory,
 		systemContext: l.systemContext,
 		capabilities:  capabilities,
 		isolation:     isolation,
-	}, l.directory)
+	}
+	l.sharing = sched.NewSharing(l.runner, l.directory, l.directory)
 	l.store = store
 	return nil
 }
@@ -234,7 +181,7 @@ const maxGraphSize = 64 << 20
 // and releases the build cache's lock, reporting what failed.
 func (l *Local) Close() error {
 	// Every attempt has ended once its jobs have: the last job to detach from one waits for it.
-	l.jobs.stop()
+	l.jobs.Stop()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	var errs []error
@@ -248,7 +195,7 @@ func (l *Local) Close() error {
 		if err := l.directory.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("closing the build cache: %w", err))
 		}
-		l.directory, l.content, l.records, l.sharing = nil, nil, nil, nil
+		l.directory, l.content, l.records, l.runner, l.sharing = nil, nil, nil, nil, nil
 	}
 	return errors.Join(errs...)
 }
@@ -256,19 +203,20 @@ func (l *Local) Close() error {
 // graphVersions are the graph versions the executor runs.
 var graphVersions = []int{graph.Version}
 
-// Capabilities reports the host's platform, the graph versions this version of vamos runs,
-// how commands are isolated, and the time.
+// Capabilities reports the host's platform, the one execution platform it offers, the graph versions this version
+// of vamos runs, how commands are isolated, and the time.
 func (l *Local) Capabilities(context.Context) (api.Capabilities, error) {
 	isolation, err := parse.IsolationOption("")
 	if err != nil {
 		return api.Capabilities{}, err
 	}
 	return api.Capabilities{
-		Platform:      HostPlatform,
+		Platforms:     []imgspecv1.Platform{HostPlatform},
 		GraphVersions: graphVersions,
 		Isolation:     isolation.String(),
 		Version:       vamosVersion(),
 		Clock:         time.Now(),
+		Instance:      l.instance,
 	}.Clone(), nil
 }
 
@@ -323,64 +271,61 @@ func (l *Local) Submit(ctx context.Context, req api.Request) (api.JobID, error) 
 	if err := checkExecPlatform(platforms.Format(platforms.Normalize(g.Platform))); err != nil {
 		return "", err
 	}
-	return l.jobs.start(false, func(ctx context.Context, ev Events) api.Outcome {
+	return l.jobs.Start(false, func(ctx context.Context, ev sched.Events) api.Outcome {
 		results, err := l.run(ctx, *g, ev)
 		if err != nil {
-			return failed(err)
+			return sched.Failed(err)
 		}
 		return api.Outcome{Results: results}
 	})
 }
 
-// failed returns the outcome of a job that err ended: its failure, as data if the scheduler made it so,
-// or else by its message alone, and cancelled if the job's cancellation is what caused it.
-func failed(err error) api.Outcome {
-	var f *failure
-	outcome := api.Outcome{Cancelled: errors.Is(err, context.Canceled)}
-	if errors.As(err, &f) {
-		outcome.Failure = &f.Failure
-	} else {
-		outcome.Failure = &api.Failure{Message: err.Error()}
-	}
-	return outcome
-}
-
 // Watch delivers the events of the job id from position from to fn, as api.Executor describes.
 func (l *Local) Watch(ctx context.Context, id api.JobID, from int64, fn func(api.Event) error) error {
-	j, err := l.jobs.lookup(id)
+	j, err := l.jobs.Lookup(id)
 	if err != nil {
 		return err
 	}
-	return j.watch(ctx, from, fn)
+	return j.Watch(ctx, from, fn)
 }
 
 // Cancel asks the job id to stop; it does so between commands, which buildah can't interrupt.
 func (l *Local) Cancel(_ context.Context, id api.JobID) error {
-	j, err := l.jobs.lookup(id)
+	j, err := l.jobs.Lookup(id)
 	if err != nil {
 		return err
 	}
-	j.cancel()
+	j.Cancel()
+	return nil
+}
+
+// Release lets go of the job id; the local executor's jobs live as long as the command, so it only checks the job.
+func (l *Local) Release(_ context.Context, id api.JobID) error {
+	j, err := l.jobs.Lookup(id)
+	if err != nil {
+		return err
+	}
+	j.Release()
 	return nil
 }
 
 // Result returns the outcome of the job id, or ErrRunning.
 func (l *Local) Result(_ context.Context, id api.JobID) (api.Outcome, error) {
-	j, err := l.jobs.lookup(id)
+	j, err := l.jobs.Lookup(id)
 	if err != nil {
 		return api.Outcome{}, err
 	}
-	return j.result()
+	return j.Result()
 }
 
 // Prune starts a job that removes every cached result from the container store and the build cache.
 // It is refused while any other job of this executor runs, and no job is accepted while it runs;
 // it fails with cache.ErrLocked while another process holds the build cache open.
 func (l *Local) Prune(context.Context) (api.JobID, error) {
-	return l.jobs.start(true, func(ctx context.Context, ev Events) api.Outcome {
+	return l.jobs.Start(true, func(ctx context.Context, ev sched.Events) api.Outcome {
 		pruned, err := l.prune(ctx)
 		if err != nil {
-			return failed(err)
+			return sched.Failed(err)
 		}
 		return api.Outcome{Pruned: &pruned}
 	})
@@ -390,8 +335,8 @@ func (l *Local) Prune(context.Context) (api.JobID, error) {
 // Each layer's and task's result is kept in the build cache,
 // and reused instead of running the target again whenever a later build gives it the same inputs,
 // unless it is a root and req.Rebuild is set.
-func (l *Local) run(ctx context.Context, req api.GraphRequest, ev Events) (_ []api.Result, err error) {
-	ctx, flush := forCall(ctx, req.Trace, ev)
+func (l *Local) run(ctx context.Context, req api.GraphRequest, ev sched.Events) (_ []api.Result, err error) {
+	ctx, flush := sched.ForCall(ctx, req.Trace, ev)
 	defer flush() // after the span ends
 	ctx, span := tracing.StartTrack(ctx, "run", "run", "graph", req.Graph.Digest.String(), "rebuild", req.Rebuild)
 	defer func() { span.EndWith(err) }()
@@ -417,7 +362,12 @@ func (l *Local) run(ctx context.Context, req api.GraphRequest, ev Events) (_ []a
 	if err := l.open(); err != nil {
 		return nil, err
 	}
-	return newScheduler(g, l.content, l.records, l.sharing, ev, req.Rebuild, req.Timestamp).run(ctx)
+	// Targets run one at a time: parallel local scheduling is a separate decision.
+	// Emulation needs no permission locally, as it never has; whether it should is decided before remote execution
+	// is released, and the switch is optIn.
+	b := sched.Backend{Content: l.content, Records: l.records, Checker: l.runner, Runner: l.sharing}
+	opts := sched.Options{Rebuild: req.Rebuild, Timestamp: req.Timestamp, Emulate: req.Emulate, Bound: 1}
+	return sched.New(g, b, ev, opts).Run(ctx)
 }
 
 // checkResult refuses a result to push or export whose image IDs aren't image IDs, as Result.Image gives them,
@@ -449,25 +399,18 @@ func shortID(id string) string {
 // The destination must be a full reference with a tag and no digest: the client resolves short names,
 // so that both sides mean the same registry.
 func (l *Local) submitPush(req api.PushRequest) (api.JobID, error) {
-	named, err := reference.ParseNamed(req.Destination)
+	dest, err := sched.ParseDestination(req.Destination)
 	if err != nil {
-		return "", fmt.Errorf("push destination %q: %w", req.Destination, err)
+		return "", err
 	}
-	if _, ok := named.(reference.Digested); ok {
-		return "", fmt.Errorf("push destination %q must not include a digest", req.Destination)
-	}
-	dest, ok := named.(reference.NamedTagged)
-	if !ok {
-		return "", fmt.Errorf("push destination %q has no tag", req.Destination)
-	}
-	return l.jobs.start(false, func(ctx context.Context, ev Events) api.Outcome {
-		ctx, flush := forCall(ctx, req.Trace, ev)
+	return l.jobs.Start(false, func(ctx context.Context, ev sched.Events) api.Outcome {
+		ctx, flush := sched.ForCall(ctx, req.Trace, ev)
 		defer flush() // after the span ends
 		ctx, span := tracing.StartTrack(ctx, "push", "push to "+dest.String())
 		pushed, err := l.push(ctx, req.Result, dest)
 		span.EndWith(err)
 		if err != nil {
-			outcome := failed(err)
+			outcome := sched.Failed(err)
 			outcome.Failure.Nodes = []graph.Ref{req.Result.Node}
 			return outcome
 		}
@@ -499,13 +442,19 @@ func (l *Local) pushImage(ctx context.Context, id string, dest reference.NamedTa
 	if err != nil {
 		return "", err
 	}
-	policyContext, err := transfer.Policy(l.systemContext)
+	return pushImageFrom(ctx, l.systemContext, src, dest)
+}
+
+// pushImageFrom copies the image at src to dest, with the settings sys, returning the ID it has there:
+// the digest of its config, as written there, which may differ from the source's if its manifest is converted.
+func pushImageFrom(ctx context.Context, sys *types.SystemContext, src types.ImageReference,
+	dest reference.NamedTagged) (string, error) {
+	policyContext, err := transfer.Policy(sys)
 	if err != nil {
 		return "", err
 	}
 	defer policyContext.Destroy()
-	written, err := transfer.Push(ctx, policyContext, dest, src, l.systemContext,
-		&imagecopy.Options{DestinationCtx: l.systemContext})
+	written, err := transfer.Push(ctx, policyContext, dest, src, sys, &imagecopy.Options{DestinationCtx: sys})
 	if err != nil {
 		return "", err
 	}
@@ -560,14 +509,14 @@ func (l *Local) imageReference(ctx context.Context, id string) (types.ImageRefer
 
 // submitExport starts a job that publishes req.Result's content to the content store, for a client to deliver.
 func (l *Local) submitExport(req api.ExportRequest) (api.JobID, error) {
-	return l.jobs.start(false, func(ctx context.Context, ev Events) api.Outcome {
-		ctx, flush := forCall(ctx, req.Trace, ev)
+	return l.jobs.Start(false, func(ctx context.Context, ev sched.Events) api.Outcome {
+		ctx, flush := sched.ForCall(ctx, req.Trace, ev)
 		defer flush() // after the span ends
 		ctx, span := tracing.StartTrack(ctx, "export", "export to the content store")
 		exported, err := l.export(ctx, req.Result)
 		span.EndWith(err)
 		if err != nil {
-			outcome := failed(err)
+			outcome := sched.Failed(err)
 			outcome.Failure.Nodes = []graph.Ref{req.Result.Node}
 			return outcome
 		}
@@ -680,27 +629,30 @@ func (l *Local) layoutImage(
 func (l *Local) layoutIndex(
 	ctx context.Context, policyContext *signature.PolicyContext, dir string, manifests []api.Manifest,
 ) (types.ImageReference, []byte, error) {
-	index := imgspecv1.Index{Versioned: specs.Versioned{SchemaVersion: 2}, MediaType: imgspecv1.MediaTypeImageIndex}
+	sources := make([]types.ImageReference, len(manifests))
 	for i, m := range manifests {
-		written, err := l.layoutImage(ctx, policyContext, dir, m.Image, fmt.Sprintf("manifest-%d", i))
-		if err != nil {
+		var err error
+		if sources[i], err = l.imageReference(ctx, m.Image); err != nil {
 			return nil, nil, err
 		}
+	}
+	return layoutIndexFrom(ctx, policyContext, dir, manifests, sources, l.systemContext)
+}
+
+// layoutIndexFrom copies the images of manifests, each from its source, into the OCI layout in dir, and makes an
+// index listing each with its platform, in order, as transfer.LayoutIndex does, returning a reference to it and its
+// bytes.
+func layoutIndexFrom(
+	ctx context.Context, policyContext *signature.PolicyContext, dir string, manifests []api.Manifest,
+	sources []types.ImageReference, sys *types.SystemContext,
+) (types.ImageReference, []byte, error) {
+	members := make([]transfer.IndexMember, len(manifests))
+	for i, m := range manifests {
 		platform, err := graph.ParsePlatform(m.Platform)
 		if err != nil {
 			return nil, nil, err
 		}
-		index.Manifests = append(index.Manifests, imgspecv1.Descriptor{
-			MediaType: imgspecv1.MediaTypeImageManifest,
-			Digest:    digest.FromBytes(written),
-			Size:      int64(len(written)),
-			Platform:  &platform,
-		})
+		members[i] = transfer.IndexMember{Platform: platform, Source: sources[i]}
 	}
-	data, err := transfer.WriteLayoutIndex(dir, index, "index")
-	if err != nil {
-		return nil, nil, err
-	}
-	ref, err := layout.NewReference(dir, "index")
-	return ref, data, err
+	return transfer.LayoutIndex(ctx, policyContext, dir, members, sys)
 }

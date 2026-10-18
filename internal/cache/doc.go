@@ -6,7 +6,8 @@
 // RecordStore holds the latest result of each action and what each tag resolved to; latest means the last write
 // that completed.
 // Directory implements both in a directory on disk, the one beside the executor's container store,
-// and Memory implements both for tests; TestContentStore and TestRecordStore hold them to one contract.
+// and Memory implements both for tests; cachetest.Content and cachetest.Records hold every implementation,
+// a remote one included, to one contract.
 // Every digest is validated before it names anything; a get verifies the bytes as they are read,
 // and a corrupt blob is reported as ErrCorrupt, apart from ErrMissing and from a store that can't be reached.
 // A blob that a read finds corrupt is dropped, so that the next put of its content, as PutFile makes, repairs it.
@@ -22,6 +23,9 @@
 // This is not a transaction over several records or a reclamation protocol.
 // An open Directory holds its lock shared and Prune takes it exclusive, without waiting, so that a prune and
 // any other use of the directory, in this process or another, exclude each other; see lock.go.
+// ClearResults advances the generation, a count kept in the file "generation" so that it survives a restart,
+// which a coordinator reports in its capabilities and checks on submit, since no lock covers a remote client's
+// capture.
 // Operations on the local filesystem, PutFile and Checkout, are functions over a store, not methods of it,
 // as is LogRecorder, whose file the caller owns until Save or Discard.
 // Checkout and ReplayLog stop between entries when their context ends.
@@ -29,7 +33,10 @@
 // # Changes
 //
 // Blob, Tree, ActionResult and TagRecord define stored data, each with a Validate;
-// Provenance in a result describes the executor and is no part of a key.
+// Provenance in a result describes the executor, emulation included, and is no part of a key.
+// Location says where an image's bytes are, in a result and in a tag record's TagInstance, which a resolve
+// completes with the image's ID, platform and epoch, so that a later build uses it without resolving the tag;
+// an instance written before that is incomplete, and still decodes.
 // See ContentStore and RecordStore for the contract, pendingFile for publication and cleanup,
 // PutFile for source changes and size limits, and Checkout for path isolation and restoring modes.
 // Inspect Directory.Prune, ClearContent and ClearResults together when changing pruning policy.

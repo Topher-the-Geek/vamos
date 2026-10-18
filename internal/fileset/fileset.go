@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"path"
 	"path/filepath"
@@ -457,24 +458,120 @@ func Hash(ctx context.Context, fsys afero.Fs, dir string, sel *Selection) (cache
 	return t.Digest(), Stats{Count: t.Count()}, nil
 }
 
+// hashedFile is a file that the walk hashed, to be stored if the store lacks its content.
+type hashedFile struct {
+	name  string // in the filesystem
+	path  string // in the tree
+	limit int64  // the most bytes the limits left for it
+	blob  cache.Blob
+}
+
 // storeFiles stores the files that sel selects within dir in fsys in store,
 // and returns the tree that describes them, without storing it, and their stats.
+// Every file is hashed first, then one call asks the store which of them it lacks, and only those are sent,
+// so that capturing a project on a warm cache, local or remote, uploads only what changed after one round trip.
+// A file that changes between being hashed and being stored is described as stored, since that is the content
+// the store holds; a file that grows past the limits meanwhile fails the capture as the walk would, and so do files
+// that, as stored, total more than max_total_size, which each file's own allowance can't tell.
 func storeFiles(ctx context.Context, store cache.ContentStore, fsys afero.Fs, dir string, sel *Selection) (
 	*cache.Tree, Stats, error) {
-	var stats Stats
+	var hashed []hashedFile
 	t, err := Walk(ctx, fsys, dir, sel, func(name string, limit int64) (cache.Blob, error) {
-		b, stored, err := cache.PutFile(ctx, store, fsys, name, limit)
-		if stored {
-			stats.NewFiles++
-			stats.NewBytes += b.Size
+		b, err := cache.HashFile(fsys, name, limit)
+		if err != nil {
+			return cache.Blob{}, err
 		}
-		return b, err
+		rel, err := filepath.Rel(dir, name)
+		if err != nil {
+			return cache.Blob{}, err
+		}
+		hashed = append(hashed, hashedFile{name: name, path: filepath.ToSlash(rel), limit: limit, blob: b})
+		return b, nil
 	})
 	if err != nil {
 		return nil, Stats{}, err
 	}
+	var distinct []cache.Blob
+	seen := map[cache.Blob]bool{}
+	for _, h := range hashed {
+		if !seen[h.blob] {
+			seen[h.blob] = true
+			distinct = append(distinct, h.blob)
+		}
+	}
+	missing, err := store.Missing(ctx, distinct)
+	if err != nil {
+		return nil, Stats{}, err
+	}
+	lacks := map[cache.Blob]bool{}
+	for _, b := range missing {
+		lacks[b] = true
+	}
+	total := int64(0) // of the files as the tree describes them
+	for _, h := range hashed {
+		total += h.blob.Size
+	}
+	overTotal := fmt.Errorf("the files in %s that match total more than max_total_size=%d bytes", dir, sel.MaxTotalSize)
+	var stats Stats
+	for _, h := range hashed {
+		hashedAs := h.blob
+		if !lacks[hashedAs] {
+			continue
+		}
+		stored, err := storeFile(ctx, store, fsys, h)
+		if errors.Is(err, cache.ErrCorrupt) {
+			// The file changed since it was hashed: hash it again and send what it holds now, once.
+			if h.blob, err = cache.HashFile(fsys, h.name, h.limit); err == nil {
+				if stored, err = storeFile(ctx, store, fsys, h); errors.Is(err, cache.ErrCorrupt) {
+					return nil, Stats{}, fmt.Errorf("%s kept changing as it was captured", h.name)
+				}
+			}
+		}
+		if errors.Is(err, cache.ErrOverLimit) {
+			if h.limit == sel.MaxFileSize {
+				return nil, Stats{}, fmt.Errorf("%s grew to more than max_file_size=%d bytes as it was read",
+					h.name, sel.MaxFileSize)
+			}
+			return nil, Stats{}, overTotal
+		} else if err != nil {
+			return nil, Stats{}, err
+		}
+		stats.NewFiles++
+		stats.NewBytes += stored.Size
+		if stored == hashedAs {
+			delete(lacks, hashedAs) // the next file with the same content needn't be sent
+			continue
+		}
+		// The file changed as it was read: the tree describes what the store holds, for this file alone;
+		// another file hashed to the same content is still sent.
+		// Its allowance was what the files before it left, so the tree may now hold too much in all.
+		if total += stored.Size - hashedAs.Size; total > sel.MaxTotalSize {
+			return nil, Stats{}, overTotal
+		}
+		for i := range t.Entries {
+			if e := &t.Entries[i]; e.Path == h.path && e.Blob != nil {
+				e.Blob = &stored
+			}
+		}
+	}
 	stats.Count = t.Count()
 	return t, stats, nil
+}
+
+// storeFile sends the file h to store, which lacks its content, as the blob it was hashed to, so that the store
+// verifies what it receives, and returns that blob; a file that has changed since fails with ErrCorrupt.
+func storeFile(ctx context.Context, store cache.ContentStore, fsys afero.Fs, h hashedFile) (cache.Blob, error) {
+	f, err := fsys.Open(h.name)
+	if err != nil {
+		return cache.Blob{}, err
+	}
+	defer f.Close()
+	// Read past the limit by a byte at most, so that a file that has grown past it sends no more than that,
+	// and is seen as corrupt, or as over the limit once hashed again.
+	if err := store.Import(ctx, h.blob, io.LimitReader(f, h.limit+1)); err != nil {
+		return cache.Blob{}, err
+	}
+	return h.blob, nil
 }
 
 // Store stores the files that sel selects within dir in fsys in store,

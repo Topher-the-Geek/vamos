@@ -105,7 +105,7 @@ func failedRun(t *testing.T, build, target string) (*api.Failure, *graph.Graph, 
 		Dir:          projectDir,
 		Targets:      []string{target},
 		Want:         load.WantBuild,
-		ExecPlatform: caps.Platform,
+		ExecPlatform: caps.Platforms[0],
 		Store: func(ctx context.Context, fsys afero.Fs, dir string, sel *fileset.Selection) (
 			cache.Blob, fileset.Stats, error) {
 			return fileset.Store(ctx, content, fsys, dir, sel)
@@ -115,7 +115,7 @@ func failedRun(t *testing.T, build, target string) (*api.Failure, *graph.Graph, 
 	stored, err := content.PutBytes(ctx, graph.Encode(g))
 	testenv.Must(t, err)
 	id, err := ex.Submit(ctx, api.Request{Graph: &api.GraphRequest{
-		Graph: stored, Version: g.Version, Platform: caps.Platform,
+		Graph: stored, Version: g.Version, Platform: caps.Platforms[0],
 	}})
 	testenv.Must(t, err)
 	testenv.Must(t, ex.Watch(ctx, id, 0, func(api.Event) error { return nil }))

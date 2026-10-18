@@ -42,10 +42,18 @@ type Fixture struct {
 	// Retention is how many events New's executors retain for each job; the retention tests need it small,
 	// no more than 8, and the graphs they run make more events than that.
 	Retention int
+	// Buffered says that events may be held between the executor and a watcher's function, as a transport holds
+	// them in its connection, so that a slow watcher isn't dropped as the contract describes until the buffers fill;
+	// the retention test then proves only the gap from an expired position.
+	Buffered bool
 	// RequireBuilds skips t, or fails it, if the host can't run the builds that New's executors run,
 	// such as one without buildah; it is nil if every host can.
 	// Only the cases that run a graph, pull, push, export or prune call it: the rest need nothing of the host.
 	RequireBuilds func(t *testing.T)
+	// NoExport says that New's executors refuse export jobs, as a coordinator does, since every image they build
+	// is at a registry that the result locates it at, for the client to deliver from; the export cases then check
+	// the refusal and the location instead of an export.
+	NoExport bool
 }
 
 // requireBuilds calls f.RequireBuilds, if it is set.
@@ -65,6 +73,7 @@ func Contract(t *testing.T, f Fixture) {
 	t.Run("refused", func(t *testing.T) { testRefused(t, f) })
 	t.Run("unknown job", func(t *testing.T) { testUnknownJob(t, f) })
 	t.Run("cancel", func(t *testing.T) { testCancel(t, f) })
+	t.Run("release", func(t *testing.T) { testRelease(t, f) })
 	t.Run("failure", func(t *testing.T) { testFailure(t, f) })
 	t.Run("retention", func(t *testing.T) { testRetention(t, f) })
 	t.Run("export", func(t *testing.T) { testExport(t, f) })
@@ -188,45 +197,17 @@ func testDeliveryValuesOwned(t *testing.T, f Fixture) {
 	layer := runGraph(t, ex, layerGraph(t, f, ex, "owned delivery"))[0]
 	other := strings.Repeat("0", 64) // an image ID that names nothing
 
-	export := &api.ExportRequest{Result: layer, Trace: &tracing.CallContext{Parent: "client-1"}}
-	id, err := ex.Submit(ctx, api.Request{Export: export})
-	if err != nil {
-		t.Fatal(err)
+	if !f.NoExport {
+		testExportValuesOwned(t, f, ex, layer, other)
 	}
-	export.Result.Image, export.Result.Node, export.Trace.Parent = other, 7, "changed"
-	watchAll(t, ex, id, 0)
-	outcome, err := ex.Result(ctx, id)
-	if err != nil || outcome.Failure != nil || outcome.Exported == nil || outcome.Exported.Manifest.Digest == "" {
-		t.Fatalf("an export whose request changed after Submit = %+v, %v; want the image submitted exported",
-			outcome, err)
-	}
-	returnedOwned(t, ex, id)
-
-	// A task's files are a pointer, which the caller still holds.
-	task := runGraph(t, ex, taskGraph(t, f, ex, "owned delivery"))[0]
-	files := *task.Files
-	export = &api.ExportRequest{Result: task}
-	if id, err = ex.Submit(ctx, api.Request{Export: export}); err != nil {
-		t.Fatal(err)
-	}
-	*export.Result.Files = cache.Blob{Digest: digest.FromString("changed"), Size: 7}
-	watchAll(t, ex, id, 0)
-	outcome, err = ex.Result(ctx, id)
-	if err != nil || outcome.Failure != nil || outcome.Exported == nil || outcome.Exported.Files == nil ||
-		*outcome.Exported.Files != files {
-		t.Fatalf("a task export whose files changed after Submit = %+v, %v; want the files submitted, %s",
-			outcome, err, files.Digest)
-	}
-	returnedOwned(t, ex, id)
-
 	push := &api.PushRequest{Result: layer, Destination: host + "/owned:v1"}
-	id, err = ex.Submit(ctx, api.Request{Push: push})
+	id, err := ex.Submit(ctx, api.Request{Push: push})
 	if err != nil {
 		t.Fatal(err)
 	}
 	push.Result.Image, push.Destination = other, host+"/changed:v1"
 	watchAll(t, ex, id, 0)
-	outcome, err = ex.Result(ctx, id)
+	outcome, err := ex.Result(ctx, id)
 	if err != nil || outcome.Failure != nil || outcome.Pushed == nil || outcome.Pushed.Image != layer.Image {
 		t.Fatalf("a push whose request changed after Submit = %+v, %v; want image %s pushed", outcome, err,
 			layer.Image)
@@ -250,8 +231,14 @@ func scribbleOutcome(o *api.Outcome) {
 	for i := range o.Results {
 		r := &o.Results[i]
 		r.Image = "changed"
+		for j := range r.Locations {
+			r.Locations[j].Reference = "changed"
+		}
 		for j := range r.Index {
 			r.Index[j].Image = "changed"
+			for k := range r.Index[j].Locations {
+				r.Index[j].Locations[k].Reference = "changed"
+			}
 		}
 		if r.Files != nil {
 			r.Files.Size = -1
@@ -325,8 +312,8 @@ func testCapabilities(t *testing.T, f Fixture) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := platforms.Format(c.Platform), platforms.Format(f.Platform); got != want {
-		t.Errorf("platform = %s, want %s", got, want)
+	if !c.Offers(f.Platform) {
+		t.Errorf("platforms = %v, want them to include %s", c.Platforms, platforms.Format(f.Platform))
 	}
 	if !slices.Contains(c.GraphVersions, graph.Version) {
 		t.Errorf("graph versions = %v, want them to include %d", c.GraphVersions, graph.Version)
@@ -511,12 +498,63 @@ func finishJob(t *testing.T, ex api.Executor, req api.Request) api.Outcome {
 	return outcome
 }
 
+// testExportValuesOwned checks that an export job owns its request's values, as testDeliveryValuesOwned does for
+// a push: layer is a built layer, and other an image ID that names nothing.
+func testExportValuesOwned(t *testing.T, f Fixture, ex api.Executor, layer api.Result, other string) {
+	t.Helper()
+	ctx := t.Context()
+	export := &api.ExportRequest{Result: layer, Trace: &tracing.CallContext{Parent: "client-1"}}
+	id, err := ex.Submit(ctx, api.Request{Export: export})
+	if err != nil {
+		t.Fatal(err)
+	}
+	export.Result.Image, export.Result.Node, export.Trace.Parent = other, 7, "changed"
+	watchAll(t, ex, id, 0)
+	outcome, err := ex.Result(ctx, id)
+	if err != nil || outcome.Failure != nil || outcome.Exported == nil || outcome.Exported.Manifest.Digest == "" {
+		t.Fatalf("an export whose request changed after Submit = %+v, %v; want the image submitted exported",
+			outcome, err)
+	}
+	returnedOwned(t, ex, id)
+
+	// A task's files are a pointer, which the caller still holds.
+	task := runGraph(t, ex, taskGraph(t, f, ex, "owned delivery"))[0]
+	files := *task.Files
+	export = &api.ExportRequest{Result: task}
+	if id, err = ex.Submit(ctx, api.Request{Export: export}); err != nil {
+		t.Fatal(err)
+	}
+	*export.Result.Files = cache.Blob{Digest: digest.FromString("changed"), Size: 7}
+	watchAll(t, ex, id, 0)
+	outcome, err = ex.Result(ctx, id)
+	if err != nil || outcome.Failure != nil || outcome.Exported == nil || outcome.Exported.Files == nil ||
+		*outcome.Exported.Files != files {
+		t.Fatalf("a task export whose files changed after Submit = %+v, %v; want the files submitted, %s",
+			outcome, err, files.Digest)
+	}
+	returnedOwned(t, ex, id)
+}
+
 // testExport checks that an export job publishes a task's tree, and an image's manifest and blobs,
 // to the content store, as content references the client can read, and that nothing else crosses.
+// An executor that exports nothing must refuse the job before it starts, and locate every image at a registry.
 func testExport(t *testing.T, f Fixture) {
 	f.requireBuilds(t)
 	ex := f.New(t)
 	ctx := t.Context()
+	if f.NoExport {
+		layer := runGraph(t, ex, layerGraph(t, f, ex, "located"))[0]
+		atRegistry := func(l cache.Location) bool { return l.Kind == cache.LocationRegistry }
+		if !slices.ContainsFunc(layer.Locations, atRegistry) {
+			t.Errorf("locations = %+v, want the image at a registry, since the executor exports nothing",
+				layer.Locations)
+		}
+		id, err := ex.Submit(ctx, api.Request{Export: &api.ExportRequest{Result: layer}})
+		if err == nil || !strings.Contains(err.Error(), "exports nothing") {
+			t.Errorf("Submit of an export = %q, %v; want it refused as exporting nothing", id, err)
+		}
+		return
+	}
 	task := runGraph(t, ex, taskGraph(t, f, ex, "exported"))
 	outcome := finishJob(t, ex, api.Request{Export: &api.ExportRequest{Result: task[0]}})
 	exp := outcome.Exported
@@ -612,7 +650,8 @@ func manyTasksGraph(t *testing.T, f Fixture, ex api.Executor, count int, data st
 
 // testRetention checks that an executor retains a bounded number of a job's events: a watch from an expired
 // position gets a gap event naming the first retained one, then the rest; a watcher that falls behind while the
-// job runs is dropped with ErrFellBehind, and watching again from where it was meets a gap.
+// job runs is dropped with ErrFellBehind, unless events are buffered on their way, and watching again from where it
+// was meets a gap.
 func testRetention(t *testing.T, f Fixture) {
 	if f.Retention <= 0 || f.Retention > 8 {
 		t.Skip("the fixture doesn't retain few enough events")
@@ -621,9 +660,55 @@ func testRetention(t *testing.T, f Fixture) {
 	ex := f.New(t)
 	ctx := t.Context()
 
-	// A slow watcher: it reads the first event, then waits for the job to end before reading on.
-	// The contract doesn't make the job wait for a watcher, so one that starts only after the job has made
-	// more events than are retained meets a gap first, and isn't dropped; the job is then run again, afresh.
+	var id api.JobID
+	var expired int64 // a position the job no longer retains once it has ended
+	if f.Buffered {
+		// The job makes more events than are retained, so its first has expired once it ends.
+		req := manyTasksGraph(t, f, ex, 2*f.Retention, "retained")
+		var err error
+		if id, err = ex.Submit(ctx, api.Request{Graph: &req}); err != nil {
+			t.Fatal(err)
+		}
+		watchAll(t, ex, id, 0)
+	} else {
+		id, expired = slowWatcher(t, f, ex)
+	}
+	outcome, err := ex.Result(ctx, id)
+	if err != nil || outcome.Failure != nil {
+		t.Fatalf("Result = %+v, %v; want success", outcome, err)
+	}
+
+	// Watching from the expired position meets a gap, then the retained events to the terminal one.
+	events := watchAll(t, ex, id, expired)
+	if len(events) < 2 || events[0].Kind != api.EventGap || events[0].First <= events[0].Position {
+		t.Fatalf("watching from an expired position delivered %+v first, want a gap naming a later position", events[0])
+	}
+	first := events[0].First
+	if len(events)-1 > f.Retention {
+		t.Errorf("%d events retained, want at most %d", len(events)-1, f.Retention)
+	}
+	for i, e := range events[1:] {
+		if e.Position != first+int64(i) {
+			t.Errorf("event %d after the gap has position %d, want %d", i, e.Position, first+int64(i))
+		}
+	}
+	if last := events[len(events)-1]; last.Kind != api.EventDone {
+		t.Errorf("the last event is %+v, want the terminal event", last)
+	}
+	// Watching from a retained position gets no gap.
+	if retained := watchAll(t, ex, id, first); len(retained) == 0 || retained[0].Kind == api.EventGap {
+		t.Errorf("watching from the first retained position, %d, delivered %+v first", first, retained)
+	}
+}
+
+// slowWatcher runs a job on ex and watches it slowly: the watcher reads the first event, then waits for the job to
+// end before reading on, so that it falls behind and is dropped with ErrFellBehind, and returns the job and the
+// position after the last event the watcher saw, which has expired.
+// The contract doesn't make the job wait for a watcher, so one that starts only after the job has made
+// more events than are retained meets a gap first, and isn't dropped; the job is then run again, afresh.
+func slowWatcher(t *testing.T, f Fixture, ex api.Executor) (api.JobID, int64) {
+	t.Helper()
+	ctx := t.Context()
 	var id api.JobID
 	var seen []api.Event
 	var err error
@@ -655,32 +740,7 @@ func testRetention(t *testing.T, f Fixture) {
 	if len(seen) == 0 {
 		t.Fatal("the slow watcher saw no event before being dropped")
 	}
-	outcome, err := ex.Result(ctx, id)
-	if err != nil || outcome.Failure != nil {
-		t.Fatalf("Result = %+v, %v; want success", outcome, err)
-	}
-
-	// Watching again from the last position seen meets a gap, then the retained events to the terminal one.
-	events := watchAll(t, ex, id, seen[len(seen)-1].Position+1)
-	if len(events) < 2 || events[0].Kind != api.EventGap || events[0].First <= events[0].Position {
-		t.Fatalf("watching from an expired position delivered %+v first, want a gap naming a later position", events[0])
-	}
-	first := events[0].First
-	if len(events)-1 > f.Retention {
-		t.Errorf("%d events retained, want at most %d", len(events)-1, f.Retention)
-	}
-	for i, e := range events[1:] {
-		if e.Position != first+int64(i) {
-			t.Errorf("event %d after the gap has position %d, want %d", i, e.Position, first+int64(i))
-		}
-	}
-	if last := events[len(events)-1]; last.Kind != api.EventDone {
-		t.Errorf("the last event is %+v, want the terminal event", last)
-	}
-	// Watching from a retained position gets no gap.
-	if retained := watchAll(t, ex, id, first); len(retained) == 0 || retained[0].Kind == api.EventGap {
-		t.Errorf("watching from the first retained position, %d, delivered %+v first", first, retained)
-	}
+	return id, seen[len(seen)-1].Position + 1
 }
 
 // positions returns the positions of events.
@@ -765,6 +825,38 @@ func testUnknownJob(t *testing.T, f Fixture) {
 	}
 	if _, err := ex.Result(ctx, id); !errors.Is(err, api.ErrNoJob) {
 		t.Errorf("Result = %v, want %v", err, api.ErrNoJob)
+	}
+	if err := ex.Release(ctx, id); !errors.Is(err, api.ErrNoJob) {
+		t.Errorf("Release = %v, want %v", err, api.ErrNoJob)
+	}
+}
+
+// testRelease checks that a finished job can be released, after which its calls either still answer or say it
+// expired, never that it is unknown, and that a watch past the terminal event delivers nothing and returns.
+func testRelease(t *testing.T, f Fixture) {
+	f.requireBuilds(t)
+	ex := f.New(t)
+	ctx := t.Context()
+	req := taskGraph(t, f, ex, "released")
+	id, err := ex.Submit(ctx, api.Request{Graph: &req})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := watchAll(t, ex, id, 0)
+	last := events[len(events)-1]
+	if last.Kind != api.EventDone {
+		t.Fatalf("the last event = %+v, want the terminal one", last)
+	}
+	if err := ex.Watch(ctx, id, last.Position+1, func(e api.Event) error {
+		return fmt.Errorf("a watch past the terminal event delivered %+v", e)
+	}); err != nil {
+		t.Error(err)
+	}
+	if err := ex.Release(ctx, id); err != nil {
+		t.Fatalf("Release = %v, want it accepted", err)
+	}
+	if _, err := ex.Result(ctx, id); err != nil && !errors.Is(err, api.ErrExpired) {
+		t.Errorf("Result after Release = %v, want the outcome or %v", err, api.ErrExpired)
 	}
 }
 
@@ -913,6 +1005,26 @@ func testFailure(t *testing.T, f Fixture) {
 	}
 }
 
+// settleWait bounds how long pruneSettled asks again, and settlePause is how long it waits between asks.
+const (
+	settleWait  = 15 * time.Second
+	settlePause = 50 * time.Millisecond
+)
+
+// pruneSettled starts a prune on ex, asking again while ex answers ErrSettling, as a coordinator does while the
+// attempts of a cancelled build are still ending on its workers.
+func pruneSettled(t *testing.T, ex api.Executor) (api.JobID, error) {
+	t.Helper()
+	ctx := t.Context()
+	for start := time.Now(); ; {
+		id, err := ex.Prune(ctx)
+		if !errors.Is(err, api.ErrSettling) || time.Since(start) > settleWait {
+			return id, err
+		}
+		time.Sleep(settlePause)
+	}
+}
+
 // testPrune checks that a prune is a job whose outcome counts what it removed, and that it is refused
 // while another job runs.
 func testPrune(t *testing.T, f Fixture) {
@@ -925,6 +1037,9 @@ func testPrune(t *testing.T, f Fixture) {
 		t.Fatal(err)
 	}
 	watchAll(t, ex, id, 0)
+	if err := ex.Release(ctx, id); err != nil { // the client is done with it: a held build keeps a prune out
+		t.Fatal(err)
+	}
 
 	// A job that waits on a registry that never answers is running while the prune is asked for.
 	hang := make(chan struct{})
@@ -943,17 +1058,28 @@ func testPrune(t *testing.T, f Fixture) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if id, err := ex.Prune(ctx); err == nil || !strings.Contains(err.Error(), "other jobs are running") {
+	// It is refused for the running job, or, on a coordinator, for the job's attempt on a worker: either keeps it out.
+	if id, err := ex.Prune(ctx); err == nil ||
+		!(strings.Contains(err.Error(), "other jobs are running") || errors.Is(err, api.ErrSettling)) {
 		t.Errorf("a prune while a job runs = %q, %v; want it refused", id, err)
 	}
 	if err := ex.Cancel(ctx, running); err != nil {
 		t.Fatal(err)
 	}
 	watchAll(t, ex, running, 0)
-
+	// An executor that holds builds for their clients, as a coordinator does, refuses a prune until the build is
+	// released; one that doesn't, as the local executor, whose lock covers delivery, accepts it at once.
 	id, err = ex.Prune(ctx)
 	if err != nil {
-		t.Fatal(err)
+		if !strings.Contains(err.Error(), "other jobs are running") && !errors.Is(err, api.ErrSettling) {
+			t.Errorf("a prune while a finished build is held = %q, %v; want it refused as open, or accepted", id, err)
+		}
+		if err := ex.Release(ctx, running); err != nil {
+			t.Fatal(err)
+		}
+		if id, err = pruneSettled(t, ex); err != nil {
+			t.Fatal(err)
+		}
 	}
 	events := watchAll(t, ex, id, 0)
 	last := events[len(events)-1]

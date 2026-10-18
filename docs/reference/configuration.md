@@ -202,8 +202,20 @@ as for a platform-independent JavaScript bundle.
 Reading the target platform here changes the compiler environment, producing a separate result for each platform.
 A layer's base must match the layer's own platform; use a task to separate native tools from target output.
 
+The execution platform is chosen among those the executor offers, before the BUILD files are read:
+the one `--exec-platform` names if it is given, otherwise this machine's platform if the executor offers it,
+and otherwise the only one it offers.
+The executor built into vamos offers this machine's platform alone; a [coordinator](cli.md#coordinator) offers the
+platforms of its workers, so a client on an Apple-silicon laptop building against an amd64 pool runs its commands
+on `linux/amd64`, while `--platform` still says what to build and defaults to the client's own platform.
+
 If a `run()` executes another architecture's programs, the kernel needs a registered emulator for that architecture.
 Otherwise the command can fail with `exec format error`.
+Against a coordinator, such a target is refused before anything runs, with a message naming both platforms:
+give `--platform` to build for the platform that runs the commands, or `--emulate` to let them run under emulation
+on a worker that has an emulator for the image's platform.
+With `--emulate`, a platform that no worker of the deployment emulates fails the target at once, with a message that
+says so; one the deployment offers emulation of waits for such a worker.
 
 ### Index delivery
 

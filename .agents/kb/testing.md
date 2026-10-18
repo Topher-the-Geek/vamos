@@ -34,6 +34,11 @@ Do not mock the core: push uses an in-process registry,
 load uses a Unix-socket fake daemon and a real daemon when available.
 Complex cache, graph and selection cases can also exercise their packages directly
 on real implementations of the filesystem interface.
+Every implementation of the stores runs `cachetest.Content` and `cachetest.Records`, and every executor
+`apitest.Contract`: the directory and memory stores from the cache package's external tests, `run.Local` directly,
+through JSON and through `remote.Client` and `remote.Server` in `TestContractHTTP`, which passes `Fixture.Buffered`
+since a transport buffers events.
+The remote package's own tests script an executor and inject dropped connections through the server's middleware.
 
 Use `project(t, map[string]string{...})` for projects under `/project` in memory.
 Use `diskProject` for symlinks or tests that write the project.

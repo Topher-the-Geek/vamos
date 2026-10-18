@@ -19,7 +19,7 @@ Do not conflate these identities:
 | --- | --- | --- |
 | Configured target | `load.confLabel` | Deduplicating dependency configurations |
 | Graph blob | `graph.Encode`, `api.GraphRequest.Graph` | Transferring one build plan |
-| Action key | `run.action`, `scheduler.inputs` | Reusing equivalent target work |
+| Action key | `sched.Action`, `Scheduler.inputs` | Reusing equivalent target work |
 | File tree | `cache.Tree` | Reusing file content and metadata independently of times |
 | Image ID / manifest digest | `api.Result`, `cache.TagRecord` | Stored image content / registry resolution |
 
@@ -36,27 +36,54 @@ pull keep unverified, whose config wouldn't identify their files; `TestUnverifie
 hold both checks, and `TestImageStoreIDs` holds store IDs that differ from image IDs.
 A resolve validates what a tag resolved to before anything uses it: the store's image is the manifest chosen,
 and it is for the platform asked.
-Each layer's and task's result records a `cache.Provenance`, the executor's platform, isolation, capabilities
-and version, which is no part of the action key; a resolve's result isn't published, so it records none.
+Each layer's and task's result records a `cache.Provenance`, the executor's platform, isolation, capabilities,
+version and whether its commands ran emulated, which is no part of the action key;
+a resolve's result isn't published, so it records none.
+A result names its image by ID and lists its `cache.Location`s separately: the store's name locally,
+for a pulled base the registry reference by digest too, at the pull-through cache when the coordinator maps its
+registry to one, and for a layer built on a worker its reference in the cache repository, tagged by image ID,
+which the worker pushes before reporting; `localRunner.materialize` fetches a missing image from a registry location,
+and `TestMaterializeFromRegistry` holds that. The client delivers from registry locations only over a coordinator.
+Only `sched.Sharing` writes the record store, once an attempt has published its artifact;
+the runner returns a `sched.Report` and the puller the tag record to write, so that no record names an artifact that
+isn't there, and the latest write wins.
 Action identity is deliberately independent of graph position and target naming.
-Changes to execution semantics must review [action.go](../../internal/run/action.go),
-`scheduler.inputs` and `scheduler.lookup` in [scheduler.go](../../internal/run/scheduler.go),
-and `localRunner.check` in [runner.go](../../internal/run/runner.go).
-`actionVersion` invalidates results built under old semantics;
+Changes to execution semantics must review [action.go](../../internal/sched/action.go),
+`Scheduler.inputs` and `Scheduler.lookup` in [scheduler.go](../../internal/sched/scheduler.go),
+and `localRunner.Check` in [runner.go](../../internal/run/runner.go).
+`sched.ActionVersion` invalidates results built under old semantics;
 `graph.Version` addresses a different compatibility boundary.
 
 Reproducible layer metadata spans both stores: trees omit times, but action results carry an epoch.
-Review `scheduler.epoch`, `commitLayer` and `actionStep.Epoch` together.
+Review `Scheduler.epoch`, `commitLayer` and `sched.Step.Epoch` together.
 `--timestamp` controls newly executed work; it does not invalidate a cached target.
 `TestTaskEpochInKey` and the timestamp cases
 in [build_cache_test.go](../../internal/cli/build_cache_test.go) guard this distinction.
 
 Tag freshness is separate from action reuse.
 `cache.TagRecord` and `puller` in [pull.go](../../internal/run/pull.go) own resolution across builds,
-and `scheduler.resolve` pins each tag's index within a job, so every platform's image comes from one index;
+and `Scheduler.resolve` pins each tag's index within a job, so every platform's image comes from one index;
 `--rebuild` is not a blanket rebuild of every dependency.
+Each platform's `cache.TagInstance` records the image's ID, platform, epoch and locations once pulled,
+so `Scheduler.resolve` serves a cached pull from the record and the checker alone, asking the runner nothing;
+only a missing or incomplete instance, an image the checker can't find, or `--rebuild` reaches the puller,
+which is given the record in its request and reads none itself.
+`TestSchedulerCachedResolve` and `TestTagRecordLegacyInstances` hold this, and `TestPullTag` still requires that
+nothing reaches a registry once the record and images are cached.
 Pruning removes action results, blobs and cached layer images while retaining tag records and pulled bases,
 which lose their cache-repository name until the next resolve gives it back.
+A coordinator's prune has no lock over its clients, so it fences by generation: `RecordStore.Generation` counts
+the clears, `api.Capabilities.Generation` reports one more than that, so that zero still means unchecked,
+the client reads it before capturing sources and sends it in `api.GraphRequest.Generation`,
+and a build of another generation fails with a message to run the command again;
+the build checks it once admitted, when no prune can start, so that none slips between the check and the start.
+A report from an attempt that started in an earlier generation is refused too (`pool.Report`).
+The coordinator's prune also deletes every tag of the cache repository, through `coord.Registry.ClearRepository`,
+after the blobs and the records, so that a failure there leaves only images nothing names; tag records and the
+pull-through cache are kept, as locally.
+The blobs go before the records, since clearing the records advances the generation: a client that reads the new
+generation then uploads to a content store that nothing clears any more.
+`TestGenerationFencing`, `TestPruneOrder` and `TestPruneClearsRepository` hold this.
 Consult `Local.prune` in run and the stores' `ClearContent` and `ClearResults` before changing this policy,
 and `CacheRepository` before changing image naming.
 Checking local images by manifest digest before fetching prevents unnecessary registry requests.

@@ -14,7 +14,13 @@ import (
 
 // Clone returns a copy of c that shares no memory with it.
 func (c Capabilities) Clone() Capabilities {
-	c.Platform = clonePlatform(c.Platform)
+	if c.Platforms != nil {
+		platforms := make([]imgspecv1.Platform, len(c.Platforms))
+		for i, p := range c.Platforms {
+			platforms[i] = clonePlatform(p)
+		}
+		c.Platforms = platforms
+	}
 	c.GraphVersions = slices.Clone(c.GraphVersions)
 	return c
 }
@@ -106,7 +112,15 @@ func (e Exported) Clone() Exported {
 
 // Clone returns a copy of r that shares no memory with it.
 func (r Result) Clone() Result {
-	r.Index = slices.Clone(r.Index)
+	r.Locations = slices.Clone(r.Locations)
+	if r.Index != nil {
+		index := make([]Manifest, len(r.Index))
+		for i, m := range r.Index {
+			m.Locations = slices.Clone(m.Locations)
+			index[i] = m
+		}
+		r.Index = index
+	}
 	r.Files = clonePointer(r.Files)
 	return r
 }

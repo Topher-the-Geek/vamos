@@ -10,6 +10,7 @@ import (
 	"github.com/Topher-the-Geek/vamos/internal/graph"
 	"github.com/Topher-the-Geek/vamos/internal/tracing"
 
+	"github.com/containerd/platforms"
 	"github.com/opencontainers/go-digest"
 	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
 )
@@ -42,6 +43,12 @@ type Executor interface {
 	// Prune starts a job that removes every cached result from the executor's stores, returning its handle,
 	// or refuses it while another job runs; no job is accepted while a prune runs.
 	Prune(ctx context.Context) (JobID, error)
+	// Release says the client is done with the job id, delivery included: its state may be freed, and a prune
+	// may run; after it, the job's other calls may fail with ErrExpired. A job is held while a watch of it is open,
+	// and for the executor's grace period after the last watch ended, or after submit if it was never watched;
+	// a watch from past its terminal event, which delivers nothing, renews the hold.
+	// A running build that is released has its demand withdrawn, as one whose hold lapsed does.
+	Release(ctx context.Context, id JobID) error
 }
 
 // The errors that the executor's methods return about jobs.
@@ -49,15 +56,46 @@ var (
 	ErrNoJob      = errors.New("no such job")
 	ErrRunning    = errors.New("the job is still running")
 	ErrFellBehind = errors.New("the watcher fell behind the events retained")
+	// ErrExpired says the job existed on this executor but was released, or held by no one for its grace period,
+	// and its state has been freed; its finished work is cached.
+	ErrExpired = errors.New("the job expired")
+	// ErrSettling refuses a prune while attempts of ended jobs may still be writing, as a cancelled build's are
+	// until its workers have heard, or an earlier instance's until their leases expire; prune again shortly.
+	ErrSettling = errors.New("the executor's attempts are still settling; prune again shortly")
 )
 
 // Capabilities is what an executor reports about itself.
 type Capabilities struct {
-	Platform      imgspecv1.Platform `json:"platform"`            // the one that run() steps run on without emulation
-	GraphVersions []int              `json:"graph_versions"`      // the graph versions it runs
-	Isolation     string             `json:"isolation,omitempty"` // how it runs commands, such as "chroot"
-	Version       string             `json:"version,omitempty"`   // of vamos
-	Clock         time.Time          `json:"clock"`               // the time by its clock, when it answered
+	// Platforms are the execution platforms it offers: those that run() steps run on without emulation.
+	// A local executor offers its host's; a coordinator every platform its workers may have.
+	Platforms     []imgspecv1.Platform `json:"platforms"`
+	GraphVersions []int                `json:"graph_versions"`      // the graph versions it runs
+	Isolation     string               `json:"isolation,omitempty"` // how it runs commands, such as "chroot"
+	Version       string               `json:"version,omitempty"`   // of vamos
+	Clock         time.Time            `json:"clock"`               // the time by its clock, when it answered
+	// Instance identifies this run of the executor, new each time it starts, so that a client whose connection
+	// dropped can tell a restart, which lost its jobs, from a drop alone.
+	Instance string `json:"instance,omitempty"`
+	// GracePeriod is how long a build whose client has gone is kept before its demand is withdrawn,
+	// and so how long a client may take to come back; zero if the executor doesn't withdraw builds.
+	GracePeriod time.Duration `json:"grace_period,omitempty"`
+	// Generation identifies the executor's cache between prunes, for an executor that fences submissions by it, as a
+	// coordinator does: a submission made for an earlier generation is refused, since what it captured may be gone.
+	// A fencing executor's is never zero, so that a zero submitted asks for no check and can't pass for the first
+	// generation. Zero for an executor that doesn't fence, as the local one, whose lock covers a build from capture
+	// to finish.
+	Generation uint64 `json:"generation,omitempty"`
+}
+
+// Offers reports whether the executor offers platform as an execution platform.
+func (c Capabilities) Offers(platform imgspecv1.Platform) bool {
+	want := platforms.Format(platforms.Normalize(platform))
+	for _, p := range c.Platforms {
+		if platforms.Format(platforms.Normalize(p)) == want {
+			return true
+		}
+	}
+	return false
 }
 
 // Request asks an executor for a job.
@@ -92,12 +130,20 @@ type GraphRequest struct {
 	Graph   cache.Blob `json:"graph"`   // the encoded graph, in the content store
 	Version int        `json:"version"` // the graph's version, so that an executor can refuse one it can't run
 	// Platform is the execution platform the graph was configured for, as EXEC_PLATFORM named it;
-	// an executor for another refuses the graph.
+	// an executor that doesn't offer it refuses the graph.
 	Platform  imgspecv1.Platform `json:"platform"`
 	Rebuild   bool               `json:"rebuild,omitempty"`  // run the roots again, and resolve their tags again
 	Timestamp time.Time          `json:"timestamp,omitzero"` // the earliest time that targets which run stamp with
+	// Emulate permits run() steps in images for another platform than Platform, which run under emulation;
+	// without it, where an executor requires the permission, such a target fails before anything runs.
+	// It is no part of any action's key: emulation is provenance, not identity.
+	Emulate bool `json:"emulate,omitempty"`
 	// Trace, if set, asks for the spans of a trace of the run, as events of the job.
 	Trace *tracing.CallContext `json:"trace,omitempty"`
+	// Generation is the executor's cache generation that the client read before capturing the build's sources;
+	// a submission of an earlier generation than the executor's is refused, since what it captured may be gone.
+	// Zero asks for no check.
+	Generation uint64 `json:"generation,omitempty"`
 }
 
 // JobID is the handle of a job that an executor accepted.
@@ -164,24 +210,29 @@ type Exported struct {
 // Result is what a root of a graph made.
 // Exactly one of Image, Index and Files is set, unless the root is a task without output.
 type Result struct {
-	Node  graph.Ref   `json:"node"`
-	Image string      `json:"image,omitempty"` // a pull's or layer's image ID: the digest of its config, encoded
-	Index []Manifest  `json:"index,omitempty"` // an index's images, in order
-	Files *cache.Blob `json:"files,omitempty"` // a task's files, as a tree
-	Epoch int64       `json:"epoch"`           // when Files' files were stamped, in Unix seconds
+	Node  graph.Ref `json:"node"`
+	Image string    `json:"image,omitempty"` // a pull's or layer's image ID: the digest of its config, encoded
+	// Locations is where Image's bytes are, in the order to try them, so that delivery and push can read the image
+	// from wherever it is; the image is identified by Image alone.
+	Locations []cache.Location `json:"locations,omitempty"`
+	Index     []Manifest       `json:"index,omitempty"` // an index's images, in order
+	Files     *cache.Blob      `json:"files,omitempty"` // a task's files, as a tree
+	Epoch     int64            `json:"epoch"`           // when Files' files were stamped, in Unix seconds
 }
 
 // Manifest is an image of an index.
 type Manifest struct {
-	Image    string `json:"image"`    // its ID, as Result.Image gives it
-	Platform string `json:"platform"` // as platforms.Format gives it
+	Image     string           `json:"image"`               // its ID, as Result.Image gives it
+	Platform  string           `json:"platform"`            // as platforms.Format gives it
+	Locations []cache.Location `json:"locations,omitempty"` // where its bytes are, as Result.Locations gives them
 }
 
 // Pruned counts what a prune job removed.
 type Pruned struct {
-	Images  int `json:"images"`  // of cached layers, from the executor's image store
-	Results int `json:"results"` // action results
-	Blobs   int `json:"blobs"`   // content blobs
+	Images  int `json:"images"`         // of cached layers, from the executor's image store
+	Results int `json:"results"`        // action results
+	Blobs   int `json:"blobs"`          // content blobs
+	Tags    int `json:"tags,omitempty"` // image tags removed from a coordinator's cache repository
 }
 
 // Failure reports why a job failed.

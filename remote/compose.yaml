@@ -1,0 +1,113 @@
+# The remote execution development environment: the coordinator, and the registries that it and its workers share.
+# See .agents/kb/remote-environment.md for how to use it.
+#
+# Nothing here publishes a port: a client reaches the services by name after joining the project's network.
+#
+# The registry image declares no health check, so one asks the API's root, which answers once the registry listens;
+# `up --wait` then waits for that rather than for the process alone.
+x-registry-health: &registry-health
+  test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:5000/v2/"]
+  interval: 2s
+  timeout: 2s
+  retries: 15
+services:
+  # The coordinator, which clients name with --coordinator http://coordinator:8080 and workers register with.
+  # It executes nothing itself: it keeps the build cache the workers share, schedules their work, and checks hits
+  # against the cache registry, which it reaches by name, over plain HTTP, as its registry settings allow.
+  coordinator:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command:
+      - coordinator
+      - --listen=:8080
+      - --cache-dir=/var/lib/vamos
+      - --cache-repository=registry:5000/vamos-cache
+      - --pull-through=docker.io=hub-proxy:5000
+      # The workers run on this host, so only its platform is offered: a build for an offered platform that no
+      # worker serves waits, telling the client so, while one for a platform never offered is refused at once.
+      # Set VAMOS_PLATFORM to the host's platform where it isn't linux/amd64.
+      - --offer=${VAMOS_PLATFORM:-linux/amd64}
+    environment:
+      CONTAINERS_REGISTRIES_CONF: /etc/vamos/registries.conf
+    volumes:
+      - coordinator-cache:/var/lib/vamos
+    configs:
+      - source: registries
+        target: /etc/vamos/registries.conf
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/v1/capabilities"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    depends_on:
+      registry:
+        condition: service_healthy
+      hub-proxy:
+        condition: service_healthy
+
+  # The workers, each with a container store of its own: a disposable cache, never a source of truth, in an
+  # anonymous volume that `down -v` removes; a `down` without it leaves one such volume per worker per `up`.
+  # They run privileged, as buildah needs, and reach the coordinator and both registries by name.
+  # Scale with `docker compose up --scale worker=3`; each attempt runs in a subprocess in a cgroup of its own.
+  worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command: ["worker", "--coordinator", "http://coordinator:8080", "--capacity", "2"]
+    privileged: true
+    environment:
+      CONTAINERS_REGISTRIES_CONF: /etc/vamos/registries.conf
+    volumes:
+      - /var/lib/containers
+    configs:
+      - source: registries
+        target: /etc/vamos/registries.conf
+    depends_on:
+      coordinator:
+        condition: service_healthy
+    restart: unless-stopped # a killed worker comes back, cleans up after its attempts and registers again
+    deploy:
+      replicas: 2
+
+  # The cache registry, holding the layer images that workers build, tagged by image ID.
+  # Deletion must be enabled so that a prune can remove tags, which the image's default configuration does;
+  # the setting says so explicitly. The space returns when the registry's garbage collection runs.
+  registry:
+    image: registry:3
+    environment:
+      REGISTRY_STORAGE_DELETE_ENABLED: "true"
+      REGISTRY_LOG_LEVEL: warn
+    volumes:
+      - registry:/var/lib/registry
+    healthcheck: *registry-health
+
+  # The pull-through cache for Docker Hub, which every base image is pulled through.
+  # A registry in proxy mode mirrors one upstream and refuses pushes; Docker Hub alone covers the examples.
+  hub-proxy:
+    image: registry:3
+    environment:
+      REGISTRY_PROXY_REMOTEURL: https://registry-1.docker.io
+      REGISTRY_LOG_LEVEL: warn
+    volumes:
+      - hub-proxy:/var/lib/registry
+    healthcheck: *registry-health
+
+volumes:
+  coordinator-cache:
+  registry:
+  hub-proxy:
+
+# The registry settings of a process on this network, as registries.conf beside this file has them for a client in
+# the devcontainer: the file can't be mounted from there, since its paths aren't the Docker host's, so the content
+# is given here. Keep the two the same.
+configs:
+  registries:
+    content: |
+      [[registry]]
+      location = "registry:5000"
+      insecure = true
+
+      [[registry]]
+      location = "hub-proxy:5000"
+      insecure = true

@@ -214,6 +214,19 @@ func Call(ctx context.Context) *CallContext {
 	return &CallContext{Parent: rec.parent}
 }
 
+// Relay records spans, which ended in another process as part of a call made within ctx's span, as ctx's own:
+// a coordinator relays a worker's spans so, having shifted them onto its clock.
+// Spans relayed after ctx's recording is revoked are dropped, as its own would be.
+func Relay(ctx context.Context, spans []Span) {
+	rec, _ := ctx.Value(contextKey{}).(*recording)
+	if rec == nil {
+		return
+	}
+	for _, s := range spans {
+		rec.recorder.add(s)
+	}
+}
+
 // Current returns the span that spans started from ctx are part of,
 // or nil if there is none in this process, so that what it calls can record what it learns there.
 func Current(ctx context.Context) *Active {

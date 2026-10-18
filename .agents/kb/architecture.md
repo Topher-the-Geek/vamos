@@ -22,9 +22,15 @@ plain data that survives JSON, and the `api.Executor` interface of jobs, which `
 The client submits a graph as a job, watches its events and reads its result;
 `apitest.Contract` checks every implementation, and `apitest.JSON` proves the values cross as JSON.
 This keeps execution independent of the project and leaves room for a remote executor;
-the current implementation is `run.Local`, not a distributed scheduler or cache service.
-Push and export are jobs too: a push sends an image from the executor's store with its credentials,
-and an export publishes an image's blobs to the content store, from which the client's finish delivers them.
+the executor that builds is `run.Local`; [sched](../../internal/sched/doc.go) schedules, shares and records
+actions free of buildah, so that a coordinator can use it, and [remote](../../internal/remote/doc.go) carries
+`api.Executor` and `cache.ContentStore` over HTTP, so that `vamos coordinator` serves one to clients that give
+`--coordinator`;
+see [remote-environment.md](remote-environment.md) for the environment it runs in.
+Push and export are jobs too: a push sends an image from the executor's store, or on a worker from the image's
+location, with the executor's credentials, and a local executor's export publishes an image's blobs to the content
+store, from which the client's finish delivers them; a coordinator exports nothing, since its workers leave every
+image at a registry location that the client reads directly.
 Only [transfer](../../internal/transfer/doc.go), which copies images with a trace, is shared by both sides.
 Dependency constraints are executable in [TestImportRules](../../internal/deps_test.go);
 consult that test before adding imports.
@@ -40,5 +46,5 @@ Implementation belongs under `internal/`; the independent example modules are BU
 
 For a new build step, change Starlark construction/lowering in [load/step.go](../../internal/load/step.go),
 the encoded form and validation in [graph](../../internal/graph/doc.go),
-and execution plus action-key coverage in [run](../../internal/run/doc.go).
-Graph compatibility and cache compatibility have separate version owners: `graph.Version` and `run.actionVersion`.
+the keyed form in [sched](../../internal/sched/doc.go), and execution in [run](../../internal/run/doc.go).
+Graph compatibility and cache compatibility have separate version owners: `graph.Version` and `sched.ActionVersion`.

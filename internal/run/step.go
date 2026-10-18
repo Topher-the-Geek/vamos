@@ -13,6 +13,7 @@ import (
 
 	"github.com/Topher-the-Geek/vamos/internal/cache"
 	"github.com/Topher-the-Geek/vamos/internal/graph"
+	"github.com/Topher-the-Geek/vamos/internal/sched"
 	"github.com/Topher-the-Geek/vamos/internal/tracing"
 
 	"github.com/containerd/platforms"
@@ -25,8 +26,9 @@ type targetState struct {
 	builder    *buildah.Builder
 	mountPoint string // where the container's files are on the host, mounted while the target runs
 	log        *cache.LogRecorder
-	events     actionEvents      // where what the target prints goes
+	events     sched.Output      // where what the target prints goes
 	buildEnv   map[string]string // set by build_env(), and not since by env()
+	emulated   bool              // a run() step ran under emulation, the image being for another platform
 }
 
 // lookup returns a function that gives the value of a variable as a run in the target would see it now:
@@ -56,14 +58,14 @@ func (st *targetState) expandPath(param, p string) (string, error) {
 }
 
 // tracedApply applies the step in, as a span of ctx's trace, named display, as the BUILD file wrote the step.
-func (st *targetState) tracedApply(ctx context.Context, in actionStep, display string) (err error) {
+func (st *targetState) tracedApply(ctx context.Context, in sched.Step, display string) (err error) {
 	ctx, span := tracing.Start(ctx, display, "op", in.Op)
 	defer func() { span.EndWith(err) }()
 	return st.apply(ctx, in)
 }
 
 // apply performs the step in on the target being built, recording what it did in ctx's span.
-func (st *targetState) apply(ctx context.Context, in actionStep) error {
+func (st *targetState) apply(ctx context.Context, in sched.Step) error {
 	span := tracing.Current(ctx)
 	switch in.Op {
 	case graph.OpAdd:
@@ -84,8 +86,8 @@ func (st *targetState) apply(ctx context.Context, in actionStep) error {
 		for _, name := range slices.Sorted(maps.Keys(st.buildEnv)) {
 			env = append(env, name+"="+st.buildEnv[name])
 		}
-		stdout := st.log.Writer(cache.StreamStdout, streamWriter{st.events, cache.StreamStdout})
-		stderr := st.log.Writer(cache.StreamStderr, streamWriter{st.events, cache.StreamStderr})
+		stdout := st.log.Writer(cache.StreamStdout, sched.StreamWriter{Out: st.events, Stream: cache.StreamStdout})
+		stderr := st.log.Writer(cache.StreamStderr, sched.StreamWriter{Out: st.events, Stream: cache.StreamStderr})
 		if tracing.Enabled(ctx) {
 			span.Set("argv", in.Argv)
 			if p := builderPlatform(st.builder); !platforms.NewMatcher(HostPlatform).Match(p) {
@@ -157,22 +159,6 @@ type countingWriter struct {
 func (w *countingWriter) Write(data []byte) (int, error) {
 	w.n += int64(len(data))
 	return len(data), nil
-}
-
-// actionEntry returns the step in's part of its target's action, but for the tree of its files.
-// Variables, which have different names, are sorted, so that their order doesn't change the key.
-func actionEntry(in graph.Step) actionStep {
-	switch in.Op {
-	case graph.OpAdd:
-		return actionStep{Op: in.Op, Dest: in.Dest, Owner: in.Owner, Group: in.Group}
-	case graph.OpRun:
-		return actionStep{Op: in.Op, Argv: in.Argv}
-	case graph.OpEnv, graph.OpBuildEnv:
-		return actionStep{Op: in.Op, Vars: slices.Sorted(slices.Values(in.Vars))}
-	case graph.OpWorkdir:
-		return actionStep{Op: in.Op, Dir: in.Dir}
-	}
-	return actionStep{Op: in.Op}
 }
 
 // chown returns the owner of an add()'s files, given its owner and group,

@@ -18,6 +18,7 @@ type Memory struct {
 	blobs   map[digest.Digest][]byte
 	results map[digest.Digest][]byte // encoded, as a store would hold them
 	tags    map[string][]byte
+	cleared uint64 // how many times the results were cleared
 }
 
 var (
@@ -212,5 +213,13 @@ func (m *Memory) ClearResults(context.Context) (int, error) {
 	defer m.mu.Unlock()
 	n := len(m.results)
 	m.results = map[digest.Digest][]byte{}
+	m.cleared++
 	return n, nil
+}
+
+// Generation returns how many times the results were cleared.
+func (m *Memory) Generation(context.Context) (uint64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.cleared, nil
 }

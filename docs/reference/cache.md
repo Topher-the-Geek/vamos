@@ -75,6 +75,20 @@ The next build recreates the needed results.
 A prune is refused while another vamos is using the build cache, and a build is refused while a prune runs;
 run it again when the other finishes.
 
+With `--coordinator`, the build cache is the coordinator's: sources, trees, logs and results live in its
+`--cache-dir`, and built layers in the cache registry repository its workers push to, tagged by image ID.
+The registry must have deletion enabled, the coordinator's credentials must allow deleting there and the workers'
+pushing, and the space of deleted layers comes back only when the registry's own garbage collection runs, which is
+the operator's to schedule.
+The workers' own container stores only speed things up; a cache hit is checked against the registry, so a worker can
+be replaced at any time.
+`vamos prune --coordinator URL` empties the coordinator's results, files and the cache repository's tags, keeping
+recorded tag resolutions and the pull-through cache's contents.
+It is refused while any build or push is open, including a finished build whose client is still delivering it,
+while attempts are still ending on the workers, and for one lease after the coordinator started; run it again
+when they have finished.
+A build whose sources were captured before a prune is refused when submitted, with a message to run it again.
+
 ## Timestamps
 
 Files a target adds, and the resulting image, use the latest timestamp from its base and any tasks whose files it adds.

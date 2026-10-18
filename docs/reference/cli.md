@@ -18,6 +18,8 @@ Delivery commands build the requested target and its dependencies before sending
 | `vamos save <target> <file.tar>` | Pulls, layers, indexes | Write a Docker-loadable image archive |
 | `vamos export <task> <folder>` | Tasks with output | Write a fileset into a local folder |
 | `vamos prune` | No targets | Remove cached build results |
+| `vamos coordinator` | No targets | Coordinate builds across workers for clients on the network |
+| `vamos worker` | No targets | Run builds that a coordinator assigns |
 
 ### `build`
 
@@ -116,6 +118,80 @@ Removes all cached layer images and other build results.
 It keeps pulled images and the recorded resolutions of their tags.
 To refresh a pull's tag, use `vamos build <pull-name> --rebuild`.
 
+
+### `coordinator`
+
+```sh
+vamos coordinator --listen :8080 --cache-repository registry:5000/vamos-cache --pull-through docker.io=hub-proxy:5000
+```
+
+Coordinates builds for clients on the network, across the workers that register with it, until interrupted.
+A client names it with `--coordinator http://host:8080`, or `VAMOS_COORDINATOR`, on any command that builds or prunes:
+its sources are uploaded to the coordinator's build cache, which `--cache-dir` places, `/var/lib/vamos` by default;
+the coordinator schedules the targets across the workers, with those of one build running at once on different
+workers, up to `--bound`, and the client reads the results back for delivery.
+Simultaneous builds that need the same target run it once and share its result.
+A client whose connection drops reconnects and resumes watching its build, and gives up after `--grace`,
+with a message saying that finished work is cached.
+The coordinator keeps the same grace period: a build that no client watches for that long, as when the client was
+killed, starts nothing more, while the targets already running finish and are cached, and the build fails saying
+it expired; a client holds its build through delivery and releases it when done, so a prune waits for it.
+A client and a coordinator must run the same version of vamos's build graph; the client refuses one that doesn't.
+`prune --coordinator URL` empties the coordinator's build cache and the cache repository's tags, keeping tag records
+and the pull-through cache; the cache registry must have deletion enabled, as the compose file's does.
+It is refused while any build or push is open, a finished build that its client still holds included, while attempts
+are still ending on the workers, and for a lease after the coordinator started, and a build whose sources were
+captured before a prune is refused at submit with a message to run it again.
+`--window` says how long a finished build stays readable after it ends or was last watched before the coordinator
+forgets it; `--grace` if shorter.
+
+`load`, `save` and `push --push-from=client` read a built image from the cache repository, and a `pull()` root from
+the pull-through cache, with the client's credentials and `--tls-verify`, so the client must reach both;
+`push` from the executor runs on a worker, copying from there with the worker's credentials.
+`export` reads a task's files from the coordinator's build cache.
+
+Workers push every layer they build to `--cache-repository`, an OCI registry repository, tagged by image ID,
+before reporting it, so that any worker can fetch it and a result survives the worker that made it;
+they pull base images through the pull-through caches that `--pull-through registry=cache` maps,
+and a `pull()` from an unmapped registry fails with a message naming the mapping to add.
+The coordinator checks cached layers against the cache repository and deletes its tags when it prunes, so its
+credentials need read and delete access to it, and the workers' need push access.
+Commands for another platform than the one that runs them, as `--platform linux/arm64` asks of an amd64 pool, run
+under emulation only when the build gives `--emulate`, a flag kept out of `--help` until local builds take it too;
+without it the target fails before anything runs, naming both platforms and both ways out.
+Emulated work goes to workers that report an emulator for the platform, which they find in the kernel's binfmt_misc
+handlers; `--offer-emulated os/arch` says the deployment has such workers, so a build waits for one,
+where a platform nobody emulates fails the target at once.
+`--offer os/arch` names a platform the deployment has workers for, besides those registered now:
+a build for an offered platform without a worker present waits, printing that it waits for a worker of that
+platform after a heartbeat interval, so offer only platforms the deployment serves; one for a platform never
+offered is refused.
+A worker that stops renewing an attempt's lease (`--lease`) is lost, and its work tried again elsewhere,
+up to `--retries` times; a push is never retried, since its write may have happened.
+Beyond `--max-builds` open builds, submissions are refused as busy.
+
+There is no authentication: run a coordinator on a trusted network alone, where anyone who can reach it
+can build on it and read its cache, and anyone who can reach a pull-through cache reads what its upstream
+credentials can.
+The coordinator keeps its state in memory: a restart fails the builds in flight, which clients report and
+rerun, reusing what finished.
+
+### `worker`
+
+```sh
+vamos worker --coordinator http://coordinator:8080 --capacity 2
+```
+
+Runs the attempts the coordinator assigns, up to `--capacity` at once, each in a subprocess of its own in a cgroup,
+so that cancelling a build kills every process the attempt started, however it daemonized itself.
+A worker needs root, cgroup v2 and buildah's chroot isolation, as building does, and a container store of its own,
+which is a disposable cache of base images and built layers.
+It renews each attempt's lease by heartbeat, and kills an attempt itself when it can't,
+so that the coordinator can count an expired lease as a stopped attempt;
+after a kill, or on starting after a crash, it removes the attempt's container.
+Workers need egress to the pull-through caches, the cache repository, and whatever `run()` steps fetch.
+Their registry credentials are their own; a client's never reach them.
+
 ## Flags
 
 These flags are shared by commands that build targets:
@@ -125,7 +201,9 @@ These flags are shared by commands that build targets:
 | `-C`, `--dir <dir>` | Directory for unqualified target names and workspace discovery | `.` |
 | `--set <name=value>` | Set a named target's parameter; repeat for several parameters | Parameter defaults |
 | `--platform <os/arch[/variant]>` | Target platform for a pull, layer, or task | Host platform |
-| `--tls-verify <bool>` | Require HTTPS and verify certificates when vamos itself contacts a registry | `registries.conf` |
+| `--exec-platform <os/arch[/variant]>` | Platform that `run()` steps execute on; the executor must offer it | This machine's, or the only one offered |
+| `--coordinator <URL>` | Build on the coordinator at this URL rather than in this process | `$VAMOS_COORDINATOR`, or none |
+| `--tls-verify <bool>` | Require HTTPS and verify certificates when vamos itself contacts a registry: pushing from the client, and reading a coordinator's images to deliver | `registries.conf` |
 | `--timestamp <time>` | Minimum timestamp for newly executed targets | Derived from bases and added tasks |
 
 `--platform` cannot be given when naming an index.
@@ -141,7 +219,8 @@ and is available on `build`, `push`, `load`, `save` (including its deprecated `w
 
 The TLS flag displays `true` in help, but when omitted vamos defers to `registries.conf`,
 including entries with `insecure = true`.
-It applies to what the client itself does, a push with `--push-from=client`;
+It applies to what the client itself does: a push with `--push-from=client`, and reading a coordinator's images to
+load, save or push;
 the executor, which pulls and pushes otherwise, follows `registries.conf` alone,
 so mark a plain-HTTP registry `insecure = true` there for it.
 
@@ -194,3 +273,11 @@ Command-line usage mistakes print usage; runtime failures do not.
 | Export refuses a nonempty folder | Choose a dedicated output folder or pass `--replace` |
 | A moved registry tag still uses an old image | [Rebuild the pull target](cache.md#refreshing-results) |
 | Docker cannot be reached | Check the socket mount, `DOCKER_HOST`, and Docker's TLS environment variables |
+| `can't reach the coordinator at ...` | Check the URL in `--coordinator` or `VAMOS_COORDINATOR`, and that this machine is on the coordinator's network |
+| `the coordinator ... runs graph versions ..., not this vamos's` | Use a vamos of the coordinator's version, or upgrade the coordinator |
+| `waiting for a worker that runs ...; none is registered` | Start a worker of that platform, or build with `--exec-platform` for one the pool has |
+| `its commands would run under emulation` | Give `--platform` for the platform that runs them, or `--emulate` to allow emulation on a worker that has an emulator |
+| `the connection to the coordinator was lost for ...` | Run the command again once the coordinator is reachable; finished targets are cached |
+| `the build expired` | The build went unwatched for the coordinator's grace period; run the command again |
+| `the build cache was pruned while the build's sources were being captured` | Run the command again |
+| A build hangs with no output over a coordinator | Check the coordinator's and workers' logs with `docker compose logs`, and that a worker of the platform is registered |

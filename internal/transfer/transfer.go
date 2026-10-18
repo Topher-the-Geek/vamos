@@ -223,6 +223,49 @@ func writeIndexJSON(dir string, desc imgspecv1.Descriptor, ref string) error {
 	return os.WriteFile(filepath.Join(dir, "index.json"), data, 0o644)
 }
 
+// IndexMember is one image of an index to assemble: where to copy it from, and the platform the index lists it for.
+type IndexMember struct {
+	Platform imgspecv1.Platform
+	Source   types.ImageReference
+}
+
+// LayoutIndex copies each member's image, read with the settings sys, into the OCI layout in dir, and makes an index
+// listing each with its platform, in order, which the layout's index.json names as "index", and returns a reference
+// to it and the index's bytes.
+// containers/image copies an index, and its images, only from a source that has one, which this makes.
+func LayoutIndex(
+	ctx context.Context, policyContext *signature.PolicyContext, dir string, members []IndexMember,
+	sys *types.SystemContext,
+) (types.ImageReference, []byte, error) {
+	index := imgspecv1.Index{Versioned: specs.Versioned{SchemaVersion: 2}, MediaType: imgspecv1.MediaTypeImageIndex}
+	for i, m := range members {
+		layoutRef, err := layout.NewReference(dir, fmt.Sprintf("manifest-%d", i))
+		if err != nil {
+			return nil, nil, err
+		}
+		written, err := Image(ctx, policyContext, layoutRef, m.Source, &imagecopy.Options{
+			SourceCtx:             sys,
+			ForceManifestMIMEType: imgspecv1.MediaTypeImageManifest,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		platform := m.Platform
+		index.Manifests = append(index.Manifests, imgspecv1.Descriptor{
+			MediaType: imgspecv1.MediaTypeImageManifest,
+			Digest:    digest.FromBytes(written),
+			Size:      int64(len(written)),
+			Platform:  &platform,
+		})
+	}
+	data, err := WriteLayoutIndex(dir, index, "index")
+	if err != nil {
+		return nil, nil, err
+	}
+	ref, err := layout.NewReference(dir, "index")
+	return ref, data, err
+}
+
 // LayoutBlobs returns the blobs that the OCI layout in dir holds, by reading its blobs directory.
 func LayoutBlobs(dir string) ([]cache.Blob, error) {
 	entries, err := os.ReadDir(filepath.Join(dir, "blobs", "sha256"))
@@ -294,4 +337,19 @@ func copyBlob(ctx context.Context, store cache.ContentStore, b cache.Blob, path 
 		return fmt.Errorf("reading blob %s from the content store: %w", b.Digest, err)
 	}
 	return f.Close()
+}
+
+// SystemContext returns the settings for reaching registries that this process's environment gives:
+// containers/image doesn't read $REGISTRY_AUTH_FILE itself; podman and buildah pass it on.
+// The local executor and the client, which share the environment, each build their own; a worker and a coordinator
+// build theirs from their own environments, so no credential crosses between them.
+func SystemContext() (*types.SystemContext, error) {
+	sys := &types.SystemContext{}
+	if path := os.Getenv("REGISTRY_AUTH_FILE"); path != "" {
+		if _, err := os.Stat(path); err != nil {
+			return nil, fmt.Errorf("REGISTRY_AUTH_FILE: %w", err)
+		}
+		sys.AuthFilePath = path
+	}
+	return sys, nil
 }

@@ -93,6 +93,11 @@ func (j *JSON) Result(ctx context.Context, id api.JobID) (api.Outcome, error) {
 	return roundTrip(o), roundTripError(err)
 }
 
+// Release releases the job id on ex, through JSON.
+func (j *JSON) Release(ctx context.Context, id api.JobID) error {
+	return roundTripError(j.ex.Release(ctx, roundTrip(id)))
+}
+
 // Prune starts a prune job on ex.
 func (j *JSON) Prune(ctx context.Context) (api.JobID, error) {
 	id, err := j.ex.Prune(ctx)

@@ -26,6 +26,12 @@ See the native compiler configuration in [golang-cli/BUILD](../../examples/golan
 Foreign executable steps depend on the host kernel's binfmt_misc handlers;
 `setPlatform`, `forPlatform` and `emulatorHint` in [run](../../internal/run/doc.go) own platform checks,
 library contexts and diagnostics.
+`sched.Scheduler.checkEmulation` refuses a target whose commands would run emulated when `sched.Options.OptIn` requires
+the build's permission, `api.GraphRequest.Emulate`, which the hidden `--emulate` flag gives;
+the local executor doesn't require it yet, so local builds emulate as they always have, and the result's
+provenance records that they did.
+The execution platform is chosen by `invocation.execPlatform` among `api.Capabilities.Platforms`,
+with `--exec-platform` where this machine's isn't offered and several are.
 For Docker Desktop's bundled QEMU support,
 see its [emulation guide](https://docs.docker.com/build/building/multi-platform/#qemu).
 On Apple silicon, Rosetta for amd64 is an option tied to the selected VM backend;
@@ -40,10 +46,11 @@ Preflight checks improve diagnostics but cannot authorize deleting files that ap
 The replacement fallback may briefly leave the destination absent; cleanup failure after installation is a warning.
 
 Transport details belong beside their owners:
-`archiveReference`, `copyTo` and `LoadDocker` in [finish.go](../../internal/finish/finish.go),
-which deliver an exported image from the content store through an OCI layout;
+`Image.open`, `copyTo` and `LoadDocker` in [finish.go](../../internal/finish/finish.go),
+which deliver an image from the registry its result locates it at, an index assembled from its members' locations,
+or an export in the content store, through an OCI layout;
 `export`, `pushImage` and `layoutIndex` in [executor.go](../../internal/run/executor.go),
-which publish an image's blobs or push them; `Image`, `Push`, `Policy` and `Layout` in
+which publish an image's blobs or push them; `Image`, `Push`, `Policy`, `Layout` and `LayoutIndex` in
 [transfer](../../internal/transfer/doc.go), which both sides copy with; and the registry settings,
 `run.SystemContext` for the executor's environment and `invocation.systemContext` in
 [cli.go](../../internal/cli/cli.go) for the client's, with `--tls-verify`.

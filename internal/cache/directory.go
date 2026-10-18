@@ -354,12 +354,40 @@ func (d *Directory) SetTag(_ context.Context, name string, r *TagRecord) error {
 	return d.writeRecord(d.tagPath(name), r)
 }
 
-// ClearResults removes every action result, but no tag record, returning how many there were.
-func (d *Directory) ClearResults(context.Context) (int, error) {
+// ClearResults removes every action result, but no tag record, returning how many there were, and advances the
+// generation, which the file "generation" holds.
+func (d *Directory) ClearResults(ctx context.Context) (int, error) {
 	entries, err := os.ReadDir(filepath.Join(d.dir, "ac"))
 	if err != nil {
 		return 0, err
 	}
 	err = os.RemoveAll(filepath.Join(d.dir, "ac"))
-	return len(entries), errors.Join(err, makeSubdirectories(d.dir))
+	if err = errors.Join(err, makeSubdirectories(d.dir)); err != nil {
+		return len(entries), err
+	}
+	generation, err := d.Generation(ctx)
+	if err != nil {
+		return len(entries), err
+	}
+	return len(entries), d.writeRecord(d.generationPath(), generation+1)
+}
+
+// generationPath is where the generation is kept.
+func (d *Directory) generationPath() string {
+	return filepath.Join(d.dir, "generation")
+}
+
+// Generation returns how many times the results were cleared; a directory never cleared is at 0.
+func (d *Directory) Generation(context.Context) (uint64, error) {
+	data, err := os.ReadFile(d.generationPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	} else if err != nil {
+		return 0, fmt.Errorf("reading the build cache's generation: %w", err)
+	}
+	var generation uint64
+	if err := json.Unmarshal(data, &generation); err != nil {
+		return 0, fmt.Errorf("reading the build cache's generation: %w", err)
+	}
+	return generation, nil
 }

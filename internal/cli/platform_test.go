@@ -1,16 +1,24 @@
 package cli
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
+	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/Topher-the-Geek/vamos/internal/api"
+	"github.com/Topher-the-Geek/vamos/internal/cache"
+	"github.com/Topher-the-Geek/vamos/internal/run"
 
 	"github.com/containerd/platforms"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -98,6 +106,17 @@ func TestPlatformMistakes(t *testing.T) {
 				`layer: params: "arch" is built in, as ctx.arch, and can't be declared`,
 			},
 		},
+		{
+			name: "execution platform without an architecture",
+			args: []string{"--exec-platform", "linux"},
+			want: []string{`--exec-platform linux: platform "linux": want os/arch or os/arch/variant`},
+		},
+		{
+			name: "execution platform the executor doesn't offer",
+			args: []string{"--exec-platform", "linux/s390x"},
+			want: []string{`--exec-platform linux/s390x: the executor doesn't run commands on linux/s390x; ` +
+				`it offers "` + native + `"`},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -110,6 +129,50 @@ func TestPlatformMistakes(t *testing.T) {
 				failsWith(t, false, tt.want...)
 		})
 	}
+}
+
+// TestExecPlatformChoice checks which execution platform the client configures a graph for, among those the
+// executor offers: the one named, or else this machine's, or else the only one; several, none this machine's,
+// must be chosen between.
+func TestExecPlatformChoice(t *testing.T) {
+	other := imgspecv1.Platform{OS: "linux", Architecture: "s390x"}
+	another := imgspecv1.Platform{OS: "linux", Architecture: "ppc64le"}
+	host := platforms.Normalize(platforms.DefaultSpec())
+	tests := []struct {
+		name    string
+		offered []imgspecv1.Platform
+		flag    string
+		want    string // the platform chosen, or "" for an error
+		err     string
+	}{
+		{name: "this machine's among several", offered: []imgspecv1.Platform{other, host}, want: native},
+		{name: "the only one", offered: []imgspecv1.Platform{other}, want: "linux/s390x"},
+		{name: "named", offered: []imgspecv1.Platform{other, another}, flag: "linux/ppc64le", want: "linux/ppc64le"},
+		{
+			name:    "several, none this machine's",
+			offered: []imgspecv1.Platform{other, another},
+			err: "the executor doesn't run commands on this machine's platform, " + native +
+				`; choose among "linux/s390x", "linux/ppc64le" with --exec-platform`,
+		},
+		{name: "none", err: "the executor offers no platform to run commands on"},
+		{name: "none, named", flag: "linux/s390x", err: "the executor offers no platform to run commands on"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inv := &invocation{opts: options{execPlatform: tt.flag}}
+			got, err := inv.execPlatform(api.Capabilities{Platforms: tt.offered})
+			switch {
+			case tt.err != "" && (err == nil || err.Error() != tt.err):
+				t.Errorf("execPlatform = %v, want %q", err, tt.err)
+			case tt.err == "" && (err != nil || platforms.Format(got) != tt.want):
+				t.Errorf("execPlatform = %s, %v; want %s", platforms.Format(got), err, tt.want)
+			}
+		})
+	}
+	// Naming this machine's platform builds as without the flag.
+	requireBuildah(t)
+	fsys := project(t, map[string]string{"BUILD": `layer(name="app", base="scratch")`})
+	vamos(t, fsys, "build", "app", "--exec-platform", native, "-C", projectDir).ran(t)
 }
 
 // platformBuild has a layer that runs a command for its platform,
@@ -146,7 +209,8 @@ layer(name="files", base="scratch", steps=[add("cross", "/"), add("shared", "/")
 `
 }
 
-// TestPlatforms builds a layer for the host's platform and another: its image and its runs are for its platform.
+// TestPlatforms builds a layer for the host's platform and another: its image and its runs are for its platform,
+// and its result's provenance says whether its commands ran under emulation.
 func TestPlatforms(t *testing.T) {
 	requireBuildah(t)
 	nonce := newNonce()
@@ -154,6 +218,7 @@ func TestPlatforms(t *testing.T) {
 	dir := t.TempDir()
 
 	for i, platform := range []string{native, foreign()} {
+		before := emulatedResults(t)
 		out := filepath.Join(dir, fmt.Sprintf("machine-%d.tar", i))
 		r := vamos(t, fsys, "save", "machine", out, "--platform", platform, "-C", projectDir)
 		requireEmulation(t, r)
@@ -162,7 +227,33 @@ func TestPlatforms(t *testing.T) {
 		if got, want := imageFile(t, img, "/machine.txt"), nonce+" "+uname(platform)+"\n"; got != want {
 			t.Errorf("%s: /machine.txt = %q, want %q", platform, got, want)
 		}
+		after := emulatedResults(t)
+		emulated := platform != native
+		if after[emulated] <= before[emulated] || after[!emulated] != before[!emulated] {
+			t.Errorf("%s: results with emulated provenance went from %v to %v (false, true); want one more with %v",
+				platform, before, after, emulated)
+		}
 	}
+}
+
+// emulatedResults counts the action results in the suite's build cache by whether their provenance says their
+// commands ran under emulation, reading the cache's own files, as a test may.
+func emulatedResults(t *testing.T) map[bool]int {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(run.CacheDir(stores(t).Options), "ac"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return map[bool]int{} // nothing has been built in this store yet
+	}
+	must(t, err)
+	counts := map[bool]int{}
+	for _, e := range entries {
+		data, err := os.ReadFile(filepath.Join(run.CacheDir(stores(t).Options), "ac", e.Name()))
+		must(t, err)
+		var result cache.ActionResult
+		must(t, json.Unmarshal(data, &result))
+		counts[result.Provenance != nil && result.Provenance.Emulated]++
+	}
+	return counts
 }
 
 // TestCrossPlatformTasks builds a layer on scratch for the host's platform
@@ -350,13 +441,17 @@ func TestPullTag(t *testing.T) {
 		assertBase(t, img, second[platform], "the image the tag names now for "+platform)
 	}
 
-	// With the registry gone, the layers built again after pruning use the images pulled before.
+	// With the registry gone, the layers built again after pruning use the images pulled before, and the pulled
+	// image itself is delivered from the store, not from the registry its result also locates it at.
 	vamos(t, fsys, "prune").ran(t)
 	server.Close()
 	for _, platform := range []string{native, foreign()} {
 		img := write(platform+"-4.tar", platform)
 		assertBase(t, img, second[platform], "the image the tag named before pruning, for "+platform)
 	}
+	out := filepath.Join(dir, "base-offline.tar")
+	vamos(t, fsys, "save", "base", out, "--platform", native, "-C", projectDir).succeeds(t)
+	assertBase(t, readImage(t, out), second[native], "the pulled image, saved with the registry gone")
 }
 
 // TestPullTagMistakes checks the errors for a tag that names no image for the platform.

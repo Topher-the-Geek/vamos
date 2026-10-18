@@ -3,12 +3,14 @@ package run
 import (
 	"io"
 	"log"
+	"net/http/httptest"
 	"os"
 	"testing"
 
 	"github.com/Topher-the-Geek/vamos/internal/api"
 	"github.com/Topher-the-Geek/vamos/internal/api/apitest"
 	"github.com/Topher-the-Geek/vamos/internal/cache"
+	"github.com/Topher-the-Geek/vamos/internal/remote"
 	"github.com/Topher-the-Geek/vamos/internal/testenv"
 
 	"github.com/google/go-containerregistry/pkg/registry"
@@ -83,4 +85,49 @@ func TestContract(t *testing.T) {
 // as a remote client would see it.
 func TestContractJSON(t *testing.T) {
 	apitest.Contract(t, localFixture(func(l *Local) api.Executor { return apitest.NewJSON(l) }))
+}
+
+// TestContractHTTP runs the executor contract on a local executor behind remote.Server, through remote.Client,
+// whose content store, the coordinator's over HTTP, holds the content the jobs read: what a client of a coordinator
+// serving one local executor sees.
+func TestContractHTTP(t *testing.T) {
+	contents := map[api.Executor]cache.ContentStore{}
+	f := apitest.Fixture{
+		New: func(t *testing.T) api.Executor {
+			t.Helper()
+			stores := testenv.PrivateStores(t)
+			local, err := NewLocal(stores.Options)
+			testenv.Must(t, err)
+			local.RetainEvents(retention)
+			t.Cleanup(func() { local.Close() })
+			content, err := local.ContentStore()
+			testenv.Must(t, err)
+			server := httptest.NewServer((&remote.Server{Executor: local, Content: content}).Handler())
+			t.Cleanup(server.Close)
+			client, err := remote.NewClient(server.URL)
+			testenv.Must(t, err)
+			t.Cleanup(func() { client.Close() })
+			contents[client] = client
+			return client
+		},
+		Put: func(t *testing.T, ex api.Executor, data []byte) cache.Blob {
+			t.Helper()
+			b, err := contents[ex].PutBytes(t.Context(), data)
+			testenv.Must(t, err)
+			return b
+		},
+		Missing: func(t *testing.T, ex api.Executor, blobs []cache.Blob) []cache.Blob {
+			t.Helper()
+			missing, err := contents[ex].Missing(t.Context(), blobs)
+			testenv.Must(t, err)
+			return missing
+		},
+		Platform:      HostPlatform,
+		Registry:      registry.New(registry.Logger(log.New(io.Discard, "", 0))),
+		Insecure:      testenv.InsecureRegistry,
+		Retention:     retention,
+		Buffered:      true,
+		RequireBuilds: testenv.RequireBuildah,
+	}
+	apitest.Contract(t, f)
 }

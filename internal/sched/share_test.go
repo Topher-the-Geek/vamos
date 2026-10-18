@@ -1,10 +1,11 @@
-package run
+package sched
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -13,16 +14,18 @@ import (
 	"github.com/Topher-the-Geek/vamos/internal/cache"
 	"github.com/Topher-the-Geek/vamos/internal/testenv"
 	"github.com/Topher-the-Geek/vamos/internal/tracing"
+
+	"github.com/opencontainers/go-digest"
 )
 
-// blockingRunner is a runner whose runs block until released, counting them, and whose results say which run
+// blockingRunner is a Runner whose runs block until released, counting them, and whose results say which run
 // they came from, so that a test sees which jobs shared an attempt.
-// With records, each run publishes its result under its action's key when it finishes;
-// with content, it saves what it printed there as the result's log.
+// With gated, runs are released one at a time, through releaseRun, so that a test orders their results;
+// with content, each run saves what it printed there as the result's log.
 // With fail, the runs it names fail rather than returning their results.
 type blockingRunner struct {
 	release chan struct{} // closed to let every run finish
-	records cache.RecordStore
+	gated   bool
 	content cache.ContentStore
 	fail    map[int32]bool // the runs, by number, that fail once released
 	runs    atomic.Int32
@@ -49,26 +52,21 @@ func (b *blockingRunner) releaseRun(n int32) {
 	close(b.gate(n))
 }
 
-// check finds every result usable.
-func (b *blockingRunner) check(context.Context, *action, *cache.ActionResult) (error, error) {
-	return nil, nil
-}
-
-// run prints, waits to be released, prints again, and returns a result stamped with the run's number,
-// publishing it if the runner has records; it records a span as it starts and another once released.
-func (b *blockingRunner) run(ctx context.Context, req actionRequest, ev actionEvents) (*cache.ActionResult, error) {
+// Run prints, waits to be released, prints again, and returns a result stamped with the run's number;
+// it records a span as it starts and another once released.
+func (b *blockingRunner) Run(ctx context.Context, req Request, ev Output) (*Report, error) {
 	n := b.runs.Add(1)
 	log, err := cache.NewLog()
 	if err != nil {
 		return nil, err
 	}
 	defer log.Discard()
-	stdout := log.Writer(cache.StreamStdout, streamWriter{ev, cache.StreamStdout})
+	stdout := log.Writer(cache.StreamStdout, StreamWriter{Out: ev, Stream: cache.StreamStdout})
 	tracing.Instant(ctx, "started")
 	fmt.Fprint(stdout, "started\n")
 	released := b.release
-	if b.records != nil || b.fail != nil {
-		released = b.gate(n) // runs that publish or fail are released one at a time
+	if b.gated || b.fail != nil {
+		released = b.gate(n) // runs that are ordered, or fail, are released one at a time
 	}
 	select {
 	case <-released:
@@ -83,12 +81,7 @@ func (b *blockingRunner) run(ctx context.Context, req actionRequest, ev actionEv
 				return nil, err
 			}
 		}
-		if b.records != nil {
-			if err := b.records.SetResult(ctx, req.action.key(), result); err != nil {
-				return nil, err
-			}
-		}
-		return result, nil
+		return &Report{Result: result}, nil
 	case <-ctx.Done():
 		b.mu.Lock()
 		b.cancels++
@@ -97,7 +90,7 @@ func (b *blockingRunner) run(ctx context.Context, req actionRequest, ev actionEv
 	}
 }
 
-// outputs collects what an action prints.
+// outputs collects what an Action prints.
 type outputs struct {
 	mu   sync.Mutex
 	data []byte
@@ -117,22 +110,29 @@ func (o *outputs) String() string {
 	return string(o.data)
 }
 
-// testRequest returns a request for the action a, forced if force.
-func testRequest(force bool) actionRequest {
-	return actionRequest{action: &action{Version: actionVersion, Kind: kindTask, Base: scratch}, force: force}
+// testRequest returns a request for a task Action, keyed, forced if force.
+func testRequest(force bool) Request {
+	a := &Action{Version: ActionVersion, Kind: KindTask, Base: Scratch}
+	return Request{Action: a, Key: a.Key(), Force: force}
 }
 
-// TestSharingDeduplicates checks that two jobs needing the same action run it once and both get its result,
+// testSharing returns a Sharing Runner over r, on stores in memory, which it returns too.
+func testSharing(r Runner) (*Sharing, *cache.Memory) {
+	m := cache.NewMemory()
+	return NewSharing(r, m, m), m
+}
+
+// TestSharingDeduplicates checks that two jobs needing the same Action run it once and both get its result,
 // and that cancelling one of them leaves the other to finish with that result.
 func TestSharingDeduplicates(t *testing.T) {
 	b := &blockingRunner{release: make(chan struct{})}
-	s := newSharing(b, cache.NewMemory())
+	s, _ := testSharing(b)
 	first, cancelFirst := context.WithCancel(t.Context())
 	results := make(chan *cache.ActionResult, 2)
 	errs := make(chan error, 2)
 	for _, ctx := range []context.Context{first, t.Context()} {
 		go func() {
-			r, err := s.run(ctx, testRequest(false), &outputs{})
+			r, err := s.attempt(ctx, testRequest(false), &outputs{})
 			results <- r
 			errs <- err
 		}()
@@ -152,7 +152,7 @@ func TestSharingDeduplicates(t *testing.T) {
 	cancels := b.cancels
 	b.mu.Unlock()
 	if b.runs.Load() != 1 || cancels != 0 {
-		t.Errorf("the runner ran %d times with %d cancelled, want once, not cancelled", b.runs.Load(), cancels)
+		t.Errorf("the Runner ran %d times with %d cancelled, want once, not cancelled", b.runs.Load(), cancels)
 	}
 }
 
@@ -160,11 +160,11 @@ func TestSharingDeduplicates(t *testing.T) {
 // an attempt of its own, rather than attaching to the cancelled one.
 func TestSharingNoAttachToCancelled(t *testing.T) {
 	b := &blockingRunner{release: make(chan struct{})}
-	s := newSharing(b, cache.NewMemory())
+	s, _ := testSharing(b)
 	first, cancelFirst := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() {
-		_, err := s.run(first, testRequest(false), &outputs{})
+		_, err := s.attempt(first, testRequest(false), &outputs{})
 		done <- err
 	}()
 	waitFor(t, func() bool { return b.runs.Load() == 1 })
@@ -172,7 +172,7 @@ func TestSharingNoAttachToCancelled(t *testing.T) {
 	<-done
 	second := make(chan *cache.ActionResult, 1)
 	go func() {
-		r, err := s.run(t.Context(), testRequest(false), &outputs{})
+		r, err := s.attempt(t.Context(), testRequest(false), &outputs{})
 		testenv.Must(t, err)
 		second <- r
 	}()
@@ -186,11 +186,11 @@ func TestSharingNoAttachToCancelled(t *testing.T) {
 // TestSharingCancelsWhenAlone checks that an attempt is cancelled once no job is attached to it.
 func TestSharingCancelsWhenAlone(t *testing.T) {
 	b := &blockingRunner{release: make(chan struct{})}
-	s := newSharing(b, cache.NewMemory())
+	s, _ := testSharing(b)
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() {
-		_, err := s.run(ctx, testRequest(false), &outputs{})
+		_, err := s.attempt(ctx, testRequest(false), &outputs{})
 		done <- err
 	}()
 	waitFor(t, func() bool { return b.runs.Load() == 1 })
@@ -214,7 +214,7 @@ func TestSharingCancelsWhenAlone(t *testing.T) {
 }
 
 // TestSharingForced checks that a forced run never attaches, and that an ordinary job attaches to a forced attempt:
-// in both orders each job gets its own attempt's result, and the record is the later write's.
+// in both orders each job gets its own attempt's result, and the record, which Sharing writes, is the later write's.
 func TestSharingForced(t *testing.T) {
 	records := cache.NewMemory()
 	for _, tc := range []struct {
@@ -228,14 +228,14 @@ func TestSharingForced(t *testing.T) {
 		{name: "forced then ordinary", first: true, second: false, runs: 1, sameResult: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			b := &blockingRunner{release: make(chan struct{}), records: records}
-			s := newSharing(b, records)
+			b := &blockingRunner{release: make(chan struct{}), gated: true}
+			s := NewSharing(b, records, records)
 			results := make([]*cache.ActionResult, 2)
 			errs := make([]error, 2)
 			var wg sync.WaitGroup
 			start := func(i int, force bool) {
 				wg.Go(func() {
-					results[i], errs[i] = s.run(t.Context(), testRequest(force), &outputs{})
+					results[i], errs[i] = s.attempt(t.Context(), testRequest(force), &outputs{})
 				})
 				// A forced job starts its own run; an ordinary one attaches to the attempt in flight.
 				waitFor(t, func() bool {
@@ -248,13 +248,13 @@ func TestSharingForced(t *testing.T) {
 			start(0, tc.first)
 			start(1, tc.second)
 			if b.runs.Load() != tc.runs {
-				t.Errorf("the runner ran %d times, want %d", b.runs.Load(), tc.runs)
+				t.Errorf("the Runner ran %d times, want %d", b.runs.Load(), tc.runs)
 			}
 			// The runs are released in order, so the later one writes the record last.
 			for n := int32(1); n <= tc.runs; n++ {
 				b.releaseRun(n)
 				waitFor(t, func() bool {
-					record, err := records.Result(t.Context(), testRequest(false).action.key())
+					record, err := records.Result(t.Context(), testRequest(false).Action.Key())
 					return err == nil && record != nil && record.Epoch == int64(n)
 				})
 			}
@@ -266,7 +266,7 @@ func TestSharingForced(t *testing.T) {
 				t.Errorf("results %d and %d; want the same = %v", results[0].Epoch, results[1].Epoch, tc.sameResult)
 			}
 			// The record holds the result published last: the later of the runs to finish.
-			record, err := records.Result(t.Context(), testRequest(false).action.key())
+			record, err := records.Result(t.Context(), testRequest(false).Action.Key())
 			testenv.Must(t, err)
 			if record == nil || record.Epoch != int64(tc.runs) {
 				t.Errorf("record = %+v, want the result of run %d, the later write", record, tc.runs)
@@ -280,14 +280,14 @@ func TestSharingForced(t *testing.T) {
 func TestSharingOutputReachesAttached(t *testing.T) {
 	content := cache.NewMemory()
 	b := &blockingRunner{release: make(chan struct{}), content: content}
-	s := newSharing(b, content)
+	s := NewSharing(b, content, content)
 	starter, attacher := &outputs{}, &outputs{}
 	var wg sync.WaitGroup
-	wg.Go(func() { s.run(t.Context(), testRequest(false), starter) })
+	wg.Go(func() { s.attempt(t.Context(), testRequest(false), starter) })
 	waitFor(t, func() bool { return starter.String() == "started\n" })
 	attached := make(chan struct{})
 	wg.Go(func() {
-		r, err := s.run(t.Context(), testRequest(false), attacher)
+		r, err := s.attempt(t.Context(), testRequest(false), attacher)
 		if err != nil || r == nil || r.Log == nil {
 			t.Errorf("the later job got %+v, %v; want the shared result, with its log", r, err)
 		}
@@ -304,7 +304,7 @@ func TestSharingOutputReachesAttached(t *testing.T) {
 		t.Errorf("the starter got %q, want %q", got, want)
 	}
 	if b.runs.Load() != 1 {
-		t.Errorf("the runner ran %d times, want once", b.runs.Load())
+		t.Errorf("the Runner ran %d times, want once", b.runs.Load())
 	}
 }
 
@@ -312,17 +312,17 @@ func TestSharingOutputReachesAttached(t *testing.T) {
 // jobs attach to, even once the ordinary attempt has failed: an ordinary job arriving then starts no third run.
 func TestSharingForcedOverlap(t *testing.T) {
 	b := &blockingRunner{release: make(chan struct{}), fail: map[int32]bool{1: true}}
-	s := newSharing(b, cache.NewMemory())
+	s, _ := testSharing(b)
 	results := make([]*cache.ActionResult, 3)
 	errs := make([]error, 3)
 	var wg sync.WaitGroup
 	for i, force := range []bool{false, true} {
-		wg.Go(func() { results[i], errs[i] = s.run(t.Context(), testRequest(force), &outputs{}) })
+		wg.Go(func() { results[i], errs[i] = s.attempt(t.Context(), testRequest(force), &outputs{}) })
 		waitFor(t, func() bool { return b.runs.Load() == int32(i+1) })
 	}
 	b.releaseRun(1)
 	waitFor(t, func() bool { return attachedCount(s) == 1 })
-	wg.Go(func() { results[2], errs[2] = s.run(t.Context(), testRequest(false), &outputs{}) })
+	wg.Go(func() { results[2], errs[2] = s.attempt(t.Context(), testRequest(false), &outputs{}) })
 	waitFor(t, func() bool { return attachedCount(s) == 2 })
 	b.releaseRun(2)
 	wg.Wait()
@@ -334,7 +334,7 @@ func TestSharingForcedOverlap(t *testing.T) {
 			results[1], errs[1], results[2], errs[2])
 	}
 	if b.runs.Load() != 2 {
-		t.Errorf("the runner ran %d times, want twice", b.runs.Load())
+		t.Errorf("the Runner ran %d times, want twice", b.runs.Load())
 	}
 }
 
@@ -343,7 +343,7 @@ func TestSharingForcedOverlap(t *testing.T) {
 // and the other job still gets the result.
 func TestSharingStarterCancelledTrace(t *testing.T) {
 	b := &blockingRunner{release: make(chan struct{})}
-	s := newSharing(b, cache.NewMemory())
+	s, _ := testSharing(b)
 	var mu sync.Mutex
 	var names []string
 	traced := tracing.WithRecorder(t.Context(), tracing.NewRecorder("executor", func(span tracing.Span) {
@@ -354,13 +354,13 @@ func TestSharingStarterCancelledTrace(t *testing.T) {
 	starter, cancel := context.WithCancel(traced)
 	starterDone := make(chan error, 1)
 	go func() {
-		_, err := s.run(starter, testRequest(false), &outputs{})
+		_, err := s.attempt(starter, testRequest(false), &outputs{})
 		starterDone <- err
 	}()
 	waitFor(t, func() bool { return b.runs.Load() == 1 })
 	other := make(chan *cache.ActionResult, 1)
 	go func() {
-		r, err := s.run(t.Context(), testRequest(false), &outputs{})
+		r, err := s.attempt(t.Context(), testRequest(false), &outputs{})
 		testenv.Must(t, err)
 		other <- r
 	}()
@@ -380,8 +380,117 @@ func TestSharingStarterCancelledTrace(t *testing.T) {
 	}
 }
 
+// failingRecords is a record store whose writes fail while fail is set.
+type failingRecords struct {
+	cache.RecordStore
+	fail atomic.Bool
+}
+
+// errDiskFull is the failure of a failingRecords write.
+var errDiskFull = errors.New("disk full")
+
+// SetResult fails while fail is set, and records r otherwise.
+func (r *failingRecords) SetResult(ctx context.Context, key digest.Digest, result *cache.ActionResult) error {
+	if r.fail.Load() {
+		return errDiskFull
+	}
+	return r.RecordStore.SetResult(ctx, key, result)
+}
+
+// SetTag fails while fail is set, and records tag otherwise.
+func (r *failingRecords) SetTag(ctx context.Context, name string, tag *cache.TagRecord) error {
+	if r.fail.Load() {
+		return errDiskFull
+	}
+	return r.RecordStore.SetTag(ctx, name, tag)
+}
+
+// resolvingRunner reports the results of a blocking runner as a resolve's, with the record of the tag it resolved.
+type resolvingRunner struct {
+	*blockingRunner
+}
+
+// run runs through the blocking runner, and adds the tag's record to its report.
+func (r resolvingRunner) Run(ctx context.Context, req Request, ev Output) (*Report, error) {
+	rep, err := r.blockingRunner.Run(ctx, req, ev)
+	if err != nil {
+		return nil, err
+	}
+	rep.Tag, rep.TagRecord = req.Action.Image, &cache.TagRecord{Digest: digest.FromString("index")}
+	return rep, nil
+}
+
+// TestSharingPublishFails checks that an attempt whose result, or tag record, can't be written fails every job
+// attached to it, a result's failure keeping the log the attempt saved, and that a job after the store recovers
+// runs the action again and records what it made.
+func TestSharingPublishFails(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		resolve bool
+	}{
+		{name: "result"},
+		{name: "tag", resolve: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := cache.NewMemory()
+			records := &failingRecords{RecordStore: m}
+			records.fail.Store(true)
+			b := &blockingRunner{release: make(chan struct{}), content: m}
+			var r Runner = b
+			req := testRequest(false)
+			if tc.resolve {
+				r = resolvingRunner{b}
+				req = Request{Action: &Action{Version: ActionVersion, Kind: KindResolve,
+					Image: "example.com/base:v1", Platform: "linux/amd64"}}
+			}
+			s := NewSharing(r, m, records)
+			errs := make(chan error, 2)
+			for range 2 {
+				go func() {
+					_, err := s.attempt(t.Context(), req, &outputs{})
+					errs <- err
+				}()
+			}
+			waitFor(t, func() bool { return b.runs.Load() == 1 && attachedCount(s) == 2 })
+			close(b.release)
+			for range 2 {
+				err := <-errs
+				if !errors.Is(err, errDiskFull) || !strings.Contains(err.Error(), "saving to the build cache") {
+					t.Errorf("an attached job got %v, want the failure to save its record", err)
+					continue
+				}
+				if tc.resolve {
+					continue
+				}
+				var logged *loggedError
+				if !errors.As(err, &logged) {
+					t.Errorf("the failure %v carries no log, want the attempt's", err)
+				} else if log, err := m.Read(t.Context(), *logged.log, cache.MaxLogSize); err != nil ||
+					!strings.Contains(string(log), "done") {
+					t.Errorf("the failure's log = %q, %v; want what the attempt printed", log, err)
+				}
+			}
+
+			records.fail.Store(false)
+			if _, err := s.attempt(t.Context(), req, &outputs{}); err != nil {
+				t.Fatalf("the job after the store recovered got %v", err)
+			}
+			if n := b.runs.Load(); n != 2 {
+				t.Errorf("the runner ran %d times, want twice: the failed attempt made nothing to reuse", n)
+			}
+			if tc.resolve {
+				if tag, err := m.Tag(t.Context(), req.Action.Image); tag == nil || err != nil {
+					t.Errorf("the tag's record after the retry = %v, %v; want it recorded", tag, err)
+				}
+			} else if result, err := m.Result(t.Context(), req.Key); result == nil || result.Epoch != 2 || err != nil {
+				t.Errorf("the result after the retry = %+v, %v; want the second run's", result, err)
+			}
+		})
+	}
+}
+
 // attachedCount returns how many jobs are attached to attempts in flight.
-func attachedCount(s *sharing) int {
+func attachedCount(s *Sharing) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n := 0
@@ -401,5 +510,28 @@ func waitFor(t *testing.T, cond func() bool) {
 			t.Fatal("the condition didn't hold in time")
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestSharingWithdrawnListeners checks that a job whose demand was withdrawn neither keeps an attempt demanded nor
+// lets it run emulated for the jobs still attached, which don't permit emulation.
+func TestSharingWithdrawnListeners(t *testing.T) {
+	withdrawn := make(chan struct{})
+	close(withdrawn)
+	permitting := &listener{permitted: true, withdrawn: withdrawn}
+	other := &listener{withdrawn: make(chan struct{})}
+	at := &attempt{attached: []*listener{permitting, other}}
+	if !at.demanded() {
+		t.Error("the attempt isn't demanded, though a job still wants it")
+	}
+	if at.permitted() {
+		t.Error("the attempt is permitted to emulate by a job whose demand was withdrawn")
+	}
+	at.remove(other)
+	if at.demanded() {
+		t.Error("the attempt is demanded by a job whose demand was withdrawn")
+	}
+	if !(&attempt{attached: []*listener{{permitted: true}}}).permitted() {
+		t.Error("a job whose demand never lapses doesn't permit the attempt to emulate")
 	}
 }

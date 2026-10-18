@@ -20,8 +20,12 @@ import (
 	"github.com/containerd/platforms"
 	gcrname "github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/registry"
+	"github.com/google/go-containerregistry/pkg/v1/empty"
+	"github.com/google/go-containerregistry/pkg/v1/mutate"
+	"github.com/google/go-containerregistry/pkg/v1/random"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
+	gcrtypes "github.com/google/go-containerregistry/pkg/v1/types"
 	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"go.podman.io/buildah"
 	"go.podman.io/image/v5/docker/reference"
@@ -121,7 +125,7 @@ func TestDeliverFromSeparateStore(t *testing.T) {
 	ex.Close() // the executor's stores take no part in delivery
 
 	path := filepath.Join(t.TempDir(), "app.tar")
-	id, err := Save(t.Context(), clientStore, exported, path, nil, &types.SystemContext{})
+	id, err := Save(t.Context(), Exported(clientStore, exported), path, nil, &types.SystemContext{})
 	testenv.Must(t, err)
 	img, err := tarball.ImageFromPath(path, nil)
 	testenv.Must(t, err)
@@ -158,7 +162,7 @@ func TestDeliverIndexFromSeparateStore(t *testing.T) {
 	named, err := reference.ParseNormalizedNamed(strings.TrimPrefix(server.URL, "http://") + "/all:v1")
 	testenv.Must(t, err)
 	sys := &types.SystemContext{DockerInsecureSkipTLSVerify: types.OptionalBoolTrue}
-	pushed, err := Push(t.Context(), clientStore, exported, named.(reference.NamedTagged), sys)
+	pushed, err := Push(t.Context(), Exported(clientStore, exported), named.(reference.NamedTagged), sys)
 	testenv.Must(t, err)
 	if pushed != exported.Manifest.Digest.String() {
 		t.Errorf("Push reported index %s, want the one exported, %s", pushed, exported.Manifest.Digest)
@@ -233,4 +237,100 @@ func finishJob(t *testing.T, ex api.Executor, req api.Request) api.Outcome {
 		t.Fatalf("Result = %+v, %v; want success", outcome, err)
 	}
 	return outcome
+}
+
+// TestDeliverFromRegistry checks that the client delivers an image from the registry location its result names,
+// reading nothing from any content store, and assembles an index from its members' locations:
+// what a coordinator's results, whose images workers pushed to the cache registry, give it.
+func TestDeliverFromRegistry(t *testing.T) {
+	server := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))
+	t.Cleanup(server.Close)
+	host := strings.TrimPrefix(server.URL, "http://")
+	sys := &types.SystemContext{DockerInsecureSkipTLSVerify: types.OptionalBoolTrue}
+	push := func(platform string) (ref string, id string) {
+		t.Helper()
+		// An OCI image of one random layer, as vamos builds them, so that assembling the index converts nothing
+		// and the image IDs hold.
+		layer, err := random.Layer(256, gcrtypes.OCILayer)
+		testenv.Must(t, err)
+		img, err := mutate.AppendLayers(mutate.ConfigMediaType(mutate.MediaType(empty.Image,
+			gcrtypes.OCIManifestSchema1), gcrtypes.OCIConfigJSON), layer)
+		testenv.Must(t, err)
+		config, err := img.ConfigFile()
+		testenv.Must(t, err)
+		config.OS, config.Architecture, _ = strings.Cut(platform, "/")
+		img, err = mutate.ConfigFile(img, config)
+		testenv.Must(t, err)
+		configName, err := img.ConfigName()
+		testenv.Must(t, err)
+		ref = host + "/vamos-cache:" + configName.Hex
+		r, err := gcrname.ParseReference(ref, gcrname.Insecure)
+		testenv.Must(t, err)
+		testenv.Must(t, remote.Write(r, img))
+		return ref, configName.Hex
+	}
+	ref, id := push("linux/amd64")
+	res := api.Result{Image: id, Locations: []cache.Location{
+		{Kind: cache.LocationStore, Reference: "localhost/vamos-cache:" + id},
+		{Kind: cache.LocationRegistry, Reference: ref},
+	}}
+	img, ok, err := FromLocations(res)
+	if !ok || err != nil || img.Registry != ref {
+		t.Fatalf("FromLocations = %+v, %v, %v; want the registry location", img, ok, err)
+	}
+	path := filepath.Join(t.TempDir(), "app.tar")
+	saved, err := Save(t.Context(), img, path, nil, sys)
+	testenv.Must(t, err)
+	tar, err := tarball.ImageFromPath(path, nil)
+	testenv.Must(t, err)
+	config, err := tar.ConfigName()
+	testenv.Must(t, err)
+	if saved != id || config.Hex != id {
+		t.Errorf("Save reported %s and the tarball holds %s, want %s from the registry", saved, config.Hex, id)
+	}
+	if _, ok, err := FromLocations(api.Result{Image: id, Locations: res.Locations[:1]}); ok || err != nil {
+		t.Errorf("a result located in a store alone = %v, %v; want it not deliverable from a registry", ok, err)
+	}
+	broken := api.Result{Index: []api.Manifest{{Image: id, Platform: "linux-amd64", Locations: res.Locations[1:]}}}
+	if _, _, err := FromLocations(broken); err == nil || !strings.Contains(err.Error(), "manifest 0") {
+		t.Errorf("FromLocations of a member with platform %q = %v, want an error naming the manifest", "linux-amd64",
+			err)
+	}
+
+	// An index is assembled from its members' locations, and pushed with every image.
+	otherRef, otherID := push("linux/arm64")
+	index := api.Result{Index: []api.Manifest{
+		{Image: id, Platform: "linux/amd64", Locations: res.Locations[1:]},
+		{Image: otherID, Platform: "linux/arm64", Locations: []cache.Location{{Kind: cache.LocationRegistry,
+			Reference: otherRef}}},
+	}}
+	img, ok, err = FromLocations(index)
+	if !ok || err != nil || len(img.Members) != 2 {
+		t.Fatalf("FromLocations of an index = %+v, %v, %v; want two members", img, ok, err)
+	}
+	named, err := reference.ParseNormalizedNamed(host + "/all:v1")
+	testenv.Must(t, err)
+	pushed, err := Push(t.Context(), img, named.(reference.NamedTagged), sys)
+	testenv.Must(t, err)
+	r, err := gcrname.ParseReference(named.String(), gcrname.Insecure)
+	testenv.Must(t, err)
+	idx, err := remote.Index(r)
+	testenv.Must(t, err)
+	m, err := idx.IndexManifest()
+	testenv.Must(t, err)
+	d, err := idx.Digest()
+	testenv.Must(t, err)
+	if pushed != d.String() || len(m.Manifests) != 2 {
+		t.Fatalf("Push reported %s; the registry's index %s lists %d images, want 2", pushed, d, len(m.Manifests))
+	}
+	for i, want := range []string{id, otherID} {
+		member, err := idx.Image(m.Manifests[i].Digest)
+		testenv.Must(t, err)
+		config, err := member.ConfigName()
+		testenv.Must(t, err)
+		if config.Hex != want || m.Manifests[i].Platform.Architecture != index.Index[i].Platform[len("linux/"):] {
+			t.Errorf("the index's image %d is %s for %v, want %s for %s", i, config.Hex, m.Manifests[i].Platform, want,
+				index.Index[i].Platform)
+		}
+	}
 }

@@ -188,7 +188,7 @@ func TestWatchJobWriteFailure(t *testing.T) {
 				stderr: &bytes.Buffer{},
 				trace:  trace,
 			}
-			_, err := watchJob(t.Context(), x, "job", events)
+			_, _, err := watchJob(t.Context(), x, "job", events)
 			if !errors.Is(err, broken) || !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("watchJob = %v, want the write's failure and %q", err, tc.want)
 			}

@@ -124,8 +124,12 @@ type RecordStore interface {
 	Tag(ctx context.Context, name string) (*TagRecord, error)
 	// SetTag records r for the tag name, replacing any earlier record.
 	SetTag(ctx context.Context, name string, r *TagRecord) error
-	// ClearResults removes every action result, but no tag record, returning how many there were.
+	// ClearResults removes every action result, but no tag record, returning how many there were,
+	// and advances the generation.
 	ClearResults(ctx context.Context) (int, error)
+	// Generation counts the times the results were cleared, kept with the records, so that a build captured
+	// against one generation can be refused once a prune has made another.
+	Generation(ctx context.Context) (uint64, error)
 }
 
 // verifier is a stream of a blob's content that checks, at its end, that the bytes made the blob's digest and size,
@@ -136,6 +140,12 @@ type verifier struct {
 	digester  digest.Digester
 	n         int64
 	onCorrupt func() // called once the content is found corrupt, if not nil
+}
+
+// Verify returns r, b's content as another store or a transport delivers it, as a stream that verifies it:
+// reading to its end fails with ErrCorrupt if the bytes don't make b's digest and size, as Get's streams do.
+func Verify(r io.ReadCloser, b Blob) io.ReadCloser {
+	return verify(r, b, nil)
 }
 
 // verify returns r, b's content, as a stream that verifies it, calling onCorrupt, if not nil,

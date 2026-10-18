@@ -344,6 +344,8 @@ Use the references as your project grows:
   and publish several platforms together with an image index.
 - [Cache and traces](reference/cache.md): refresh dependencies or cached checks with `--rebuild`,
   and inspect where build time goes.
+- [Remote builds](README.md#remote-builds): share one build cache and a pool of workers with a team,
+  through a coordinator that any build command reaches with `--coordinator`.
 
 See the [examples](../examples/README.md) for more build patterns,
 including cross-compilation and monorepo dependencies.

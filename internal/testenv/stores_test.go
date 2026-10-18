@@ -179,8 +179,10 @@ additionallayerstores = ["%[1]s/layers"]
 `, dir), 0o644))
 
 			cmd := exec.Command(os.Args[0], "-test.run", "^TestIsolationHelper$")
-			// Even an empty STORAGE_OPTS replaces storage.conf's driver options, so it is unset unless the case sets it.
-			cmd.Env = slices.DeleteFunc(os.Environ(), func(v string) bool { return strings.HasPrefix(v, "STORAGE_OPTS=") })
+			// Even an empty STORAGE_OPTS replaces storage.conf's driver options, so it is unset unless the case
+			// sets it.
+			storageOpts := func(v string) bool { return strings.HasPrefix(v, "STORAGE_OPTS=") }
+			cmd.Env = slices.DeleteFunc(os.Environ(), storageOpts)
 			cmd.Env = append(cmd.Env, isolationHelperEnv+"=1", "CONTAINERS_STORAGE_CONF="+conf)
 			if tc.storageOpts != "" {
 				cmd.Env = append(cmd.Env, "STORAGE_OPTS="+fmt.Sprintf(tc.storageOpts, dir))

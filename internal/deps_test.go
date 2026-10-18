@@ -27,6 +27,11 @@ func TestImportRules(t *testing.T) {
 			internal: []string{},
 		},
 		{
+			pkg:      "cache/cachetest",
+			internal: []string{"cache"},
+			not:      []string{starlark, buildah, storage},
+		},
+		{
 			pkg:      "tracing",
 			internal: []string{},
 		},
@@ -51,6 +56,21 @@ func TestImportRules(t *testing.T) {
 			not:      []string{starlark, buildah, storage},
 		},
 		{
+			pkg:      "sched",
+			internal: []string{"api", "cache", "fileset", "graph", "tracing"},
+			not:      []string{starlark, buildah, storage},
+		},
+		{
+			pkg:      "remote",
+			internal: []string{"api", "cache", "fileset", "graph", "sched", "tracing"},
+			not:      []string{starlark, buildah, storage},
+		},
+		{
+			pkg:      "coord",
+			internal: []string{"api", "cache", "fileset", "graph", "remote", "sched", "tracing"},
+			not:      []string{starlark, buildah, storage},
+		},
+		{
 			pkg: "load",
 			not: []string{buildah, storage, "go.podman.io/image/v5/copy", module + "run", module + "finish"},
 		},
@@ -62,6 +82,10 @@ func TestImportRules(t *testing.T) {
 		{
 			pkg: "run",
 			not: []string{starlark, module + "load", module + "finish"},
+		},
+		{
+			pkg: "worker",
+			not: []string{starlark, module + "load", module + "finish", module + "cli"},
 		},
 		{
 			pkg: "finish",
