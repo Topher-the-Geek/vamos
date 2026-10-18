@@ -6,9 +6,11 @@
 # cache reads whatever its upstream credentials can.
 
 # The vamos image, built from the repository's Dockerfile, which both the coordinator and the workers run.
-# No image is published: push one where the nodes can pull it, or `kind load docker-image vamos:latest` on kind.
+# The image workflow publishes it for linux/amd64 and linux/arm64, tagged as requested and sha-<commit>;
+# latest moves with each run, so pin a sha- tag where nodes must agree on one image.
+# A chart under development runs a local build instead: repository vamos, loaded into the nodes.
 image:
-  repository: vamos
+  repository: ghcr.io/topher-the-geek/vamos
   tag: latest
   pullPolicy: IfNotPresent
 imagePullSecrets: []
