@@ -123,8 +123,16 @@ Each run tags the index `sha-<commit>` besides the requested tag, which defaults
 
 Each platform builds natively on a runner of its architecture, `ubuntu-24.04` and `ubuntu-24.04-arm`,
 and pushes its image by digest; a final job tags the index of both.
-Building both on one runner was rejected: the binary links gpgme and btrfs through cgo,
-so it can't be cross-compiled without a cross toolchain, and under QEMU the Go build is many times slower.
+Building both on one runner was rejected: buildah's namespace setup needs cgo,
+so the binary can't be cross-compiled without a cross toolchain, and under QEMU the Go build is many times slower.
+
+The image is also how vamos is installed: a project's devcontainer copies `/usr/local/bin/vamos` out of it,
+as the [tutorial](../../docs/tutorial.md#in-your-projects-devcontainer) shows, so the binary must run outside Fedora.
+The Dockerfile builds it on Debian 12, whose glibc 2.36 is older than Ubuntu 24.04's,
+with the `containers_image_openpgp` and `exclude_graphdriver_btrfs` tags, so it links no C library but glibc.
+A static build was rejected: with cgo disabled, buildah's chroot isolation fails to start a `run` step.
+The devcontainer's own builds, and the test suite, keep gpgme and btrfs, so a change to signature checking
+or storage drivers needs a release image smoke check as well.
 The workflow pushes with the job's `GITHUB_TOKEN`, so it needs no stored credential.
 Pull it locally with `docker pull ghcr.io/topher-the-geek/vamos:<tag>`;
 a cluster needs the package to be public, or a `kubernetes.io/dockerconfigjson` Secret in `imagePullSecrets`.
