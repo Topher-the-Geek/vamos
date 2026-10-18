@@ -1,0 +1,28 @@
+# The registry settings of the coordinator and the workers, which they read as $CONTAINERS_REGISTRIES_CONF:
+# the chart's registries speak plain HTTP, which containers/image refuses unless the registry is marked insecure.
+# A client outside the cluster needs the same entries in its own registries.conf.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vamos.fullname" . }}-registries
+  labels:
+    {{- include "vamos.labels" . | nindent 4 }}
+data:
+  registries.conf: |
+    {{- if .Values.cacheRegistry.insecure }}
+    [[registry]]
+    location = {{ include "vamos.cacheRegistry" . | quote }}
+    insecure = true
+    {{- end }}
+    {{- range $name, $cache := .Values.pullThrough.caches }}
+    {{- if $cache.insecure }}
+
+    [[registry]]
+    location = {{ include "vamos.pullThroughAddress" (dict "root" $ "name" $name "cache" $cache) | quote }}
+    insecure = true
+    {{- end }}
+    {{- end }}
+    {{- with .Values.registriesConf }}
+
+    {{- . | nindent 4 }}
+    {{- end }}

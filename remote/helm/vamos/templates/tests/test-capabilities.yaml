@@ -1,0 +1,24 @@
+{{- /* helm test: the coordinator answers through its Service, and the registries answer theirs. */}}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "vamos.fullname" . }}-test
+  labels:
+    {{- include "vamos.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  containers:
+    - name: check
+      image: {{ include "vamos.image" . }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      command: [curl, -fsS, --retry, "5", --retry-all-errors, --retry-delay, "2"]
+      args:
+        - {{ include "vamos.coordinatorURL" . }}/v1/capabilities
+        - http://{{ include "vamos.cacheRegistry" . }}/v2/
+        {{- range $name, $cache := .Values.pullThrough.caches }}
+        - http://{{ include "vamos.pullThroughAddress" (dict "root" $ "name" $name "cache" $cache) }}/v2/
+        {{- end }}

@@ -186,6 +186,8 @@ Runs the attempts the coordinator assigns, up to `--capacity` at once, each in a
 so that cancelling a build kills every process the attempt started, however it daemonized itself.
 A worker needs root, cgroup v2 and buildah's chroot isolation, as building does, and a container store of its own,
 which is a disposable cache of base images and built layers.
+It makes its cgroups under `/sys/fs/cgroup/vamos`, so it needs a cgroup namespace of its own, as Docker gives a
+container and Kubernetes doesn't give a privileged one; the Helm chart in `remote/helm/vamos` starts it in one.
 It renews each attempt's lease by heartbeat, and kills an attempt itself when it can't,
 so that the coordinator can count an expired lease as a stopped attempt;
 after a kill, or on starting after a crash, it removes the attempt's container.

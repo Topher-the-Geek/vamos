@@ -1,0 +1,19 @@
+The coordinator is at {{ include "vamos.coordinatorURL" . }} inside the namespace {{ .Release.Namespace }}.
+It offers {{ include "vamos.poolPlatforms" . | trim | splitList "\n" | join ", " }}; workers push layers to
+{{ include "vamos.cacheRegistry" . }}/{{ .Values.cacheRegistry.repository }} and pull bases through
+{{ include "vamos.pullThroughMappings" . | trim | splitList "\n" | join ", " }}.
+
+Check that it answers:
+
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+A client builds with --coordinator, or $VAMOS_COORDINATOR, once it reaches the coordinator; from outside the cluster:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "vamos.fullname" . }}-coordinator 8080:{{ .Values.coordinator.service.port }} &
+  vamos build <target> --coordinator http://127.0.0.1:8080
+
+load, save and push --push-from=client read images from the registries by the names above, so a client that
+delivers must resolve and reach them, and mark the plain-HTTP ones insecure in its registries.conf as the
+{{ include "vamos.fullname" . }}-registries ConfigMap does.
+
+There is no authentication: keep the coordinator and the registries on a trusted network.
