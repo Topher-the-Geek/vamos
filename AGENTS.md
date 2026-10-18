@@ -13,7 +13,7 @@ Read the routes relevant to the change before editing.
 | Container lifecycle, platforms, delivery | [.agents/kb/container-builds.md](.agents/kb/container-builds.md) |
 | Cache identity, epochs, pruning | [.agents/kb/storage.md](.agents/kb/storage.md) |
 | Concurrency, ownership, trace transport | [.agents/kb/concurrency-model.md](.agents/kb/concurrency-model.md) |
-| Remote execution environment, `remote/`, its Helm chart | [.agents/kb/remote-environment.md](.agents/kb/remote-environment.md) |
+| Remote execution environment, `remote/`, its Helm chart and published image | [.agents/kb/remote-environment.md](.agents/kb/remote-environment.md) |
 | Root startup / `main.go` | [doc.go](doc.go) |
 | `internal/api/` | [internal/api/doc.go](internal/api/doc.go) |
 | `internal/cli/` | [internal/cli/doc.go](internal/cli/doc.go) |

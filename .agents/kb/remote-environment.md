@@ -89,15 +89,16 @@ unless the values give `cacheRegistry.address` and each cache's `address` as nam
 The devcontainer has `kind`, `kubectl`, `helm` and `kubeconform`.
 kind runs the cluster's node as a container on the host's Docker, on a network named `kind`,
 which the devcontainer joins to reach the API server and the node, as it joins the compose network.
-The chart deploys the release image under the name `vamos:latest`, which no registry serves,
-so it is built and loaded into the node; on an arm64 host the pool is `linux/arm64`.
+A chart under development runs the working tree's release image rather than the published one,
+so it is built, loaded into the node as `vamos:latest` and named with `image.repository=vamos`;
+on an arm64 host the pool is `linux/arm64`.
 
 ```sh
 kind create cluster --name vamos                             # once; skip if `kind get clusters` lists it
 docker network connect kind "vamos_$(basename "$WORKSPACE_FOLDER")"
 kind export kubeconfig --name vamos --internal               # the API server by its name on the kind network
 docker build -q . -t vamos:latest && kind load docker-image vamos:latest --name vamos
-helm install vamos remote/helm/vamos -n vamos --create-namespace --wait \
+helm install vamos remote/helm/vamos -n vamos --create-namespace --wait --set image.repository=vamos \
   --set workers.pools.amd64=null --set workers.pools.arm64.platform=linux/arm64   # on an arm64 host
 helm test vamos -n vamos
 kubectl -n vamos port-forward svc/vamos-coordinator 18080:8080 &
@@ -109,3 +110,21 @@ A worker is lost with `crictl stop --timeout 0` on its container, run in the nod
 the kubelet starts it again in the same pod, as Docker's restart policy does.
 A worker's cgroups are seen from its own namespace, `kubectl exec <pod> -- nsenter -t 1 -C -m ls /sys/fs/cgroup/vamos`,
 since `kubectl exec` enters the container's other namespaces but not that one.
+
+## Published image
+
+The chart's default image is `ghcr.io/topher-the-geek/vamos`,
+which the [image workflow](../../.github/workflows/image.yml) publishes as an index for `linux/amd64` and `linux/arm64`,
+since developers and clusters run both.
+It runs only when started by hand, never on a push or pull request,
+because each run builds the Dockerfile twice and a cluster should take a new image deliberately:
+start it from the Actions tab, or with `gh workflow run image.yml --ref <branch> -f tag=<tag>`.
+Each run tags the index `sha-<commit>` besides the requested tag, which defaults to `latest`.
+
+Each platform builds natively on a runner of its architecture, `ubuntu-24.04` and `ubuntu-24.04-arm`,
+and pushes its image by digest; a final job tags the index of both.
+Building both on one runner was rejected: the binary links gpgme and btrfs through cgo,
+so it can't be cross-compiled without a cross toolchain, and under QEMU the Go build is many times slower.
+The workflow pushes with the job's `GITHUB_TOKEN`, so it needs no stored credential.
+Pull it locally with `docker pull ghcr.io/topher-the-geek/vamos:<tag>`;
+a cluster needs the package to be public, or a `kubernetes.io/dockerconfigjson` Secret in `imagePullSecrets`.
