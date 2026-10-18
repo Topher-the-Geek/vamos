@@ -44,6 +44,10 @@ RUN case "$(uname -m)" in \
  && chmod 755 /usr/local/bin/trace_processor_shell \
  && rm /tmp/perfetto.zip
 
+ RUN curl -LfsS https://claude.ai/install.sh | bash && \
+     curl -LfsS https://chatgpt.com/codex/install.sh | bash && \
+     curl -LfsS https://herdr.dev/install.sh | bash
+
 # Run build steps with chroot isolation, so no OCI runtime is needed.
 ENV BUILDAH_ISOLATION=chroot
 
