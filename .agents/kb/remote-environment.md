@@ -133,6 +133,9 @@ with the `containers_image_openpgp` and `exclude_graphdriver_btrfs` tags, so it 
 A static build was rejected: with cgo disabled, buildah's chroot isolation fails to start a `run` step.
 The devcontainer's own builds, and the test suite, keep gpgme and btrfs, so a change to signature checking
 or storage drivers needs a release image smoke check as well.
+Before its digest is recorded, each platform's build job installs the binary with the tutorial's devcontainer
+Dockerfile, the only `dockerfile` block there, and builds the TypeScript MCP example with it;
+it runs on the native runner because under emulation buildah can't re-execute itself.
 The workflow pushes with the job's `GITHUB_TOKEN`, so it needs no stored credential.
 Pull it locally with `docker pull ghcr.io/topher-the-geek/vamos:<tag>`;
 a cluster needs the package to be public, or a `kubernetes.io/dockerconfigjson` Secret in `imagePullSecrets`.
