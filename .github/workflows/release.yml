@@ -63,6 +63,24 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,scope=${{ matrix.arch }},mode=max
 
+      # Installs this platform's binary as the tutorial's devcontainer Dockerfile does, on Ubuntu 24.04,
+      # and builds an example with it; a failure leaves the digest out, so merge tags nothing.
+      # Under emulation buildah can't re-execute itself, so only a native runner can check this.
+      - name: smoke test
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir "$RUNNER_TEMP/devcontainer"
+          awk '/^```dockerfile/ { f = 1; next } /^```/ { f = 0 } f' docs/tutorial.md \
+            | sed "s#ghcr.io/topher-the-geek/vamos:[^ ]*#$IMAGE@$DIGEST#" > "$RUNNER_TEMP/devcontainer/Dockerfile"
+          grep -qF "COPY --from=$IMAGE@$DIGEST " "$RUNNER_TEMP/devcontainer/Dockerfile"
+          docker buildx build --load -t vamos-devcontainer "$RUNNER_TEMP/devcontainer"
+          docker run --rm --privileged -v vamos-storage:/var/lib/containers \
+            -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD/examples/typescript-mcp:/example" \
+            vamos-devcontainer vamos load server vamos-example -C /example
+          docker run -i --rm vamos-example < examples/typescript-mcp/echo-request.jsonl \
+            | grep -F '{"result":{"content":[{"type":"text","text":"hola"}]},"jsonrpc":"2.0","id":2}'
+
       - run: |
           mkdir -p "$RUNNER_TEMP/digests"
           digest='${{ steps.build.outputs.digest }}'
