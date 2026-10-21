@@ -180,8 +180,9 @@ func NewRootCommand(cfg Config) *cobra.Command {
 	opts := &defaults
 
 	root := &cobra.Command{
-		Use:   "vamos",
-		Short: "Build container images from Starlark BUILD files",
+		Use:     "vamos",
+		Short:   "Build container images from Starlark BUILD files",
+		Version: cmp.Or(run.Version(), "(devel)"),
 		// Arguments are valid by the time this runs, so later errors shouldn't print usage.
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			cmd.SilenceUsage = true
@@ -410,17 +411,28 @@ func NewRootCommand(cfg Config) *cobra.Command {
 }
 
 // UsesContainerStore reports whether the command line args names a command that opens container storage:
-// every command but a coordinator, which schedules builds and keeps no images, unless it builds locally.
-// main consults it before the re-exec that container storage needs from a root without capabilities.
+// every command but a coordinator, which schedules builds and keeps no images, unless it builds locally,
+// and but the root command, help and --version, which print and exit.
+// main consults it before the re-exec that container storage needs from a root without capabilities,
+// which fails where user namespaces are refused, as in a Dockerfile's RUN step that runs `vamos --version`.
 // The command is found as cobra finds it, so that a target or directory named "coordinator" isn't mistaken for it;
 // a command line that doesn't parse is left to Execute to refuse, after the re-exec, which is harmless.
 func UsesContainerStore(args []string) bool {
 	root := NewRootCommand(Config{Fs: afero.NewMemMapFs()})
 	cmd, rest, err := root.Traverse(args)
-	if err != nil || cmd.Name() != "coordinator" {
+	if err != nil {
 		return true
 	}
+	// Execute adds these flags, and the help and completion commands, which Traverse leaves to the root.
+	cmd.InitDefaultHelpFlag()
+	root.InitDefaultVersionFlag()
 	if err := cmd.ParseFlags(rest); err != nil {
+		return true
+	}
+	if help, err := cmd.Flags().GetBool("help"); cmd == root || err == nil && help {
+		return false
+	}
+	if cmd.Name() != "coordinator" {
 		return true
 	}
 	local, err := cmd.Flags().GetBool("local")

@@ -84,7 +84,8 @@ func Isolation() string {
 	return isolation.String()
 }
 
-// Version returns the version of vamos, as the Go module that built it records, or "" if that is unknown.
+// Version returns the version of vamos, as the release build stamped it or the Go module that built it records,
+// or "" if that is unknown.
 func Version() string {
 	return vamosVersion()
 }
@@ -228,8 +229,17 @@ func checkExecPlatform(platform string) error {
 	return nil
 }
 
-// vamosVersion returns the version of vamos, as the Go module that built it records, or "" if that is unknown.
+// stampedVersion is the release's version, such as v0.1.0, which the release build sets with
+// -ldflags "-X github.com/Topher-the-Geek/vamos/internal/run.stampedVersion=v0.1.0";
+// the Dockerfile builds outside the repository's git metadata, so the build info can't record it.
+var stampedVersion string
+
+// vamosVersion returns the version of vamos, as the release build stamped it or the Go module that built it records,
+// or "" if that is unknown.
 func vamosVersion() string {
+	if stampedVersion != "" {
+		return stampedVersion
+	}
 	info, ok := debug.ReadBuildInfo()
 	if !ok || info.Main.Version == "(devel)" {
 		return ""

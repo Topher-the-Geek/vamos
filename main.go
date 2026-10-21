@@ -18,7 +18,7 @@ func main() {
 		return
 	}
 	// A root without the capabilities to use container storage is re-executed in a user namespace that has them;
-	// a coordinator opens no container storage, and may run without any such capability.
+	// a coordinator, help and --version open no container storage, and may run without any such capability.
 	if cli.UsesContainerStore(os.Args[1:]) {
 		unshare.MaybeReexecUsingUserNamespace(false)
 	}
