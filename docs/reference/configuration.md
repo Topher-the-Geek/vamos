@@ -55,14 +55,26 @@ task(
 A referenced glob keeps paths relative to its own BUILD directory.
 vamos loads only the packages needed by the requested targets and reports dependency cycles.
 
-A package's `BUILD` file is loaded when another names one of its targets, while that other file is still running,
-so that every target is declared before a target that uses it.
-Two packages therefore can't name each other's targets directly, even when no target depends on itself:
-if `//:app` names `//scala:x`, and `//scala:x` names `//:y`, loading fails with
-`packages name each other's targets in a cycle: //: -> //scala: -> //:`.
-A reference made by a function of `ctx`, such as `base = lambda ctx: "//scala:x"`
-or `steps = lambda ctx: [add("//scala:files", "/src")]`, is resolved only once the BUILD files have run,
-so it can name a target in a package that names this one.
+Packages may name each other's targets, as where their files sit is often for other tools to say.
+A package's `BUILD` file runs when another first names one of its targets, while that other file is still running;
+it can then name the other file's targets declared above that point, as a file names its own earlier targets:
+
+```python
+# BUILD
+layer(name = "jre", base = "//:java")         # declared before scala/BUILD runs
+layer(name = "app", base = "//scala:server")  # runs scala/BUILD, which names //:jre
+```
+
+```python
+# scala/BUILD
+layer(name = "server", base = "//:jre", steps = [add("jar", "/app")])
+```
+
+A target declared below that point isn't declared yet when the other file names it,
+which is an error saying where the first file stopped; declare the target above that line.
+A reference made by a function of `ctx`, such as `base = lambda ctx: "//:later"`, is resolved
+once every BUILD file has run, so it can name any target.
+Targets that name each other in a cycle, such as `//:app -> //scala:server -> //:app`, are an error.
 The workspace root does not need a `BUILD` file unless a reference or command needs targets from it.
 
 On the command line, unqualified names refer to `-C`'s package:
