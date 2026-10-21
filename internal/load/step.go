@@ -63,16 +63,44 @@ func (s *addStep) lower() graph.Step {
 	return graph.Step{Op: graph.OpAdd, Display: s.String(), Dest: s.dest, Owner: s.owner, Group: s.group}
 }
 
-// runStep runs a command in the container.
+// runStep runs a command in the container, given its secrets while it runs.
 type runStep struct {
 	stepBase
-	argv []string
+	argv    []string
+	secrets []graph.Secret
 }
 
-func (s *runStep) String() string { return fmt.Sprintf("run(%s)", reprStrings(s.argv)) }
-func (s *runStep) lower() graph.Step {
-	return graph.Step{Op: graph.OpRun, Display: s.String(), Argv: s.argv}
+func (s *runStep) String() string {
+	if len(s.secrets) == 0 {
+		return fmt.Sprintf("run(%s)", reprStrings(s.argv))
+	}
+	secrets := make([]string, len(s.secrets))
+	for i, secret := range s.secrets {
+		secrets[i] = (&secretValue{secret}).String()
+	}
+	return fmt.Sprintf("run(%s, secrets=[%s])", reprStrings(s.argv), strings.Join(secrets, ", "))
 }
+
+func (s *runStep) lower() graph.Step {
+	return graph.Step{Op: graph.OpRun, Display: s.String(), Argv: s.argv, Secrets: s.secrets}
+}
+
+// secretValue is a secret that a run() step is given, made by secret(), which names it and says how the step gets
+// it; the command line gives its value.
+type secretValue struct {
+	secret graph.Secret
+}
+
+func (s *secretValue) String() string {
+	if s.secret.Env != "" {
+		return fmt.Sprintf("secret(%s, env=%s)", starlark.String(s.secret.ID), starlark.String(s.secret.Env))
+	}
+	return fmt.Sprintf("secret(%s, file=%s)", starlark.String(s.secret.ID), starlark.String(s.secret.File))
+}
+func (s *secretValue) Type() string          { return "secret" }
+func (s *secretValue) Freeze()               {} // immutable
+func (s *secretValue) Truth() starlark.Bool  { return true }
+func (s *secretValue) Hash() (uint32, error) { return 0, errors.New("unhashable type: secret") }
 
 // envStep sets environment variables for later runs.
 // Those set by env() are kept in the image's config too, for the image's own command and the images built on it;
@@ -117,17 +145,18 @@ func (s *workdirStep) lower() graph.Step {
 // stepBuiltins are the BUILD file's builtins that make steps without naming other targets.
 var stepBuiltins = starlark.StringDict{
 	"run":       starlark.NewBuiltin("run", newRun),
+	"secret":    starlark.NewBuiltin("secret", newSecret),
 	"env":       starlark.NewBuiltin("env", newEnv),
 	"build_env": starlark.NewBuiltin("build_env", newEnv),
 	"workdir":   starlark.NewBuiltin("workdir", newWorkdir),
 }
 
-// newRun implements run(argv).
+// newRun implements run(argv, secrets=[]).
 func newRun(
 	_ *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple,
 ) (starlark.Value, error) {
-	var list *starlark.List
-	if err := starlark.UnpackArgs(fn.Name(), args, kwargs, "argv", &list); err != nil {
+	var list, secretList *starlark.List
+	if err := starlark.UnpackArgs(fn.Name(), args, kwargs, "argv", &list, "secrets?", &secretList); err != nil {
 		return nil, err
 	}
 	argv, err := stringList(fn.Name(), "argv", list)
@@ -137,7 +166,36 @@ func newRun(
 	if len(argv) == 0 {
 		return nil, fmt.Errorf("%s: argv must not be empty", fn.Name())
 	}
-	return &runStep{argv: argv}, nil
+	var secrets []graph.Secret
+	if secretList != nil {
+		for i := 0; i < secretList.Len(); i++ {
+			s, ok := secretList.Index(i).(*secretValue)
+			if !ok {
+				return nil, fmt.Errorf(`%s: secrets[%d] is %s, want a secret, such as secret("token", env="TOKEN")`,
+					fn.Name(), i, secretList.Index(i).Type())
+			}
+			secrets = append(secrets, s.secret)
+		}
+	}
+	if err := graph.CheckSecrets(secrets); err != nil {
+		return nil, fmt.Errorf("%s: %w", fn.Name(), err)
+	}
+	return &runStep{argv: argv, secrets: secrets}, nil
+}
+
+// newSecret implements secret(id, env="", file=""): the secret id, which --secret gives a value,
+// given to a run() step as the variable env or the file file.
+func newSecret(
+	_ *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple,
+) (starlark.Value, error) {
+	var s graph.Secret
+	if err := starlark.UnpackArgs(fn.Name(), args, kwargs, "id", &s.ID, "env?", &s.Env, "file?", &s.File); err != nil {
+		return nil, err
+	}
+	if err := graph.CheckSecret(s); err != nil {
+		return nil, fmt.Errorf("%s: %w", fn.Name(), err)
+	}
+	return &secretValue{s}, nil
 }
 
 // newEnv implements env(NAME="value", ...)

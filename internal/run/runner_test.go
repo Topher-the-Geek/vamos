@@ -4,15 +4,19 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/Topher-the-Geek/vamos/internal/cache"
 	"github.com/Topher-the-Geek/vamos/internal/fileset"
+	"github.com/Topher-the-Geek/vamos/internal/graph"
 	"github.com/Topher-the-Geek/vamos/internal/sched"
 	"github.com/Topher-the-Geek/vamos/internal/testenv"
 
 	"github.com/spf13/afero"
+	"go.podman.io/buildah"
 )
 
 // memFile returns a filesystem holding the file /f with content.
@@ -70,5 +74,30 @@ func TestRunnerCheckContent(t *testing.T) {
 	if problem, err := r.Check(t.Context(), a, result); err != nil || problem == nil ||
 		!strings.HasPrefix(problem.Error(), "its files can't be used from the cache: f: ") {
 		t.Errorf("check with a file corrupt = %v, %v; want the result unusable", problem, err)
+	}
+}
+
+// TestGiveSecrets checks that a run() step's secrets become buildah's secret mounts, each value in a file only this
+// process can read, and that a secret without a value, as on a worker, which is never sent one, fails the step.
+func TestGiveSecrets(t *testing.T) {
+	st := &targetState{secrets: map[string][]byte{"token": []byte("hunter2")}}
+	var options buildah.RunOptions
+	dir, err := st.giveSecrets([]graph.Secret{{ID: "token", Env: "TOKEN"}, {ID: "token", File: "/run/t"}}, &options)
+	defer os.RemoveAll(dir)
+	testenv.Must(t, err)
+	if want := []string{"type=secret,id=token,env=TOKEN", "type=secret,id=token,target=/run/t"}; !slices.Equal(
+		options.RunMounts, want) {
+		t.Errorf("mounts = %q, want %q", options.RunMounts, want)
+	}
+	source := options.Secrets["token"].Source
+	if info, err := os.Stat(source); err != nil || info.Mode().Perm() != 0o600 {
+		t.Errorf("the value's file %s: %v, %v; want it readable by its owner alone", source, info, err)
+	}
+
+	st.secrets = nil
+	dir, err = st.giveSecrets([]graph.Secret{{ID: "token", Env: "TOKEN"}}, &buildah.RunOptions{})
+	defer os.RemoveAll(dir)
+	if err == nil || !strings.Contains(err.Error(), `secret "token" isn't given here`) {
+		t.Errorf("a secret without a value = %v, want it refused", err)
 	}
 }

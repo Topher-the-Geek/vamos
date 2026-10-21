@@ -25,10 +25,13 @@ const (
 
 // Request asks Load for the graph of building the targets a command names.
 type Request struct {
-	Dir          string   // -C: the directory of the BUILD file whose targets are named without a label
-	Targets      []string // as the command line names them
-	Want         Want
-	Sets         []string           // --set flags, each name=value
+	Dir     string   // -C: the directory of the BUILD file whose targets are named without a label
+	Targets []string // as the command line names them
+	Want    Want
+	Sets    []string // --set flags, each name=value
+	// Secrets are the IDs of the secrets --secret gives, which every run() step to run must find here;
+	// nil checks nothing, for a command that runs nothing.
+	Secrets      map[string]bool
 	Platform     string             // --platform, or "" for the executor's
 	ExecPlatform imgspecv1.Platform // the executor's, which EXEC_PLATFORM names
 	// DestPlatform, if set, says that the image is sent to a destination that takes one image,
@@ -103,6 +106,9 @@ func load(ctx context.Context, fsys afero.Fs, req Request) (*graph.Graph, *works
 	if err != nil {
 		return nil, w, err
 	}
+	if err := checkSecretsGiven(g, req.Secrets); err != nil {
+		return nil, w, err
+	}
 	err = w.readGlobs(ctx, g, globs, func(ctx context.Context, dir string, sel *fileset.Selection) (
 		cache.Blob, fileset.Stats, error) {
 		return req.Store(ctx, w.fs, dir, sel)
@@ -114,6 +120,26 @@ func load(ctx context.Context, fsys afero.Fs, req Request) (*graph.Graph, *works
 		return nil, w, err // a bug: every mistake in a BUILD file is reported before this
 	}
 	return g, w, nil
+}
+
+// checkSecretsGiven refuses a graph with a run() step whose secret the command line doesn't give, if given is set,
+// before anything is read or run.
+func checkSecretsGiven(g *graph.Graph, given map[string]bool) error {
+	if given == nil {
+		return nil
+	}
+	for _, n := range g.Nodes {
+		for _, in := range n.Steps() {
+			for _, s := range in.Secrets {
+				if !given[s.ID] {
+					return fmt.Errorf("%s: %s: %s needs secret %q, which no --secret gives; "+
+						"give it with --secret id=%s,env=VARIABLE or --secret id=%s,src=FILE",
+						n.Pos, n.Desc, in.Display, s.ID, s.ID, s.ID)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // imageRoot returns the target whose image req sends, in the configuration the command line gives it: the one named,

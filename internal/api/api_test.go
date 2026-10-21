@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"slices"
@@ -152,5 +153,23 @@ func TestDescribe(t *testing.T) {
 				t.Errorf("Describe = %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+// TestGraphRequestSecrets checks that a graph request's secrets are never encoded, so that no transport carries them,
+// and that a clone holds a copy of them, as an executor keeps what it is handed.
+func TestGraphRequestSecrets(t *testing.T) {
+	req := Request{Graph: &GraphRequest{Secrets: map[string][]byte{"token": []byte("hunter2")}}}
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "hunter2") || strings.Contains(string(data), "secrets") {
+		t.Errorf("a request encodes as %s, which holds its secrets", data)
+	}
+	clone := req.Clone()
+	clone.Graph.Secrets["token"][0] = 'H'
+	if string(req.Graph.Secrets["token"]) != "hunter2" {
+		t.Errorf("changing a clone's secret changed the original's, to %q", req.Graph.Secrets["token"])
 	}
 }

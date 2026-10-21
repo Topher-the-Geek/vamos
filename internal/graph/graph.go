@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -18,7 +19,7 @@ import (
 
 // Version changes whenever what a graph means changes,
 // so that a client and an executor of different versions refuse each other's graphs rather than build something else.
-const Version = 3 // 3: a layer's entrypoint
+const Version = 3 // 3: a layer's entrypoint, and run() steps' secrets
 
 // Graph is everything a build runs:
 // each target in each configuration it's needed in, in an order where each node comes after the nodes it uses.
@@ -106,15 +107,68 @@ type Index struct {
 // Step is one step of a layer or task.
 // Op says which, and which other fields it uses.
 type Step struct {
-	Op      string   `json:"op"`              // "add", "run", "env", "build_env" or "workdir"
-	Display string   `json:"display"`         // as the BUILD file wrote it, for messages: `run(["pnpm", "install"])`
-	From    *Ref     `json:"from,omitempty"`  // add: a Source, or a Task with Output
-	Dest    string   `json:"dest,omitempty"`  // add
-	Owner   string   `json:"owner,omitempty"` // add
-	Group   string   `json:"group,omitempty"` // add
-	Argv    []string `json:"argv,omitempty"`  // run
-	Vars    []string `json:"vars,omitempty"`  // env and build_env: NAME=value, in the order given
-	Dir     string   `json:"dir,omitempty"`   // workdir
+	Op      string   `json:"op"`                // "add", "run", "env", "build_env" or "workdir"
+	Display string   `json:"display"`           // as the BUILD file wrote it, for messages: `run(["pnpm", "install"])`
+	From    *Ref     `json:"from,omitempty"`    // add: a Source, or a Task with Output
+	Dest    string   `json:"dest,omitempty"`    // add
+	Owner   string   `json:"owner,omitempty"`   // add
+	Group   string   `json:"group,omitempty"`   // add
+	Argv    []string `json:"argv,omitempty"`    // run
+	Secrets []Secret `json:"secrets,omitempty"` // run: what it is given, never their values
+	Vars    []string `json:"vars,omitempty"`    // env and build_env: NAME=value, in the order given
+	Dir     string   `json:"dir,omitempty"`     // workdir
+}
+
+// Secret is a secret that a run() step is given for as long as it runs: the value the command line gives ID,
+// as the variable Env or the file File, one of them, which no image keeps.
+// The graph names it alone; its value never enters the graph, a key, a record or a trace.
+type Secret struct {
+	ID   string `json:"id"`
+	Env  string `json:"env,omitempty"`
+	File string `json:"file,omitempty"`
+}
+
+// secretID is what a secret's ID may be: letters, digits and "_.-", as Docker's are, but nothing that a mount's
+// options, which buildah splits on "," and "=", would misread.
+var secretID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+
+// CheckSecret checks that s names a secret and gives it as a variable or as a file, but not both.
+func CheckSecret(s Secret) error {
+	if !secretID.MatchString(s.ID) {
+		return fmt.Errorf(`secret id %q must be letters, digits, "_", "." or "-", starting with a letter or digit`,
+			s.ID)
+	}
+	switch {
+	case (s.Env == "") == (s.File == ""):
+		return fmt.Errorf("secret %q must give env or file, but not both", s.ID)
+	case s.Env != "" && !isVarName(s.Env):
+		return fmt.Errorf("secret %q: env %q isn't a variable name, such as API_TOKEN", s.ID, s.Env)
+	case s.File != "" && (!path.IsAbs(s.File) || path.Clean(s.File) != s.File || path.Clean(s.File) == "/"):
+		return fmt.Errorf("secret %q: file %q must be a clean absolute path, such as /run/secrets/%s", s.ID, s.File,
+			s.ID)
+	case strings.ContainsAny(s.File, ",=\x00"):
+		return fmt.Errorf(`secret %q: file %q must not contain ",", "=" or a NUL byte`, s.ID, s.File)
+	}
+	return nil
+}
+
+// CheckSecrets checks the secrets of a run() step: each one, and that no two set one variable or one file.
+func CheckSecrets(secrets []Secret) error {
+	seen := map[string]bool{}
+	for _, s := range secrets {
+		if err := CheckSecret(s); err != nil {
+			return err
+		}
+		where := "env " + s.Env
+		if s.File != "" {
+			where = "file " + s.File
+		}
+		if seen[where] {
+			return fmt.Errorf("two secrets give %s", where)
+		}
+		seen[where] = true
+	}
+	return nil
 }
 
 // The ops of steps.
@@ -412,9 +466,12 @@ func (g *Graph) checkStep(ref Ref, in Step) error {
 			return errors.New(`owner and group must not contain ":"`)
 		}
 	case OpRun:
-		others.Argv = nil
+		others.Argv, others.Secrets = nil, nil
 		if len(in.Argv) == 0 {
 			return errors.New("argv is empty")
+		}
+		if err := CheckSecrets(in.Secrets); err != nil {
+			return err
 		}
 	case OpEnv, OpBuildEnv:
 		others.Vars = nil

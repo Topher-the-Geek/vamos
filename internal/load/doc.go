@@ -6,6 +6,8 @@
 // Package loading is demand-driven, including labels discovered while configuring;
 // there is no workspace-wide validation pass.
 // BUILD mistakes retain source positions here rather than becoming executor graph-validation errors.
+// A run() step's secrets are names alone; a step whose secret Request.Secrets lacks is refused once configured,
+// before sources are captured.
 //
 // # Lifecycle
 //

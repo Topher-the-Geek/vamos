@@ -6,6 +6,8 @@
 // Every value here is plain data that survives JSON encoding, so that a remote transport can carry it:
 // no value holds a path on either host, a file descriptor, an open file or a library handle.
 // Paths inside a container, a tree's entry paths and source positions in diagnostics are data and may cross.
+// The one exception to JSON is GraphRequest.Secrets, which is never encoded, so that no transport carries a secret:
+// only an executor in the client's process, handed the request directly, gets them.
 // Content is named by digest, as cache.Blob names it, and an image by its ID, with where its bytes are
 // as cache.Locations beside it; a registry image by its reference.
 // A context, an event stream or a store is a carrier, which a transport supplies, and never appears inside a value.

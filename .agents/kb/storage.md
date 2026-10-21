@@ -53,6 +53,12 @@ Changes to execution semantics must review [action.go](../../internal/sched/acti
 and `localRunner.Check` in [runner.go](../../internal/run/runner.go).
 `sched.ActionVersion` invalidates results built under old semantics;
 `graph.Version` addresses a different compatibility boundary.
+A `run()` step's secrets are part of its key by ID and by the variable or file that gives them, never by value,
+so a rotated secret reuses results, and their replayed output is from the run that made them.
+Values travel only in `api.GraphRequest.Secrets` and `sched.Request.Secrets`, which are never encoded,
+so no record, trace, graph or transport holds one, and `--secret` is refused with `--coordinator`;
+the runner writes each value to a file only its process reads, for buildah's secret mount, and removes it after the
+step. `TestSecrets` checks the image, the trace and reuse, and `TestRequestSecretsNotEncoded` the encoding.
 
 Reproducible layer metadata spans both stores: trees omit times, but action results carry an epoch.
 Review `Scheduler.epoch`, `commitLayer` and `sched.Step.Epoch` together.

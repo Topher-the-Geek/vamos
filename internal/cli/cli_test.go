@@ -123,6 +123,26 @@ func TestCommandLineMistakes(t *testing.T) {
 			args: []string{"build", "app", "--timestamp=-1"},
 			want: []string{`invalid argument "-1"`, "must not be before 1970"},
 		},
+		{
+			name: "secret without a source",
+			args: []string{"build", "app", "--secret", "id=token"},
+			want: []string{`invalid argument "id=token"`, `secret "token" needs env=VARIABLE or src=FILE`},
+		},
+		{
+			name: "secret without an ID",
+			args: []string{"build", "app", "--secret", "token,env=TOKEN"},
+			want: []string{`"token" isn't key=value; want id=ID,env=VARIABLE or id=ID,src=FILE`},
+		},
+		{
+			name: "secret with an unknown key",
+			args: []string{"build", "app", "--secret", "id=token,file=/t"},
+			want: []string{`unknown key "file"; want id=ID,env=VARIABLE or id=ID,src=FILE`},
+		},
+		{
+			name: "secret given twice",
+			args: []string{"build", "app", "--secret", "id=token,env=A", "--secret", "id=token,src=t"},
+			want: []string{`secret "token" is given twice`},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -814,6 +834,51 @@ func TestBuildFileMistakes(t *testing.T) {
 			name:  "entrypoint not strings",
 			build: pullBusybox + `layer(name="app", base="busybox", entrypoint=["java", 1])`,
 			want:  []string{"/project/BUILD:2:6:", "layer: entrypoint[1] is int, want string"},
+		},
+		{
+			name:  "secret given neither way",
+			build: pullBusybox + `layer(name="app", base="busybox", steps=[run(["true"], secrets=[secret("t")])])`,
+			want:  []string{"/project/BUILD:2:71:", `secret: secret "t" must give env or file, but not both`},
+		},
+		{
+			name: "secret given both ways",
+			build: pullBusybox + `layer(name="app", base="busybox", steps=[run(["true"], secrets=[` +
+				`secret("t", env="T", file="/t")])])`,
+			want: []string{"/project/BUILD:2:71:", `secret: secret "t" must give env or file, but not both`},
+		},
+		{
+			name: "secret with a bad ID",
+			build: pullBusybox + `layer(name="app", base="busybox", steps=[run(["true"], secrets=[` +
+				`secret("a,b", env="T")])])`,
+			want: []string{"/project/BUILD:2:71:",
+				`secret: secret id "a,b" must be letters, digits, "_", "." or "-", starting with a letter or digit`},
+		},
+		{
+			name: "secret at a relative file",
+			build: pullBusybox + `layer(name="app", base="busybox", steps=[run(["true"], secrets=[` +
+				`secret("t", file="run/t")])])`,
+			want: []string{"/project/BUILD:2:71:",
+				`secret: secret "t": file "run/t" must be a clean absolute path, such as /run/secrets/t`},
+		},
+		{
+			name:  "secrets not secrets",
+			build: pullBusybox + `layer(name="app", base="busybox", steps=[run(["true"], secrets=["t"])])`,
+			want: []string{"/project/BUILD:2:45:",
+				`run: secrets[0] is string, want a secret, such as secret("token", env="TOKEN")`},
+		},
+		{
+			name: "two secrets in one variable",
+			build: pullBusybox + `layer(name="app", base="busybox", steps=[run(["true"], secrets=[` +
+				`secret("a", env="T"), secret("b", env="T")])])`,
+			want: []string{"/project/BUILD:2:45:", "run: two secrets give env T"},
+		},
+		{
+			name: "secret not given",
+			build: pullBusybox + `layer(name="app", base="busybox", steps=[run(["true"], secrets=[` +
+				`secret("t", env="T")])])`,
+			want: []string{"/project/BUILD:2:6:", `layer "app": run(["true"], secrets=[secret("t", env="T")]) ` +
+				`needs secret "t", which no --secret gives; give it with --secret id=t,env=VARIABLE or ` +
+				`--secret id=t,src=FILE`},
 		},
 		{
 			name:  "fail in BUILD",

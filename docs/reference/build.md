@@ -209,6 +209,33 @@ run(["sh", "-c", "mkdir -p /out && printf 'hello\\n' > /out/message.txt"])
 Use a shell explicitly for redirection, pipes, or shell variable expansion.
 The base image must contain every command you run, including the shell.
 
+### Secrets
+
+A step that needs a credential, such as a token to upload source maps, is given it as a secret:
+
+```python
+run(
+    ["sh", "-c", "sentry-cli sourcemaps upload dist"],
+    secrets = [secret("sentry", env = "SENTRY_AUTH_TOKEN")],
+)
+run(["sh", "-c", "npm ci"], secrets = [secret("npmrc", file = "/root/.npmrc")])
+```
+
+`secret(id, env = ...)` sets the variable `env` for that step alone,
+and `secret(id, file = ...)` mounts a read-only file, owned by root, at that absolute path for that step alone.
+Each secret gives exactly one of them.
+The value comes from the command line, `--secret id=sentry,env=SENTRY_AUTH_TOKEN` or `--secret id=npmrc,src=.npmrc`;
+see [the CLI reference](cli.md#secrets).
+A build that reaches a step whose secret the command line doesn't give fails when the BUILD file loads,
+before anything runs.
+
+A secret's value never enters an image, the build cache, a trace or the graph.
+The step's cache key covers each secret's ID and where it is given, but not its value,
+so a new value doesn't run the step again, and a cached step's replayed output is from the run that made it.
+A step that must run again, such as an upload for each release, should depend on what identifies the release,
+such as a parameter, `build_env(VERSION = ctx.version)`.
+A step can still print its secret, and its output is kept with its result; don't echo secrets.
+
 ### `env(**variables)` and `build_env(**variables)`
 
 ```python
