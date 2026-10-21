@@ -86,6 +86,24 @@ S=examples/strawberry-react
 ./examples/typescript-ui/check.sh
 ```
 
+```sh
+# 11. install.sh, as the release's smoke test runs it: the tutorial's devcontainer Dockerfile on Ubuntu 24.04,
+# installing this platform's release binary from a local directory rather than a release, then the MCP example.
+# Expect "vamos version v0.0.0-test", then the MCP reply.
+shellcheck -s sh install.sh && mkdir -p "$TMP/devc" && cp install.sh "$TMP/devc/" \
+  && docker build -q --target binary --build-arg VERSION=v0.0.0-test --output "$TMP/devc/dist" . \
+  && mv "$TMP/devc/dist/vamos" "$TMP/devc/dist/vamos-linux-$(go env GOARCH)" \
+  && (cd "$TMP/devc/dist" && sha256sum vamos-linux-* > SHA256SUMS) \
+  && awk '/^```dockerfile/ { f = 1; next } /^```/ { f = 0 } f' docs/tutorial.md \
+  | sed 's#^ADD https://github.com/Topher-the-Geek/vamos/releases/download/[^ ]* /tmp/vamos-install.sh$#COPY install.sh /tmp/vamos-install.sh\nCOPY dist /tmp/dist\nENV VAMOS_RELEASE_URL=file:///tmp/dist#' \
+  > "$TMP/devc/Dockerfile" && docker build -q -t vamos-devcontainer "$TMP/devc" \
+  && docker run --rm vamos-devcontainer vamos --version \
+  && tar -C examples/typescript-mcp --exclude=node_modules -c . | docker run -i --rm --privileged \
+  -v /var/run/docker.sock:/var/run/docker.sock vamos-devcontainer \
+  sh -c 'mkdir /example && tar -x -C /example && vamos load server vamos-example:install -C /example' \
+  && docker run -i --rm vamos-example:install < examples/typescript-mcp/echo-request.jsonl
+```
+
 `push` has no manual check here:
 the tests already push to a real (in-process) registry, from the executor and from the client.
 

@@ -114,9 +114,10 @@ If you are already inside a devcontainer, use the first setup because its paths 
 ### In your project's devcontainer
 
 To build your own project, install vamos in the image your devcontainer runs.
-Copy the binary out of the published vamos image, at the version your project pins.
-Docker copies the binary for the platform it is building, `linux/amd64` or `linux/arm64`.
-The binary needs glibc 2.36 or later; these lines are for an Ubuntu 24.04 base:
+Each [release](https://github.com/Topher-the-Geek/vamos/releases) has an `install.sh`,
+which downloads that release's binary for the platform it runs on, `linux/amd64` or `linux/arm64`,
+checks it against the release's `SHA256SUMS`, and installs it as `/usr/local/bin/vamos`.
+The binary needs glibc 2.34 or later; these lines are for an Ubuntu 24.04 base:
 
 ```dockerfile
 FROM ubuntu:24.04
@@ -124,18 +125,35 @@ FROM ubuntu:24.04
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates \
+      curl \
       golang-github-containers-common \
       netavark \
  && rm -rf /var/lib/apt/lists/*
 
-COPY --from=ghcr.io/topher-the-geek/vamos:0.1.0 /usr/local/bin/vamos /usr/local/bin/vamos
+ADD https://github.com/Topher-the-Geek/vamos/releases/download/v0.1.0/install.sh /tmp/vamos-install.sh
+RUN sh /tmp/vamos-install.sh && rm /tmp/vamos-install.sh
 
 # Run build steps with chroot isolation, so no OCI runtime is needed.
 ENV BUILDAH_ISOLATION=chroot
 ```
 
-Add the packages to your image's existing `apt-get install` step rather than a separate one.
-Pin the image by digest as well, `vamos:0.1.0@sha256:<digest>`, if a moved tag must not change your devcontainer.
+Add the packages to your image's existing `apt-get install` step rather than a separate one;
+`install.sh` needs `curl`, or `wget`, to download the binary.
+It installs no packages itself: it reports any that vamos needs and the system lacks,
+with the `apt-get` or `dnf` command that installs them, and then fails, after installing vamos,
+so that a Dockerfile missing one stops there rather than at the first build.
+Give `--allow-missing`, or set `VAMOS_ALLOW_MISSING=1`, to install vamos without them.
+On Fedora they are `ca-certificates`, `containers-common` and `netavark`.
+The release in the URL is the one installed; `releases/latest/download/install.sh` installs the latest release,
+and `VAMOS_VERSION` or `--version` choose another.
+To install vamos on a Linux machine of your own, run the script there; it uses `sudo` unless you are root:
+
+```sh
+curl -fsSL https://github.com/Topher-the-Geek/vamos/releases/latest/download/install.sh | sh
+```
+
+The [published image](https://github.com/Topher-the-Geek/vamos/pkgs/container/vamos) has the same binary,
+at `/usr/local/bin/vamos`, if you would rather `COPY --from=ghcr.io/topher-the-geek/vamos:0.1.0` it.
 
 In `devcontainer.json`, run the container privileged, give container storage a volume of its own,
 and mount the Docker socket if you use `vamos load`:

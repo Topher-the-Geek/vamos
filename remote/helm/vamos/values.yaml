@@ -6,8 +6,9 @@
 # cache reads whatever its upstream credentials can.
 
 # The vamos image, built from the repository's Dockerfile, which both the coordinator and the workers run.
-# The release workflow publishes it for linux/amd64 and linux/arm64, tagged as requested and sha-<commit>;
-# latest moves with each run, so pin a sha- tag where nodes must agree on one image.
+# The release workflow publishes it for linux/amd64 and linux/arm64, tagged with the version and sha-<commit>,
+# and latest unless the version is a prerelease; latest moves with each release, so pin a version where nodes must
+# agree on one image.
 # A chart under development runs a local build instead: repository vamos, loaded into the nodes.
 image:
   repository: ghcr.io/topher-the-geek/vamos
