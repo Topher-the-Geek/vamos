@@ -211,6 +211,16 @@ run(["sh", "-c", "mkdir -p /out && printf 'hello\\n' > /out/message.txt"])
 Use a shell explicitly for redirection, pipes, or shell variable expansion.
 The base image must contain every command you run, including the shell.
 
+A command runs with chroot isolation, in the network of the process that runs vamos:
+the same interfaces and addresses, and the same DNS servers, from its `/etc/resolv.conf`.
+In a devcontainer, a step reaches what the devcontainer reaches,
+such as the services of a Docker Compose network that the devcontainer is on, by their names;
+on a [coordinator's](cli.md#coordinator) workers, it reaches what the worker's container reaches.
+The step gets a hostname of its own and an `/etc/hosts` that names it and `host.containers.internal`,
+neither of which stays in the image.
+Network access is not an input of a target's [cache key](cache.md#what-changes-a-result):
+a step that downloads, or talks to a service, is reused like any other until its inputs change.
+
 ### Secrets
 
 A step that needs a credential, such as a token to upload source maps, is given it as a secret:
