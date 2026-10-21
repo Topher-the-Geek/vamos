@@ -292,11 +292,12 @@ func (w *workspace) load(pkg string) (*buildFile, error) {
 		return nil, err
 	}
 	dir := filepath.Join(w.root, filepath.FromSlash(pkg))
-	buildPath := filepath.Join(dir, "BUILD")
+	buildPath, err := w.findBuildFile(dir)
+	if err != nil {
+		return nil, err
+	}
 	src, err := afero.ReadFile(w.fs, buildPath)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("no BUILD file in %s", dir)
-	} else if err != nil {
+	if err != nil {
 		return nil, err
 	}
 
@@ -312,6 +313,38 @@ func (w *workspace) load(pkg string) (*buildFile, error) {
 	}
 	w.packages[pkg] = f
 	return f, nil
+}
+
+// buildFileNames are the names a package's BUILD file may have.
+// BUILD.vms is for a directory that also holds a directory named build, as a project's build output often is:
+// where names are compared without case, as on macOS or with git's core.ignorecase, BUILD can't sit beside it,
+// and a .gitignore of build ignores BUILD too.
+var buildFileNames = []string{"BUILD", "BUILD.vms"}
+
+// findBuildFile returns the path of the BUILD file in dir, by one of buildFileNames.
+// A directory by one of the names, as build is found as BUILD where names are compared without case, isn't one.
+// Two are an error rather than one hiding the other, since a change to the hidden one would be silently ignored.
+func (w *workspace) findBuildFile(dir string) (string, error) {
+	var found []string
+	for _, name := range buildFileNames {
+		p := filepath.Join(dir, name)
+		info, err := w.fs.Stat(p)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return "", err
+		}
+		if !info.IsDir() {
+			found = append(found, p)
+		}
+	}
+	switch len(found) {
+	case 0:
+		return "", fmt.Errorf("no BUILD or BUILD.vms file in %s", dir)
+	case 1:
+		return found[0], nil
+	}
+	return "", fmt.Errorf("%s has both BUILD and BUILD.vms; a package has one BUILD file, so remove one of them", dir)
 }
 
 // checkPackageDir reports a symbolic link on the way from the workspace's root to package pkg,

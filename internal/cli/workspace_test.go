@@ -127,7 +127,9 @@ task(name="make", base="busybox", source="/out", include=["made"])
 		{
 			name: "no BUILD file in the package",
 			app:  `layer(name="app", base="//nope:busybox")`,
-			want: []string{`/project/app/BUILD:1:6: layer: base "//nope:busybox": no BUILD file in /project/nope`},
+			want: []string{
+				`/project/app/BUILD:1:6: layer: base "//nope:busybox": no BUILD or BUILD.vms file in /project/nope`,
+			},
 		},
 		{
 			name: "misspelled target",
@@ -236,12 +238,12 @@ func TestWorkspaceTargetMistakes(t *testing.T) {
 		{
 			name: "no BUILD file in the package",
 			args: []string{"build", "//nope:app"},
-			want: "no BUILD file in /project/nope",
+			want: "no BUILD or BUILD.vms file in /project/nope",
 		},
 		{
 			name: "no BUILD file in -C",
 			args: []string{"build", "app"},
-			want: "no BUILD file in /project",
+			want: "no BUILD or BUILD.vms file in /project",
 		},
 		{
 			name: "misspelled target",
@@ -335,4 +337,30 @@ func TestPackageLinks(t *testing.T) {
 	vamos(t, fsys, "build", "app", "-C", filepath.Join(projectDir, "app")).failsWith(t, false,
 		`/project/app/BUILD:1:45: add: source "//vendor/lib:code": package "vendor/lib": /project/vendor `+
 			"is a symbolic link; a package must be a directory within the workspace")
+}
+
+// TestBuildVms checks that a package's BUILD file may be named BUILD.vms, for a directory beside a build directory,
+// which BUILD would clash with where names are compared without case: as the package of -C, and named by a label;
+// that a directory by either name, as build is found as BUILD there, isn't a BUILD file; and that a package with both
+// names is refused, naming its directory, rather than one being silently ignored.
+func TestBuildVms(t *testing.T) {
+	files := map[string]string{
+		"WORKSPACE":       "",
+		"BUILD.vms":       `layer(name="app", base="//react:site")`,
+		"react/BUILD.vms": `layer(name="site", base="scratch", command=["serve"])`,
+		"react/BUILD/out": "a build directory, as build is found as BUILD without case",
+	}
+	r := vamos(t, project(t, files), "graph", "app", "-C", projectDir).ran(t)
+	for _, label := range []string{`"label": "app"`, `"label": "//react:site"`} {
+		if !strings.Contains(r.stdout, label) {
+			t.Errorf("the graph doesn't have %s:\n%s", label, r.stdout)
+		}
+	}
+	vamos(t, project(t, files), "graph", "site", "-C", filepath.Join(projectDir, "react")).ran(t)
+
+	files["react/BUILD.vms"], files["react/BUILD"] = files["react/BUILD.vms"], files["react/BUILD.vms"]
+	delete(files, "react/BUILD/out")
+	vamos(t, project(t, files), "graph", "app", "-C", projectDir).
+		failsWith(t, false, `/project/BUILD.vms:1:6: layer: base "//react:site": /project/react has both BUILD and `+
+			"BUILD.vms; a package has one BUILD file, so remove one of them")
 }

@@ -1,6 +1,8 @@
 # BUILD language reference
 
 A `BUILD` file is a Starlark program that declares named targets.
+It may be named `BUILD.vms` instead, where a `build` directory beside it would clash with `BUILD`;
+see [workspaces](configuration.md#workspaces).
 Use lists, dictionaries, functions, and comprehensions to compose declarations.
 Commands run inside build containers through `run()` steps.
 

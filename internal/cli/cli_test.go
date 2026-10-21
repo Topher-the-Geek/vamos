@@ -273,7 +273,7 @@ func TestProjectDirectoryMistakes(t *testing.T) {
 	})
 	t.Run("no BUILD file", func(t *testing.T) {
 		vamos(t, project(t, map[string]string{"script.sh": "echo hi"}), "load", "app", "app", "-C", projectDir).
-			failsWith(t, false, "no BUILD file in /project")
+			failsWith(t, false, "no BUILD or BUILD.vms file in /project")
 	})
 	t.Run("relative directory", func(t *testing.T) {
 		// -C resolves against the working directory, as other tools do.
