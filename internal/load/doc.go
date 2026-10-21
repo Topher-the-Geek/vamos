@@ -3,6 +3,7 @@
 // # Invariants
 //
 // Evaluation, configuration and source capture happen on the client.
+// A package's BUILD file is named BUILD or BUILD.vms, never both; findBuildFile owns the names.
 // Package loading is demand-driven, including labels discovered while configuring;
 // there is no workspace-wide validation pass.
 // BUILD mistakes retain source positions here rather than becoming executor graph-validation errors.

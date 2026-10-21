@@ -5,8 +5,18 @@ and platforms to choose what its artifacts run on.
 
 ## Workspaces
 
-A package is a directory containing a `BUILD` file.
+A package is a directory containing a `BUILD` file, or one named `BUILD.vms`.
 A workspace groups packages beneath a directory containing a `WORKSPACE` file, which may be empty.
+
+Name a package's file `BUILD.vms` when the directory also holds a `build` directory, such as a project's build output.
+Where file names are compared without case, as on macOS's default filesystem or with git's `core.ignorecase`,
+`BUILD` and `build` are the same name: the two can't sit side by side,
+and a `.gitignore` entry for `build` silently ignores `BUILD` as well.
+A directory named `BUILD` or `build` is never taken for a BUILD file.
+A package has one BUILD file: a directory with both `BUILD` and `BUILD.vms` is an error,
+rather than one of them being silently ignored.
+Everything said here of a `BUILD` file applies to a `BUILD.vms` file, and labels don't change:
+`//ui:app` names the target `app` of `ui/BUILD` or `ui/BUILD.vms`.
 
 ```text
 project/
@@ -25,7 +35,7 @@ Without one, `-C`'s directory is the workspace root.
 | --- | --- |
 | `app` or `:app` | Target in the current BUILD file's package |
 | `//:tools` | Target in the workspace root's BUILD file |
-| `//backend:schema` | Target in `backend/BUILD` beneath the workspace root |
+| `//backend:schema` | Target in `backend/BUILD`, or `backend/BUILD.vms`, beneath the workspace root |
 
 Use labels wherever a target reference is accepted, including `base`, `add()`, `dep()`, and index entries:
 

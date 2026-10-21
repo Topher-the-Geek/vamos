@@ -63,6 +63,9 @@ That is how the build tools stay out of the application image.
 The two operations that bring inputs into a build are **pull**, which fetches an image from a registry,
 and **glob**, which selects local files into a fileset.
 A `BUILD` file declares these operations as named **targets** in Starlark, a Python-like language.
+In a directory that also holds a `build` directory, name it `BUILD.vms`,
+since `BUILD` and `build` are one name where case is ignored, as on macOS;
+see [workspaces](reference/configuration.md#workspaces).
 Targets refer to one another by name: `base` selects an image, and `add()` copies in a fileset.
 Declare local targets before the targets that use them.
 A task's result is a fileset, so a task cannot be another target's base image.
