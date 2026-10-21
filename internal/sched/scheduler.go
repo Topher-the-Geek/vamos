@@ -980,7 +980,7 @@ func (s *Scheduler) inputs(n *graph.Node) *Action {
 		}
 	} else {
 		a.Platform = n.Layer.Platform
-		a.Command = n.Layer.Command
+		a.Command, a.Entrypoint = n.Layer.Command, n.Layer.Entrypoint
 	}
 	for _, in := range n.Steps() {
 		entry := StepOf(in)

@@ -2,6 +2,7 @@ package sched
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/Topher-the-Geek/vamos/internal/cache"
@@ -35,14 +36,16 @@ func TestActionKeyStable(t *testing.T) {
 			{Op: "env", Vars: []string{"A=1", "B=2"}},
 			{Op: "workdir", Dir: "/app"},
 		},
-		Command: []string{"/app/server"},
-		Source:  "/out",
-		Output:  testSelection(t, []string{"dist"}, []string{"dist/*.map"}),
+		Command:    []string{"/app/server"},
+		Entrypoint: &[]string{"java", "-jar"},
+		Source:     "/out",
+		Output:     testSelection(t, []string{"dist"}, []string{"dist/*.map"}),
 	}
-	want := `{"version":8,"kind":"layer","base":"0123abcd","platform":"linux/arm64","steps":[` +
+	want := `{"version":9,"kind":"layer","base":"0123abcd","platform":"linux/arm64","steps":[` +
 		`{"op":"add","files":{"digest":"` + files.Digest.String() + `","size":5},"epoch":7,"dest":"/app",` +
 		`"owner":"app","group":"staff"},{"op":"run","argv":["make","all"]},{"op":"env","vars":["A=1","B=2"]},` +
-		`{"op":"workdir","dir":"/app"}],"command":["/app/server"],"source":"/out","output":{"include":["dist"],` +
+		`{"op":"workdir","dir":"/app"}],"command":["/app/server"],"entrypoint":["java","-jar"],"source":"/out",` +
+		`"output":{"include":["dist"],` +
 		`"exclude":["dist/*.map"],"mode_mask":493,"max_file_count":10000,"max_file_size":104857600,` +
 		`"max_total_size":1073741824}}`
 	if got := a.Key(); got != digest.FromString(want) {
@@ -71,5 +74,23 @@ func TestActionKeys(t *testing.T) {
 	b.Steps = []Step{a.Steps[1], a.Steps[0]}
 	if b.Key() == key {
 		t.Errorf("actions with steps in a different order have the same key")
+	}
+}
+
+// TestEntrypointKeys checks that a layer's key tells an entrypoint left out, which keeps the base's, from an empty one,
+// which removes it, and from a set one; and that an action without one has the key it had before entrypoints were.
+func TestEntrypointKeys(t *testing.T) {
+	a := &Action{Version: ActionVersion, Kind: "layer", Base: "Scratch", Platform: "linux/amd64"}
+	keys := map[digest.Digest]string{a.Key(): "left out"}
+	for name, entrypoint := range map[string][]string{"empty": {}, "set": {"java"}} {
+		b := *a
+		b.Entrypoint = &entrypoint
+		if other, ok := keys[b.Key()]; ok {
+			t.Errorf("an entrypoint %s has the key of one %s", name, other)
+		}
+		keys[b.Key()] = name
+	}
+	if data, _ := json.Marshal(a); strings.Contains(string(data), "entrypoint") {
+		t.Errorf("an action without an entrypoint encodes as %s, which names one", data)
 	}
 }

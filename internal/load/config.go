@@ -902,7 +902,9 @@ func (l *lowering) image(cl confLabel) (graph.Ref, error) {
 						n.Desc, l.g.Node(base).Label, got, platform)
 				}
 			}
-			n.Layer = &graph.Layer{Base: base, Platform: platform, Steps: steps, Command: s.command}
+			n.Layer = &graph.Layer{
+				Base: base, Platform: platform, Steps: steps, Command: s.command, Entrypoint: s.entrypoint,
+			}
 		}
 	}
 	ref := l.add(n)
@@ -1045,11 +1047,12 @@ func (cr *configurer) image(cl confLabel) error {
 	}
 	defer cr.leave()
 	s := &targetSpec{
-		label:   t.label,
-		id:      cl,
-		task:    t.task,
-		command: t.command,
-		source:  t.source,
+		label:      t.label,
+		id:         cl,
+		task:       t.task,
+		command:    t.command,
+		entrypoint: t.entrypoint,
+		source:     t.source,
 	}
 	base, err := cr.w.edge(t.baseRef, cl)
 	if err != nil {

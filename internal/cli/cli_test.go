@@ -811,6 +811,11 @@ func TestBuildFileMistakes(t *testing.T) {
 			want:  []string{"/project/BUILD:2:5:", `task: source "/a\x00" must not contain a NUL byte`},
 		},
 		{
+			name:  "entrypoint not strings",
+			build: pullBusybox + `layer(name="app", base="busybox", entrypoint=["java", 1])`,
+			want:  []string{"/project/BUILD:2:6:", "layer: entrypoint[1] is int, want string"},
+		},
+		{
 			name:  "fail in BUILD",
 			build: `fail("unsupported platform")`,
 			want:  []string{"/project/BUILD:1:5:", "unsupported platform"},

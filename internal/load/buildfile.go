@@ -147,8 +147,10 @@ type targetSpec struct {
 	base    confLabel // of an instance: the base in its configuration
 	steps   []step    // applied in order
 	command []string  // a layer's default command
-	source  string    // a task's directory of output
-	output  *fileSet  // a task's output, found in source; nil for a layer, or a task without output
+	// entrypoint is a layer's, if given, even empty, which graph.Layer.Entrypoint describes; nil if not given
+	entrypoint *[]string
+	source     string   // a task's directory of output
+	output     *fileSet // a task's output, found in source; nil for a layer, or a task without output
 }
 
 // indexSpec is an index of images for several platforms, declared by a call to index():
@@ -473,11 +475,12 @@ func (w *workspace) predeclared() starlark.StringDict {
 		return names
 	}
 	globParams := append([]string{"name"}, selectionNames(true)...)
+	layerParams := []string{"name", "base", "steps?", "command?", "entrypoint?"}
 	taskParams := append([]string{"name", "base", "steps?", "source?"}, selectionNames(false)...)
 	w.builtins = starlark.StringDict{
 		"glob":          w.declarer("glob", globParams, w.makeGlob),
 		"pull":          w.declarer("pull", []string{"name", "image", "tag?"}, w.makePull),
-		"layer":         w.declarer("layer", []string{"name", "base", "steps?", "command?"}, w.makeLayer),
+		"layer":         w.declarer("layer", layerParams, w.makeLayer),
 		"task":          w.declarer("task", taskParams, w.makeTask),
 		"index":         w.declarer("index", []string{"name", "layer", "platforms?"}, w.makeIndex),
 		"add":           track(starlark.NewBuiltin("add", w.newAdd)),
@@ -796,12 +799,13 @@ func (w *workspace) makeLayer(
 ) (string, any, error) {
 	var name string
 	var base starlark.Value
-	var steps, command *starlark.List
+	var steps, command, entrypoint *starlark.List
 	if err := starlark.UnpackArgs(fn.Name(), args, kwargs,
 		"name", &name,
 		"base", &base,
 		"steps?", &steps,
 		"command?", &command,
+		"entrypoint?", &entrypoint,
 	); err != nil {
 		return "", nil, err
 	}
@@ -813,6 +817,13 @@ func (w *workspace) makeLayer(
 	}
 	if s.command, err = stringList(fn.Name(), "command", command); err != nil {
 		return "", nil, err
+	}
+	if entrypoint != nil {
+		list, err := stringList(fn.Name(), "entrypoint", entrypoint)
+		if err != nil {
+			return "", nil, err
+		}
+		s.entrypoint = &list
 	}
 	if s.baseRef, err = w.makeBase(c, fn, base); err != nil {
 		return "", nil, err
