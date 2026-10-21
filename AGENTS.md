@@ -14,6 +14,7 @@ Read the routes relevant to the change before editing.
 | Cache identity, epochs, pruning | [.agents/kb/storage.md](.agents/kb/storage.md) |
 | Concurrency, ownership, trace transport | [.agents/kb/concurrency-model.md](.agents/kb/concurrency-model.md) |
 | Remote execution environment, `remote/`, its Helm chart and published image | [.agents/kb/remote-environment.md](.agents/kb/remote-environment.md) |
+| Releases, `release.yml`, `install.sh` | [.agents/kb/remote-environment.md](.agents/kb/remote-environment.md#releases) |
 | Root startup / `main.go` | [doc.go](doc.go) |
 | `internal/api/` | [internal/api/doc.go](internal/api/doc.go) |
 | `internal/cli/` | [internal/cli/doc.go](internal/cli/doc.go) |

@@ -111,31 +111,56 @@ the kubelet starts it again in the same pod, as Docker's restart policy does.
 A worker's cgroups are seen from its own namespace, `kubectl exec <pod> -- nsenter -t 1 -C -m ls /sys/fs/cgroup/vamos`,
 since `kubectl exec` enters the container's other namespaces but not that one.
 
-## Published image
+## Releases
 
 The chart's default image is `ghcr.io/topher-the-geek/vamos`,
 which the [release workflow](../../.github/workflows/release.yml) publishes as an index for `linux/amd64` and `linux/arm64`,
 since developers and clusters run both.
 It runs only when started by hand, never on a push or pull request,
 because each run builds the Dockerfile twice and a cluster should take a new image deliberately:
-start it from the Actions tab, or with `gh workflow run release.yml --ref <branch> -f tag=<tag>`.
-Each run tags the index `sha-<commit>` besides the requested tag, which defaults to `latest`.
+start it from the Actions tab, or with `gh workflow run release.yml --ref <branch> -f tag=<version>`.
+The version is required, such as `0.1.0` or `0.2.0-rc.1`, and a version already tagged is refused before any build,
+since a release is never replaced.
+Each run tags the index with the version and `sha-<commit>`, and a version without a suffix also tags it `latest`;
+then it creates the GitHub Release `v<version>` at the commit, the latest release unless the version is a prerelease.
+The git tag has the `v` that Go module versions have; the image tag has none, as image tags usually don't.
+The Dockerfile's `VERSION` argument stamps the version, with the `v`, into the binary, which `vamos --version` reports,
+since the build context has no git metadata for the build info to record.
 
 Each platform builds natively on a runner of its architecture, `ubuntu-24.04` and `ubuntu-24.04-arm`,
-and pushes its image by digest; a final job tags the index of both.
+and pushes its image by digest; the `merge` job tags the index of both, and the `release` job then tags the commit.
 Building both on one runner was rejected: buildah's namespace setup needs cgo,
 so the binary can't be cross-compiled without a cross toolchain, and under QEMU the Go build is many times slower.
 
-The image is also how vamos is installed: a project's devcontainer copies `/usr/local/bin/vamos` out of it,
-as the [tutorial](../../docs/tutorial.md#in-your-projects-devcontainer) shows, so the binary must run outside Fedora.
+The release's assets are each platform's binary, `vamos-linux-amd64` and `vamos-linux-arm64`, plain executables
+from the Dockerfile's `binary` stage, which the build cache makes the same as the image's;
+[install.sh](../../install.sh), with the release's version as its default;
+and `SHA256SUMS` for all three, which `install.sh` checks the binary against.
+`install.sh` is the way to install vamos, as the [tutorial](../../docs/tutorial.md#in-your-projects-devcontainer) shows:
+in a Dockerfile from the release's URL, which pins that release, or on a machine from `releases/latest/download`.
+It installs no packages, so that a Dockerfile keeps them in its own package step:
+it reports what vamos needs and the system lacks, with the `apt-get` or `dnf` command to install it,
+then fails once vamos is installed, so that a Dockerfile missing a package stops at the install rather than at the
+first build; `--allow-missing`, or `VAMOS_ALLOW_MISSING=1`, lets it succeed.
+It fails before installing for what it can't install vamos without: Linux, amd64 or arm64, glibc, root or `sudo`,
+`curl` or `wget`, and a matching checksum.
+`VAMOS_RELEASE_URL` replaces the release's download URL, which lets the smoke test install a binary not yet released.
+
+The binary must run outside Fedora.
 The Dockerfile builds it on Debian 12, whose glibc 2.36 is older than Ubuntu 24.04's,
 with the `containers_image_openpgp` and `exclude_graphdriver_btrfs` tags, so it links no C library but glibc.
+The newest glibc symbol it needs is from 2.34, the minimum that `install.sh` checks and the tutorial states;
+each build job checks the binary against `install.sh`'s minimum, so a newer need fails the release.
 A static build was rejected: with cgo disabled, buildah's chroot isolation fails to start a `run` step.
 The devcontainer's own builds, and the test suite, keep gpgme and btrfs, so a change to signature checking
 or storage drivers needs a release image smoke check as well.
-Before its digest is recorded, each platform's build job installs the binary with the tutorial's devcontainer
-Dockerfile, the only `dockerfile` block there, and builds the TypeScript MCP example with it;
+Before its digest is recorded, each platform's build job installs its binary with the working tree's `install.sh`
+in the tutorial's devcontainer Dockerfile, the only `dockerfile` block there, its `ADD` of the release's script
+replaced by a local copy, and builds the TypeScript MCP example with it;
+it also checks that `install.sh` fails in a plain Ubuntu 24.04 without the packages, unless given `--allow-missing`;
 it runs on the native runner because under emulation buildah can't re-execute itself.
-The workflow pushes with the job's `GITHUB_TOKEN`, so it needs no stored credential.
+[Smoke check 11](smoke-checks.md) runs the same on the devcontainer's platform.
+The image is still published with the binary at `/usr/local/bin/vamos`, which a Dockerfile may copy out instead.
+The workflow pushes and releases with the job's `GITHUB_TOKEN`, so it needs no stored credential.
 Pull it locally with `docker pull ghcr.io/topher-the-geek/vamos:<tag>`;
 a cluster needs the package to be public, or a `kubernetes.io/dockerconfigjson` Secret in `imagePullSecrets`.
