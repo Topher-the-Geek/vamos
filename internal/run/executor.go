@@ -187,7 +187,11 @@ func (l *Local) Close() error {
 	defer l.mu.Unlock()
 	var errs []error
 	if l.store != nil {
-		if _, err := l.store.Shutdown(false); err != nil {
+		// Shutdown reports a layer used if any in the store is mounted, by this process or another sharing the store,
+		// such as a second vamos building at the same time. This executor's jobs have removed their own containers,
+		// and reported a failure to, so a layer still mounted is another's, and that is no failure.
+		// force must stay false: it would unmount every mounted layer in the store, under another's running build.
+		if _, err := l.store.Shutdown(false); err != nil && !errors.Is(err, storage.ErrLayerUsedByContainer) {
 			errs = append(errs, fmt.Errorf("shutting down the container store: %w", err))
 		}
 		l.store = nil

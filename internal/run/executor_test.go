@@ -174,3 +174,29 @@ func TestCloseCancelsRunningJobs(t *testing.T) {
 		t.Errorf("a prune after Close = %v, want %v", err, sched.ErrClosed)
 	}
 }
+
+// TestCloseLeavesOthersMounts checks that Close neither warns about nor unmounts a layer that something else mounted
+// in the same container store, as another vamos building at the same time does: the store records mounts for every
+// process that shares it, and they are that process's to unmount.
+func TestCloseLeavesOthersMounts(t *testing.T) {
+	testenv.RequireBuildah(t)
+	stores := testenv.PrivateStores(t)
+	// The store is one per process, so this stands for another process's store; its mounts are shared all the same.
+	other, err := storage.GetStore(stores.Options)
+	testenv.Must(t, err)
+	layer, err := other.CreateLayer("", "", nil, "", true, nil)
+	testenv.Must(t, err)
+	_, err = other.Mount(layer.ID, "")
+	testenv.Must(t, err)
+	defer other.Unmount(layer.ID, true)
+
+	l, err := NewLocal(stores.Options)
+	testenv.Must(t, err)
+	testenv.Must(t, l.open())
+	if err := l.Close(); err != nil {
+		t.Errorf("Close with another's layer mounted = %v, want nil", err)
+	}
+	if mounted, err := other.Mounted(layer.ID); err != nil || mounted == 0 {
+		t.Errorf("another's layer after Close is mounted %d times, %v; want it left mounted", mounted, err)
+	}
+}
