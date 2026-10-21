@@ -17,6 +17,8 @@
 // hidden attempt runs one attempt from standard input, as a worker's subprocess.
 // UsesContainerStore tells main, before the command runs, whether to re-execute in a user namespace for container
 // storage: a coordinator opens none, and neither do help and --version.
+// --secret values are read only when a build runs, into api.GraphRequest.Secrets, and are refused with
+// --coordinator before it is reached.
 // The graph and source trees are stored before the executor is called;
 // a build is a job, submitted and watched through api.Executor by watchJob, which also cancels it on Ctrl-C,
 // and renders its failure against the graph; a gap in its events is warned about and makes the trace incomplete.

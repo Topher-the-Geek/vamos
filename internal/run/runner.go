@@ -348,7 +348,9 @@ func (r *localRunner) start(
 	if err != nil {
 		return nil, err
 	}
-	st := &targetState{runner: r, builder: builder, log: log, events: ev, buildEnv: map[string]string{}}
+	st := &targetState{
+		runner: r, builder: builder, log: log, events: ev, buildEnv: map[string]string{}, secrets: req.Secrets,
+	}
 	if a.Kind == sched.KindLayer {
 		if err := setPlatform(builder, a); err != nil {
 			return st, err

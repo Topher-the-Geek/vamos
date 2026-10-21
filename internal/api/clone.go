@@ -60,6 +60,13 @@ func (r ExportRequest) Clone() ExportRequest {
 func (r GraphRequest) Clone() GraphRequest {
 	r.Platform = clonePlatform(r.Platform)
 	r.Trace = clonePointer(r.Trace)
+	if r.Secrets != nil {
+		secrets := make(map[string][]byte, len(r.Secrets))
+		for id, value := range r.Secrets {
+			secrets[id] = slices.Clone(value)
+		}
+		r.Secrets = secrets
+	}
 	return r
 }
 

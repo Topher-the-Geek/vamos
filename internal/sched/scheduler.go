@@ -51,6 +51,10 @@ type Request struct {
 	// Permitted says the job permits emulated execution; a job without it may attach to an emulating attempt in
 	// flight, but starts none, and fails the target with the mismatch message instead.
 	Permitted bool `json:"permitted,omitempty"`
+	// Secrets are the values of the secrets that the action's run() steps are given, by ID.
+	// They are never encoded, so that no wire, record or trace carries them: only a Runner in the process that the
+	// job runs in, as the local executor's does, has them, and any other fails the step that needs one.
+	Secrets map[string][]byte `json:"-"`
 }
 
 // ImagePlatform returns the platform of the image the action's run() steps run in: Platform, or for an action on
@@ -232,6 +236,9 @@ type Options struct {
 	// OptIn makes emulation need the permission; without it the executor emulates as its binfmt handlers let it,
 	// as local builds always have.
 	OptIn bool
+	// Secrets are the values of the secrets the build was given, by ID, as api.GraphRequest.Secrets has them;
+	// each action's request carries those its steps use.
+	Secrets map[string][]byte
 }
 
 // Scheduler walks a graph in dependency order, resolving each node's inputs, computing its key,
@@ -708,12 +715,29 @@ func (s *Scheduler) prepareTarget(ref graph.Ref, why string) func(context.Contex
 		Force:     why != "",
 		Rewrite:   maps.Clone(s.corrupt), // the Runner's own, as a wire would give it
 		Permitted: s.opts.Emulate || !s.opts.OptIn,
+		Secrets:   s.secrets(a),
 	}
 	req.Emulated = s.emulates(&req) != ""
 	return func(ctx context.Context) completion {
 		result, err := s.runCached(ctx, ref, req, base, why)
 		return completion{ref: ref, result: result, err: err}
 	}
+}
+
+// secrets returns the values of the secrets that a's steps use, of those the build was given, or nil if they use none.
+func (s *Scheduler) secrets(a *Action) map[string][]byte {
+	var values map[string][]byte
+	for _, in := range a.Steps {
+		for _, secret := range in.Secrets {
+			if value, ok := s.opts.Secrets[secret.ID]; ok {
+				if values == nil {
+					values = map[string][]byte{}
+				}
+				values[secret.ID] = value
+			}
+		}
+	}
+	return values
 }
 
 // runCached makes the result of the layer or task ref, whose request is req and whose base is base,

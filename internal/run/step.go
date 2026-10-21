@@ -8,6 +8,7 @@ import (
 	"maps"
 	"os"
 	"path"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -18,6 +19,7 @@ import (
 
 	"github.com/containerd/platforms"
 	"go.podman.io/buildah"
+	"go.podman.io/buildah/define"
 )
 
 // targetState is a target being built, which its steps act on in turn.
@@ -29,6 +31,7 @@ type targetState struct {
 	events     sched.Output      // where what the target prints goes
 	buildEnv   map[string]string // set by build_env(), and not since by env()
 	emulated   bool              // a run() step ran under emulation, the image being for another platform
+	secrets    map[string][]byte // the values of the secrets that the target's run() steps are given, by ID
 }
 
 // lookup returns a function that gives the value of a variable as a run in the target would see it now:
@@ -55,6 +58,49 @@ func (st *targetState) expandPath(param, p string) (string, error) {
 		return "", fmt.Errorf("%s %q is %q, which must be an absolute path", param, p, expanded)
 	}
 	return path.Clean(expanded), nil
+}
+
+// giveSecrets gives a run() step its secrets, through options, as buildah's secret mounts: each value is written to
+// a file of its own, readable only by this process, in a directory that it returns, for the caller to remove once the
+// step has run, even on failure. buildah copies it into the container's own directory, which no image includes,
+// and mounts it at the secret's file, or reads it into the secret's variable, for the step alone.
+func (st *targetState) giveSecrets(secrets []graph.Secret, options *buildah.RunOptions) (string, error) {
+	dir, err := os.MkdirTemp("", "vamos-secrets-")
+	if err != nil {
+		return "", err
+	}
+	options.Secrets = map[string]define.Secret{}
+	for _, secret := range secrets {
+		value, ok := st.secrets[secret.ID]
+		if !ok {
+			return dir, fmt.Errorf("secret %q isn't given here: secrets reach only an executor in the client's "+
+				"process, never a coordinator or its workers", secret.ID)
+		}
+		if _, ok := options.Secrets[secret.ID]; !ok {
+			file := filepath.Join(dir, secret.ID)
+			if err := os.WriteFile(file, value, 0o600); err != nil {
+				return dir, err
+			}
+			options.Secrets[secret.ID] = define.Secret{ID: secret.ID, Source: file, SourceType: "file"}
+		}
+		mount := "type=secret,id=" + secret.ID
+		if secret.Env != "" {
+			mount += ",env=" + secret.Env
+		} else {
+			mount += ",target=" + secret.File
+		}
+		options.RunMounts = append(options.RunMounts, mount)
+	}
+	return dir, nil
+}
+
+// secretIDs returns the IDs of secrets, for a trace, which never holds their values.
+func secretIDs(secrets []graph.Secret) []string {
+	ids := make([]string, len(secrets))
+	for i, secret := range secrets {
+		ids[i] = secret.ID
+	}
+	return ids
 }
 
 // tracedApply applies the step in, as a span of ctx's trace, named display, as the BUILD file wrote the step.
@@ -97,13 +143,24 @@ func (st *targetState) apply(ctx context.Context, in sched.Step) error {
 			defer func() { span.Set("stdout bytes", outCount.n, "stderr bytes", errCount.n) }()
 			stdout, stderr = io.MultiWriter(&outCount, stdout), io.MultiWriter(&errCount, stderr)
 		}
-		return st.builder.Run(in.Argv, buildah.RunOptions{
+		options := buildah.RunOptions{
 			Isolation: st.runner.isolation,
 			Terminal:  buildah.WithoutTerminal,
 			Env:       env,
 			Stdout:    stdout,
 			Stderr:    stderr,
-		})
+		}
+		if len(in.Secrets) > 0 {
+			dir, err := st.giveSecrets(in.Secrets, &options)
+			if dir != "" {
+				defer os.RemoveAll(dir)
+			}
+			if err != nil {
+				return err
+			}
+			span.Set("secrets", secretIDs(in.Secrets))
+		}
+		return st.builder.Run(in.Argv, options)
 
 	case graph.OpEnv, graph.OpBuildEnv:
 		// As in a Dockerfile's ENV, every value refers to the variables as they were before the call.

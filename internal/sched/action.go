@@ -13,7 +13,7 @@ import (
 
 // ActionVersion changes whenever what a key covers, or how a target is built, changes,
 // so that results built the old way aren't reused.
-const ActionVersion = 9 // 9: a layer's entrypoint
+const ActionVersion = 9 // 9: a layer's entrypoint, and run() steps' secrets
 
 // The kinds of Action.
 const (
@@ -58,8 +58,10 @@ type Step struct {
 	Owner string      `json:"owner,omitempty"` // add
 	Group string      `json:"group,omitempty"` // add
 	Argv  []string    `json:"argv,omitempty"`  // run
-	Vars  []string    `json:"vars,omitempty"`  // env and build_env: NAME=value, sorted
-	Dir   string      `json:"dir,omitempty"`   // workdir
+	// Secrets are a run step's, by ID and how it is given, never by value, so that a new value builds nothing anew.
+	Secrets []graph.Secret `json:"secrets,omitempty"`
+	Vars    []string       `json:"vars,omitempty"` // env and build_env: NAME=value, sorted
+	Dir     string         `json:"dir,omitempty"`  // workdir
 }
 
 // Key returns a's key in the action cache.
@@ -78,7 +80,7 @@ func StepOf(in graph.Step) Step {
 	case graph.OpAdd:
 		return Step{Op: in.Op, Dest: in.Dest, Owner: in.Owner, Group: in.Group}
 	case graph.OpRun:
-		return Step{Op: in.Op, Argv: in.Argv}
+		return Step{Op: in.Op, Argv: in.Argv, Secrets: in.Secrets}
 	case graph.OpEnv, graph.OpBuildEnv:
 		return Step{Op: in.Op, Vars: slices.Sorted(slices.Values(in.Vars))}
 	case graph.OpWorkdir:

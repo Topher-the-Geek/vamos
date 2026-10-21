@@ -144,6 +144,10 @@ type GraphRequest struct {
 	// a submission of an earlier generation than the executor's is refused, since what it captured may be gone.
 	// Zero asks for no check.
 	Generation uint64 `json:"generation,omitempty"`
+	// Secrets are the values of the secrets that the graph's run() steps are given, by ID.
+	// They are never encoded, so no transport carries them: only an executor in the client's process gets them,
+	// and a client refuses to send a build that uses one elsewhere.
+	Secrets map[string][]byte `json:"-"`
 }
 
 // JobID is the handle of a job that an executor accepted.

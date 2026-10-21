@@ -7,6 +7,7 @@ import (
 
 	"github.com/Topher-the-Geek/vamos/internal/cache"
 	"github.com/Topher-the-Geek/vamos/internal/fileset"
+	"github.com/Topher-the-Geek/vamos/internal/graph"
 	"github.com/Topher-the-Geek/vamos/internal/testenv"
 
 	"github.com/opencontainers/go-digest"
@@ -32,7 +33,9 @@ func TestActionKeyStable(t *testing.T) {
 		Platform: "linux/arm64",
 		Steps: []Step{
 			{Op: "add", Files: &files, Epoch: 7, Dest: "/app", Owner: "app", Group: "staff"},
-			{Op: "run", Argv: []string{"make", "all"}},
+			{Op: "run", Argv: []string{"make", "all"}, Secrets: []graph.Secret{
+				{ID: "token", Env: "TOKEN"}, {ID: "key", File: "/run/secrets/key"},
+			}},
 			{Op: "env", Vars: []string{"A=1", "B=2"}},
 			{Op: "workdir", Dir: "/app"},
 		},
@@ -43,7 +46,8 @@ func TestActionKeyStable(t *testing.T) {
 	}
 	want := `{"version":9,"kind":"layer","base":"0123abcd","platform":"linux/arm64","steps":[` +
 		`{"op":"add","files":{"digest":"` + files.Digest.String() + `","size":5},"epoch":7,"dest":"/app",` +
-		`"owner":"app","group":"staff"},{"op":"run","argv":["make","all"]},{"op":"env","vars":["A=1","B=2"]},` +
+		`"owner":"app","group":"staff"},{"op":"run","argv":["make","all"],"secrets":[{"id":"token","env":"TOKEN"},` +
+		`{"id":"key","file":"/run/secrets/key"}]},{"op":"env","vars":["A=1","B=2"]},` +
 		`{"op":"workdir","dir":"/app"}],"command":["/app/server"],"entrypoint":["java","-jar"],"source":"/out",` +
 		`"output":{"include":["dist"],` +
 		`"exclude":["dist/*.map"],"mode_mask":493,"max_file_count":10000,"max_file_size":104857600,` +
@@ -75,6 +79,10 @@ func TestActionKeys(t *testing.T) {
 	if b.Key() == key {
 		t.Errorf("actions with steps in a different order have the same key")
 	}
+	b.Steps = []Step{a.Steps[0], {Op: "run", Argv: []string{"true"}, Secrets: []graph.Secret{{ID: "t", Env: "T"}}}}
+	if b.Key() == key {
+		t.Errorf("actions whose steps are given different secrets have the same key")
+	}
 }
 
 // TestEntrypointKeys checks that a layer's key tells an entrypoint left out, which keeps the base's, from an empty one,
@@ -92,5 +100,15 @@ func TestEntrypointKeys(t *testing.T) {
 	}
 	if data, _ := json.Marshal(a); strings.Contains(string(data), "entrypoint") {
 		t.Errorf("an action without an entrypoint encodes as %s, which names one", data)
+	}
+}
+
+// TestRequestSecretsNotEncoded checks that a request's secret values are never encoded, as for a worker's attempt.
+func TestRequestSecretsNotEncoded(t *testing.T) {
+	req := Request{Action: &Action{Version: ActionVersion}, Secrets: map[string][]byte{"token": []byte("hunter2")}}
+	data, err := json.Marshal(req)
+	testenv.Must(t, err)
+	if strings.Contains(string(data), "hunter2") || strings.Contains(string(data), "token") {
+		t.Errorf("a request encodes as %s, which holds its secrets", data)
 	}
 }
