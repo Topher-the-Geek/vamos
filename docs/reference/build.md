@@ -114,11 +114,29 @@ layer(
 | `base` | A pull or layer reference, or `"scratch"` | Required |
 | `steps` | Steps applied in order | `[]` |
 | `command` | Image's default command as an argument list | Inherited from the base |
+| `entrypoint` | Image's entrypoint as an argument list | Inherited from the base |
 
 A layer keeps the base's files and runtime configuration and applies its own changes.
 `command` sets the image's command; it does not run while building.
-It follows the inherited image entrypoint, if one exists, as Docker's `CMD` does.
+It follows the entrypoint, if one exists, as Docker's `CMD` does.
 An omitted or empty `command` leaves the inherited command in place.
+
+`entrypoint` sets the program the image runs, as Docker's `ENTRYPOINT` does:
+`docker run` arguments are appended to it rather than replacing it.
+
+```python
+layer(
+    name = "server",
+    base = "jre",
+    steps = [add("jar", "/app")],
+    entrypoint = ["java", "-jar", "/app/server.jar"],
+)
+```
+
+`docker run server --port 9` then runs `java -jar /app/server.jar --port 9`.
+As in a Dockerfile, giving `entrypoint` drops the inherited command, which would otherwise become its arguments;
+give `command` as well for default arguments.
+`entrypoint = []` removes the inherited entrypoint, and an omitted `entrypoint` keeps it.
 A layer's base must have the same platform as the layer.
 
 ## `index()`

@@ -13,7 +13,7 @@ import (
 
 // ActionVersion changes whenever what a key covers, or how a target is built, changes,
 // so that results built the old way aren't reused.
-const ActionVersion = 8 // 8: results record where their image is, by location
+const ActionVersion = 9 // 9: a layer's entrypoint
 
 // The kinds of Action.
 const (
@@ -38,12 +38,14 @@ type Action struct {
 	Platform string `json:"platform,omitempty"`
 	// Image is the tag a resolve resolves, and Index the index it resolved to earlier in the job, if it did,
 	// so that every platform's image of one tag comes from one index even if the tag moves meanwhile.
-	Image   string             `json:"image,omitempty"`
-	Index   digest.Digest      `json:"index,omitempty"`
-	Steps   []Step             `json:"steps,omitempty"`   // in the order applied
-	Command []string           `json:"command,omitempty"` // a layer's default command
-	Source  string             `json:"source,omitempty"`  // a task's directory of output
-	Output  *fileset.Selection `json:"output,omitempty"`  // a task's output, within source
+	Image   string        `json:"image,omitempty"`
+	Index   digest.Digest `json:"index,omitempty"`
+	Steps   []Step        `json:"steps,omitempty"`   // in the order applied
+	Command []string      `json:"command,omitempty"` // a layer's default command
+	// Entrypoint is a layer's, as graph.Layer.Entrypoint says: nil keeps the base's, and an empty one sets none.
+	Entrypoint *[]string          `json:"entrypoint,omitempty"`
+	Source     string             `json:"source,omitempty"` // a task's directory of output
+	Output     *fileset.Selection `json:"output,omitempty"` // a task's output, within source
 }
 
 // Step is one step of an Action.

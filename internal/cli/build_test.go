@@ -18,8 +18,11 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/Topher-the-Geek/vamos/internal/testenv"
+
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/registry"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
@@ -1407,4 +1410,47 @@ func TestPullImageUnreachable(t *testing.T) {
 		t.Errorf("error = %q, want no hint about the name", r.err)
 	}
 	assertNoFiles(t, out)
+}
+
+// TestEntrypoint checks that a layer's entrypoint replaces its base's, and the base's command too unless it gives
+// one, as a Dockerfile's ENTRYPOINT does; that an empty one removes it; and that leaving it out keeps the base's.
+func TestEntrypoint(t *testing.T) {
+	requireBuildah(t)
+	fsys := project(t, map[string]string{"BUILD": pullBusybox + `
+layer(name="server", base="busybox", entrypoint=["java", "-jar", "server.jar"])
+layer(name="both", base="busybox", entrypoint=["echo"], command=["hello"])
+layer(name="kept", base="server", command=["--port", "9"])
+layer(name="none", base="server", entrypoint=[])
+`})
+	tests := []struct {
+		target          string
+		entrypoint, cmd []string
+	}{
+		{"server", []string{"java", "-jar", "server.jar"}, nil}, // busybox's command, sh, is dropped
+		{"both", []string{"echo"}, []string{"hello"}},
+		{"kept", []string{"java", "-jar", "server.jar"}, []string{"--port", "9"}},
+		{"none", nil, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.target, func(t *testing.T) {
+			out := filepath.Join(t.TempDir(), "app.tar")
+			vamos(t, fsys, "save", tt.target, out, "--tag", "app:test", "-C", projectDir).succeeds(t)
+			config, err := savedImage(t, out, "app:test").ConfigFile()
+			testenv.Must(t, err)
+			if !slices.Equal(config.Config.Entrypoint, tt.entrypoint) || !slices.Equal(config.Config.Cmd, tt.cmd) {
+				t.Errorf("entrypoint %q and command %q, want %q and %q", config.Config.Entrypoint, config.Config.Cmd,
+					tt.entrypoint, tt.cmd)
+			}
+		})
+	}
+}
+
+// savedImage reads the image tagged tag from the tarball at path, as save wrote it.
+func savedImage(t *testing.T, path, tag string) v1.Image {
+	t.Helper()
+	ref, err := name.NewTag(tag)
+	testenv.Must(t, err)
+	img, err := tarball.ImageFromPath(path, &ref)
+	testenv.Must(t, err)
+	return img
 }

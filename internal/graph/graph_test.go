@@ -58,7 +58,8 @@ func testGraph(t *testing.T) *Graph {
 					{Op: OpBuildEnv, Display: `build_env(B="$A")`, Vars: []string{"B=$A"}},
 					{Op: OpWorkdir, Display: `workdir("/app")`, Dir: "/app"},
 				},
-				Command: []string{"/app/server"},
+				Command:    []string{"/app/server"},
+				Entrypoint: &[]string{"/bin/run"},
 			}},
 			{Label: "all", Desc: `index "all"`, Index: &Index{Manifests: []Ref{3}}},
 		},
@@ -154,6 +155,11 @@ func TestGraphValidate(t *testing.T) {
 			name:   "a field of another op",
 			change: func(g *Graph) { g.Nodes[2].Task.Steps[1].Dest = "/x" },
 			want:   "it sets fields that run doesn't use",
+		},
+		{
+			name:   "NUL in an entrypoint",
+			change: func(g *Graph) { *g.Nodes[3].Layer.Entrypoint = []string{"a\x00"} },
+			want:   "NUL",
 		},
 		{
 			name:   "an empty argv",

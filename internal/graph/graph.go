@@ -18,7 +18,7 @@ import (
 
 // Version changes whenever what a graph means changes,
 // so that a client and an executor of different versions refuse each other's graphs rather than build something else.
-const Version = 2
+const Version = 3 // 3: a layer's entrypoint
 
 // Graph is everything a build runs:
 // each target in each configuration it's needed in, in an order where each node comes after the nodes it uses.
@@ -80,6 +80,9 @@ type Layer struct {
 	Platform string   `json:"platform"` // its image's
 	Steps    []Step   `json:"steps,omitempty"`
 	Command  []string `json:"command,omitempty"`
+	// Entrypoint, if set, replaces the base's entrypoint, even with none, and its command if Command is empty,
+	// as a Dockerfile's ENTRYPOINT does; nil keeps both.
+	Entrypoint *[]string `json:"entrypoint,omitempty"`
 }
 
 // Task applies steps to a base, keeps the files that Output selects, if any, and discards its image.
@@ -308,6 +311,11 @@ func (g *Graph) validateNode(ref Ref) error {
 		}
 		if err := noNUL(l.Command...); err != nil {
 			return err
+		}
+		if l.Entrypoint != nil {
+			if err := noNUL(*l.Entrypoint...); err != nil {
+				return err
+			}
 		}
 		return g.checkSteps(ref, l.Steps)
 

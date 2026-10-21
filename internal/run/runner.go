@@ -307,7 +307,7 @@ func (r *localRunner) publish(ctx context.Context, storeID, id string) (_ cache.
 
 // start makes a container for req, a layer or task, from its base image, mounts it,
 // and applies its steps, recording what they print in log and passing it on to ev.
-// A layer's default command is set too.
+// A layer's entrypoint and default command are set too.
 // The caller must delete the returned target's container, which is returned, to be deleted, even on failure,
 // once it exists.
 func (r *localRunner) start(
@@ -382,8 +382,19 @@ func (r *localRunner) start(
 		return st, err
 	}
 
-	if a.Kind == sched.KindLayer && len(a.Command) > 0 {
-		builder.SetCmd(a.Command)
+	if a.Kind == sched.KindLayer {
+		if a.Entrypoint != nil {
+			entrypoint := *a.Entrypoint
+			if len(entrypoint) == 0 {
+				entrypoint = nil // none, as an image that never had one has
+			}
+			builder.SetEntrypoint(entrypoint)
+			// As a Dockerfile's ENTRYPOINT does, it drops the base's command, which would become its arguments.
+			builder.SetCmd(nil)
+		}
+		if len(a.Command) > 0 {
+			builder.SetCmd(a.Command)
+		}
 	}
 	return st, nil
 }
