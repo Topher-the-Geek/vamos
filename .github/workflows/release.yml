@@ -106,16 +106,20 @@ jobs:
           context="$RUNNER_TEMP/devcontainer"
           mkdir "$context"
           cp -r install.sh "$RUNNER_TEMP/dist" "$context/"
+          cp install.sh "$context/dist/"
           (cd "$context/dist" && sha256sum vamos-linux-* > SHA256SUMS)
           awk '/^```dockerfile/ { f = 1; next } /^```/ { f = 0 } f' docs/tutorial.md \
-            | sed 's#^ADD https://github.com/Topher-the-Geek/vamos/releases/download/[^ ]* /tmp/vamos-install.sh$#COPY install.sh /tmp/vamos-install.sh\nCOPY dist /tmp/dist\nENV VAMOS_RELEASE_URL=file:///tmp/dist#' \
+            | sed 's#^RUN curl -fsSL -o /tmp/vamos-install.sh https://github.com/Topher-the-Geek/vamos/releases/download/[^ ]*/install.sh \\$#COPY dist /tmp/dist\nENV VAMOS_RELEASE_URL=file:///tmp/dist\nRUN curl -fsSL -o /tmp/vamos-install.sh file:///tmp/dist/install.sh \\#' \
             > "$context/Dockerfile"
-          grep -qx 'COPY dist /tmp/dist' "$context/Dockerfile"
+          grep -qF 'file:///tmp/dist/install.sh' "$context/Dockerfile"
           docker buildx build --load -t vamos-devcontainer "$context"
           docker run --rm vamos-devcontainer vamos --version | grep -qx "vamos version v$TAG"
-          # Without the packages, install.sh installs vamos and fails, unless --allow-missing.
-          docker run --rm -v "$context:/w:ro" -e VAMOS_RELEASE_URL=file:///w/dist ubuntu:24.04 sh -c '
-            apt-get -qq update && apt-get -qq install -y curl >/dev/null
+          # Without a CA bundle, install.sh fails before downloading from GitHub, naming ca-certificates;
+          # without the packages, it installs vamos and fails, unless --allow-missing.
+          docker run --rm -v "$context:/w:ro" -e VAMOS_RELEASE_URL=file:///w/dist ubuntu:24.04 sh -ec '
+            apt-get -qq update && apt-get -qq install -y --no-install-recommends curl >/dev/null
+            env -u VAMOS_RELEASE_URL sh /w/install.sh 2>&1 | tee /dev/stderr | grep -q "needs a CA bundle"
+            apt-get -qq install -y ca-certificates >/dev/null
             if sh /w/install.sh; then echo "install.sh succeeded without the packages" >&2; exit 1; fi
             test -x /usr/local/bin/vamos && sh /w/install.sh --allow-missing'
           docker run --rm --privileged -v vamos-storage:/var/lib/containers \

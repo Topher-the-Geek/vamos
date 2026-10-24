@@ -13,7 +13,8 @@
 set -eu
 
 repository=https://github.com/Topher-the-Geek/vamos
-# The release workflow replaces "latest" on the next line with the release's version in the copy it attaches.
+# The default on the next line is latest in the repository; the release workflow sets it to the release's version
+# in the copy it attaches.
 version=${VAMOS_VERSION:-latest}
 dir=${VAMOS_INSTALL_DIR:-/usr/local/bin}
 allow_missing=${VAMOS_ALLOW_MISSING:-}
@@ -23,6 +24,39 @@ glibc_minimum=2.34 # the newest symbol version the release binary links; the rel
 die() {
 	echo "install.sh: $*" >&2
 	exit 1
+}
+
+# Reports whether there is a CA bundle where Debian's, Fedora's or RHEL's ca-certificates put it,
+# where SSL_CERT_FILE, which curl and vamos both read, says it is, or at any path given.
+has_ca_bundle() {
+	for f in /etc/ssl/certs/ca-certificates.crt /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem \
+		/etc/pki/tls/certs/ca-bundle.crt "${SSL_CERT_FILE:-}" "$@"; do
+		[ -n "$f" ] && [ -e "$f" ] && return 0
+	done
+	return 1
+}
+
+# Sets packages to the given packages, each after a space and named as Fedora names them, under this distribution's
+# names, and fix to the command that installs them, or to nothing on a distribution it doesn't know.
+system_packages() {
+	# shellcheck source=/dev/null
+	ids=$( (. /etc/os-release && echo "$ID ${ID_LIKE:-}") 2>/dev/null || true)
+	packages=$1
+	case " $ids " in
+	*" debian "* | *" ubuntu "*)
+		packages=$(echo "$1" | sed 's/ containers-common/ golang-github-containers-common/')
+		fix="apt-get update && ${sudo:+sudo }apt-get install -y --no-install-recommends$packages"
+		;;
+	*" fedora "* | *" rhel "*) fix="dnf install -y$1" ;;
+	*) fix= ;;
+	esac
+	fix=${fix:+${sudo:+sudo }$fix}
+}
+
+# Fails for a download that failed, suggesting a missing release only when the server answered 404.
+download_failed() {
+	[ "${http:-}" != 404 ] || die "$1 doesn't exist; is there a release $version?"
+	die "can't download $1"
 }
 
 while [ $# -gt 0 ]; do
@@ -84,22 +118,37 @@ v[0-9]* | [0-9]*) url=${VAMOS_RELEASE_URL:-$repository/releases/download/v${vers
 *) die "\"$version\" isn't a version; give one such as 0.1.0, or latest" ;;
 esac
 
+# fetch sets http to the HTTP status where it can tell; -S shows curl's own reason for a failure.
 if command -v curl >/dev/null 2>&1; then
-	fetch() { curl -fsSL -o "$2" "$1"; }
+	fetch() { http=$(curl -fsSL -w '%{http_code}' -o "$2" "$1"); }
 elif command -v wget >/dev/null 2>&1; then
 	case $url in
 	file://*) die "wget can't fetch $url; install curl" ;;
 	esac
-	fetch() { wget -q -O "$2" "$1"; }
+	fetch() {
+		http=
+		wget -q -O "$2" "$1"
+	}
 else
 	die "downloading vamos needs curl or wget; install curl, for example with apt-get install -y curl"
 fi
 
+# apt-get install --no-install-recommends curl leaves the CA bundle out, and curl's failure wouldn't say so.
+case $url in
+https://*)
+	if ! has_ca_bundle "${CURL_CA_BUNDLE:-}"; then
+		system_packages " ca-certificates"
+		die "downloading vamos from $url needs a CA bundle, and this system has none;" \
+			"install ca-certificates${fix:+ with: $fix}"
+	fi
+	;;
+esac
+
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 asset=vamos-linux-$arch
-fetch "$url/$asset" "$tmp/$asset" || die "can't download $url/$asset; is there a release $version?"
-fetch "$url/SHA256SUMS" "$tmp/SHA256SUMS" || die "can't download $url/SHA256SUMS"
+fetch "$url/$asset" "$tmp/$asset" || download_failed "$url/$asset"
+fetch "$url/SHA256SUMS" "$tmp/SHA256SUMS" || download_failed "$url/SHA256SUMS"
 sum=$(sed -n "s/^\([0-9a-f]\{64\}\)  $asset\$/\1/p" "$tmp/SHA256SUMS")
 [ -n "$sum" ] || die "$url/SHA256SUMS has no checksum for $asset"
 actual=$(sha256sum "$tmp/$asset" | cut -d' ' -f1)
@@ -112,8 +161,7 @@ echo "Installed $installed at $dir/vamos."
 
 # Each check looks for what vamos uses, wherever the distribution's package puts it.
 missing=
-[ -e /etc/ssl/certs/ca-certificates.crt ] || [ -e /etc/pki/tls/certs/ca-bundle.crt ] ||
-	missing="$missing ca-certificates"
+has_ca_bundle || missing="$missing ca-certificates"
 [ -e /etc/containers/policy.json ] || missing="$missing containers-common"
 found=
 for d in /usr/local/libexec/podman /usr/local/lib/podman /usr/libexec/podman /usr/lib/podman; do
@@ -123,20 +171,10 @@ command -v netavark >/dev/null 2>&1 && found=1
 [ -n "$found" ] || missing="$missing netavark"
 
 if [ -n "$missing" ]; then
-	# shellcheck source=/dev/null
-	ids=$( (. /etc/os-release && echo "$ID ${ID_LIKE:-}") 2>/dev/null || true)
-	packages=$missing
-	case " $ids " in
-	*" debian "* | *" ubuntu "*)
-		packages=$(echo "$missing" | sed 's/ containers-common/ golang-github-containers-common/')
-		fix="apt-get update && ${sudo:+sudo }apt-get install -y --no-install-recommends$packages"
-		;;
-	*" fedora "* | *" rhel "*) fix="dnf install -y$missing" ;;
-	*) fix= ;;
-	esac
+	system_packages "$missing"
 	echo "vamos needs these packages, which aren't installed:$packages" >&2
 	if [ -n "$fix" ]; then
-		echo "Install them with: ${sudo:+sudo }$fix" >&2
+		echo "Install them with: $fix" >&2
 	else
 		echo "Install your distribution's packages of that name." >&2
 	fi

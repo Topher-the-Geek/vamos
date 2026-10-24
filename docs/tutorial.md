@@ -133,20 +133,24 @@ RUN apt-get update \
       netavark \
  && rm -rf /var/lib/apt/lists/*
 
-ADD https://github.com/Topher-the-Geek/vamos/releases/download/v0.1.0/install.sh /tmp/vamos-install.sh
-RUN sh /tmp/vamos-install.sh && rm /tmp/vamos-install.sh
+RUN curl -fsSL -o /tmp/vamos-install.sh https://github.com/Topher-the-Geek/vamos/releases/download/v0.1.0/install.sh \
+ && sh /tmp/vamos-install.sh \
+ && rm /tmp/vamos-install.sh
 
 # Run build steps with chroot isolation, so no OCI runtime is needed.
 ENV BUILDAH_ISOLATION=chroot
 ```
 
 Add the packages to your image's existing `apt-get install` step rather than a separate one;
-`install.sh` needs `curl`, or `wget`, to download the binary.
+`install.sh` needs `curl`, or `wget`, and `ca-certificates` to download the binary,
+and fails before downloading without them.
 It installs no packages itself: it reports any that vamos needs and the system lacks,
 with the `apt-get` or `dnf` command that installs them, and then fails, after installing vamos,
 so that a Dockerfile missing one stops there rather than at the first build.
 Give `--allow-missing`, or set `VAMOS_ALLOW_MISSING=1`, to install vamos without them.
 On Fedora they are `ca-certificates`, `containers-common` and `netavark`.
+One `RUN` downloads, runs and deletes the script, so no layer keeps it,
+and a failed download stops the build, which piping it to `sh` would hide.
 The release in the URL is the one installed; `releases/latest/download/install.sh` installs the latest release,
 and `VAMOS_VERSION` or `--version` choose another.
 To install vamos on a Linux machine of your own, run the script there; it uses `sudo` unless you are root:

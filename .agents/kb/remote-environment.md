@@ -138,12 +138,17 @@ from the Dockerfile's `binary` stage, which the build cache makes the same as th
 and `SHA256SUMS` for all three, which `install.sh` checks the binary against.
 `install.sh` is the way to install vamos, as the [tutorial](../../docs/tutorial.md#in-your-projects-devcontainer) shows:
 in a Dockerfile from the release's URL, which pins that release, or on a machine from `releases/latest/download`.
+The Dockerfile downloads, runs and deletes it in one `RUN`, since an `ADD` would leave it in a layer
+that a later `rm` only hides, and piping it to `sh` would hide a failed download.
 It installs no packages, so that a Dockerfile keeps them in its own package step:
 it reports what vamos needs and the system lacks, with the `apt-get` or `dnf` command to install it,
 then fails once vamos is installed, so that a Dockerfile missing a package stops at the install rather than at the
 first build; `--allow-missing`, or `VAMOS_ALLOW_MISSING=1`, lets it succeed.
 It fails before installing for what it can't install vamos without: Linux, amd64 or arm64, glibc, root or `sudo`,
-`curl` or `wget`, and a matching checksum.
+`curl` or `wget`, a CA bundle for an `https` download, and a matching checksum.
+It checks for the CA bundle before downloading, since `apt-get install --no-install-recommends curl` leaves
+`ca-certificates` out and curl's failure wouldn't say so;
+it suggests that the release doesn't exist only when the server answers 404.
 `VAMOS_RELEASE_URL` replaces the release's download URL, which lets the smoke test install a binary not yet released.
 
 The binary must run outside Fedora.
@@ -155,9 +160,10 @@ A static build was rejected: with cgo disabled, buildah's chroot isolation fails
 The devcontainer's own builds, and the test suite, keep gpgme and btrfs, so a change to signature checking
 or storage drivers needs a release image smoke check as well.
 Before its digest is recorded, each platform's build job installs its binary with the working tree's `install.sh`
-in the tutorial's devcontainer Dockerfile, the only `dockerfile` block there, its `ADD` of the release's script
-replaced by a local copy, and builds the TypeScript MCP example with it;
-it also checks that `install.sh` fails in a plain Ubuntu 24.04 without the packages, unless given `--allow-missing`;
+in the tutorial's devcontainer Dockerfile, the only `dockerfile` block there, with its download of the release's
+script pointed at a local copy of the script and binaries, and builds the TypeScript MCP example with it;
+it also checks that `install.sh` fails in a plain Ubuntu 24.04 without a CA bundle, before downloading,
+and without the packages, unless given `--allow-missing`;
 it runs on the native runner because under emulation buildah can't re-execute itself.
 [Smoke check 11](smoke-checks.md) runs the same on the devcontainer's platform.
 The image is still published with the binary at `/usr/local/bin/vamos`, which a Dockerfile may copy out instead.
