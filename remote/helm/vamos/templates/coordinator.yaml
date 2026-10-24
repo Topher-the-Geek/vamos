@@ -1,0 +1,167 @@
+{{- /*
+The coordinator: one instance, which keeps its state in memory and its build cache on a volume.
+A StatefulSet, so that a replacement starts only once the old instance has stopped writing the cache.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "vamos.fullname" . }}-coordinator
+  labels:
+    {{- include "vamos.labels" . | nindent 4 }}
+    {{- include "vamos.selectorLabels" (dict "root" . "component" "coordinator") | nindent 4 }}
+  {{- with .Values.coordinator.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- $service := .Values.coordinator.service }}
+  {{- include "vamos.serviceSpec" (dict "root" . "component" "coordinator" "service" $service) | nindent 2 }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "vamos.fullname" . }}-coordinator
+  labels:
+    {{- include "vamos.labels" . | nindent 4 }}
+    {{- include "vamos.selectorLabels" (dict "root" . "component" "coordinator") | nindent 4 }}
+spec:
+  replicas: 1 # a client refuses a second instance's answers, so there is never more than one
+  serviceName: {{ include "vamos.fullname" . }}-coordinator
+  selector:
+    matchLabels:
+      {{- include "vamos.selectorLabels" (dict "root" . "component" "coordinator") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "vamos.labels" . | nindent 8 }}
+        {{- include "vamos.selectorLabels" (dict "root" . "component" "coordinator") | nindent 8 }}
+        {{- with .Values.coordinator.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # A change of registry settings restarts the coordinator, which reads them once.
+        checksum/registries: {{ include (print $.Template.BasePath "/registries-configmap.yaml") . | sha256sum }}
+        {{- with .Values.coordinator.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.coordinator.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: coordinator
+          image: {{ include "vamos.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - coordinator
+            - --listen=:8080
+            - --cache-dir=/var/lib/vamos
+            - --cache-repository={{ include "vamos.cacheRegistry" . }}/{{ .Values.cacheRegistry.repository }}
+            {{- range include "vamos.pullThroughMappings" . | trim | splitList "\n" | compact }}
+            - --pull-through={{ . }}
+            {{- end }}
+            {{- range include "vamos.poolPlatforms" . | trim | splitList "\n" | compact }}
+            - --offer={{ . }}
+            {{- end }}
+            {{- range .Values.coordinator.offerEmulated }}
+            - --offer-emulated={{ . }}
+            {{- end }}
+            {{- with .Values.coordinator.grace }}
+            - --grace={{ . }}
+            {{- end }}
+            {{- with .Values.coordinator.window }}
+            - --window={{ . }}
+            {{- end }}
+            {{- with .Values.coordinator.lease }}
+            - --lease={{ . }}
+            {{- end }}
+            {{- if not (kindIs "invalid" .Values.coordinator.retries) }}
+            - --retries={{ .Values.coordinator.retries }}
+            {{- end }}
+            {{- if not (kindIs "invalid" .Values.coordinator.bound) }}
+            - --bound={{ .Values.coordinator.bound }}
+            {{- end }}
+            {{- if not (kindIs "invalid" .Values.coordinator.maxBuilds) }}
+            - --max-builds={{ .Values.coordinator.maxBuilds }}
+            {{- end }}
+            {{- with .Values.coordinator.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            - name: CONTAINERS_REGISTRIES_CONF
+              value: /etc/vamos/registries.conf
+            {{- if .Values.coordinator.authSecret }}
+            {{- include "vamos.authEnv" (dict "secret" .Values.coordinator.authSecret) | nindent 12 }}
+            {{- end }}
+            {{- with .Values.coordinator.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          # The capabilities answer once the coordinator serves; until then clients get nothing from it anyway.
+          readinessProbe:
+            httpGet:
+              path: /v1/capabilities
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /v1/capabilities
+              port: http
+            periodSeconds: 10
+            failureThreshold: 6
+          {{- with .Values.coordinator.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.coordinator.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: cache
+              mountPath: /var/lib/vamos
+            {{- include "vamos.registriesMount" . | nindent 12 }}
+            {{- if .Values.coordinator.authSecret }}
+            {{- include "vamos.authMount" (dict "secret" .Values.coordinator.authSecret) | nindent 12 }}
+            {{- end }}
+      # The coordinator closes its cache and stops serving within ten seconds of being told to stop.
+      terminationGracePeriodSeconds: 30
+      volumes:
+        {{- include "vamos.registriesVolume" . | nindent 8 }}
+        {{- if .Values.coordinator.authSecret }}
+        {{- include "vamos.authVolume" (dict "secret" .Values.coordinator.authSecret) | nindent 8 }}
+        {{- end }}
+        {{- if not .Values.coordinator.persistence.enabled }}
+        - name: cache
+          emptyDir: {}
+        {{- end }}
+      {{- with .Values.coordinator.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.coordinator.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.coordinator.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if .Values.coordinator.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: cache
+        labels:
+          {{- include "vamos.selectorLabels" (dict "root" . "component" "coordinator") | nindent 10 }}
+      spec:
+        {{- include "vamos.pvcSpec" .Values.coordinator.persistence | nindent 8 }}
+  {{- end }}

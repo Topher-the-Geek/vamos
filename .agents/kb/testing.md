@@ -17,6 +17,13 @@ These are approximate timings, not deadlines: allow extra time for cold Go compi
 Run the full suite before finishing changes to building, committing or destinations.
 Run [smoke-checks.md](smoke-checks.md) for changes to building, destinations, examples or the Dockerfile;
 automated tests do not execute the built binary, example projects or release Dockerfile.
+Changes to `install.sh` or the [release workflow](../../.github/workflows/release.yml) need
+[smoke check 11](smoke-checks.md), which runs `shellcheck`, and `actionlint` for the workflow,
+`go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7`, whose two SC2046 warnings on the merge job's
+deliberate word splitting are expected; the workflow itself runs only in a release.
+Changes to the Helm chart need `helm lint --strict remote/helm/vamos`, its rendering checked with
+`helm template vamos remote/helm/vamos | kubeconform -strict -summary`, for the defaults and for any values the change
+adds, and the chart's checks in [smoke-checks.md](smoke-checks.md#kubernetes) on kind.
 Documentation-only changes need formatting, link checks,
 Go doc inspection and the short suite rather than container smoke runs.
 

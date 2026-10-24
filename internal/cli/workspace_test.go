@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -8,6 +9,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/Topher-the-Geek/vamos/internal/testenv"
 
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	"github.com/spf13/afero"
@@ -127,7 +130,9 @@ task(name="make", base="busybox", source="/out", include=["made"])
 		{
 			name: "no BUILD file in the package",
 			app:  `layer(name="app", base="//nope:busybox")`,
-			want: []string{`/project/app/BUILD:1:6: layer: base "//nope:busybox": no BUILD file in /project/nope`},
+			want: []string{
+				`/project/app/BUILD:1:6: layer: base "//nope:busybox": no BUILD or BUILD.vms file in /project/nope`,
+			},
 		},
 		{
 			name: "misspelled target",
@@ -183,14 +188,14 @@ task(name="make", base="busybox", source="/out", include=["made"])
 			want: []string{`/project/app/BUILD:1:6: layer: name "app/server" must not contain ":" or "/"`},
 		},
 		{
-			name: "packages in a cycle",
-			app:  `layer(name="app", base="//lib:busybox")`,
+			name: "targets in a cycle",
+			app:  `layer(name="app", base="//lib:base")`,
 			files: map[string]string{
 				"lib/BUILD": `layer(name="base", base="//app:app")`,
 			},
 			want: []string{
-				`/project/lib/BUILD:1:6: layer: base "//app:app": packages name each other's targets in a cycle: ` +
-					"//app: -> //lib: -> //app:",
+				`/project/lib/BUILD:1:6: layer: base "//app:app": targets name each other in a cycle: ` +
+					"//app:app -> //lib:base -> //app:app",
 			},
 		},
 	}
@@ -236,12 +241,12 @@ func TestWorkspaceTargetMistakes(t *testing.T) {
 		{
 			name: "no BUILD file in the package",
 			args: []string{"build", "//nope:app"},
-			want: "no BUILD file in /project/nope",
+			want: "no BUILD or BUILD.vms file in /project/nope",
 		},
 		{
 			name: "no BUILD file in -C",
 			args: []string{"build", "app"},
-			want: "no BUILD file in /project",
+			want: "no BUILD or BUILD.vms file in /project",
 		},
 		{
 			name: "misspelled target",
@@ -335,4 +340,119 @@ func TestPackageLinks(t *testing.T) {
 	vamos(t, fsys, "build", "app", "-C", filepath.Join(projectDir, "app")).failsWith(t, false,
 		`/project/app/BUILD:1:45: add: source "//vendor/lib:code": package "vendor/lib": /project/vendor `+
 			"is a symbolic link; a package must be a directory within the workspace")
+}
+
+// TestBuildVms checks that a package's BUILD file may be named BUILD.vms, for a directory beside a build directory,
+// which BUILD would clash with where names are compared without case: as the package of -C, and named by a label;
+// that a directory by either name, as build is found as BUILD there, isn't a BUILD file; and that a package with both
+// names is refused, naming its directory, rather than one being silently ignored.
+func TestBuildVms(t *testing.T) {
+	files := map[string]string{
+		"WORKSPACE":       "",
+		"BUILD.vms":       `layer(name="app", base="//react:site")`,
+		"react/BUILD.vms": `layer(name="site", base="scratch", command=["serve"])`,
+		"react/BUILD/out": "a build directory, as build is found as BUILD without case",
+	}
+	r := vamos(t, project(t, files), "graph", "app", "-C", projectDir).ran(t)
+	for _, label := range []string{`"label": "app"`, `"label": "//react:site"`} {
+		if !strings.Contains(r.stdout, label) {
+			t.Errorf("the graph doesn't have %s:\n%s", label, r.stdout)
+		}
+	}
+	vamos(t, project(t, files), "graph", "site", "-C", filepath.Join(projectDir, "react")).ran(t)
+
+	files["react/BUILD.vms"], files["react/BUILD"] = files["react/BUILD.vms"], files["react/BUILD.vms"]
+	delete(files, "react/BUILD/out")
+	vamos(t, project(t, files), "graph", "app", "-C", projectDir).
+		failsWith(t, false, `/project/BUILD.vms:1:6: layer: base "//react:site": /project/react has both BUILD and `+
+			"BUILD.vms; a package has one BUILD file, so remove one of them")
+}
+
+// TestPackagesNamingEachOther checks that packages may name each other's targets, as where a project's files sit is
+// for its other tools to say: a package still loading, because a package it loaded names its targets, gives those
+// declared above the point where it loaded that package, as one file gives its earlier targets.
+// A target below that point, or one in a cycle of targets, is refused, saying which.
+func TestPackagesNamingEachOther(t *testing.T) {
+	tests := []struct {
+		name   string
+		files  map[string]string
+		labels []string // in the graph of app, in order
+		want   string   // the error, if it fails
+	}{
+		{
+			name: "two packages", // as in a real project: the root's layer is built on scala's, which is built on the root's
+			files: map[string]string{
+				"BUILD":       `layer(name="y", base="scratch")` + "\n" + `layer(name="app", base="//scala:x")`,
+				"scala/BUILD": `layer(name="x", base="//:y")`,
+			},
+			labels: []string{"y", "//scala:x", "app"},
+		},
+		{
+			name: "files added both ways",
+			files: map[string]string{
+				"BUILD": `glob(name="src", include=["BUILD"])` + "\n" +
+					`layer(name="app", base="scratch", steps=[add("//scala:t", "/t")])`,
+				"scala/BUILD": `task(name="t", base="scratch", steps=[add("//:src", "/s")], source="/s", ` +
+					`include=["."])`,
+			},
+			labels: []string{"src", "//scala:t", "app"},
+		},
+		{
+			name: "three packages in a ring",
+			files: map[string]string{
+				"BUILD":   `layer(name="a", base="scratch")` + "\n" + `layer(name="app", base="//b:b")`,
+				"b/BUILD": `layer(name="b", base="//c:c")`,
+				"c/BUILD": `layer(name="c", base="//:a")`,
+			},
+			labels: []string{"a", "//c:c", "//b:b", "app"},
+		},
+		{
+			name: "declared below",
+			files: map[string]string{
+				"BUILD":       `layer(name="app", base="//scala:x")` + "\n" + `layer(name="y", base="scratch")`,
+				"scala/BUILD": `layer(name="x", base="//:y")`,
+			},
+			want: `/project/scala/BUILD:1:6: layer: base "//:y": //:y isn't declared yet: its BUILD file is stopped ` +
+				"at /project/BUILD:1:6, loading this package; declare y above that line, or name it from a function " +
+				"of ctx, which runs once every BUILD file has run",
+		},
+		{
+			name: "declared below, named by a function of ctx",
+			files: map[string]string{
+				"BUILD":       `layer(name="app", base="//scala:x")` + "\n" + `layer(name="y", base="scratch")`,
+				"scala/BUILD": `layer(name="x", base=lambda ctx: "//:y")`,
+			},
+			labels: []string{"y", "//scala:x", "app"},
+		},
+		{
+			name: "a cycle of targets",
+			files: map[string]string{
+				"BUILD":   `layer(name="app", base="//b:b")`,
+				"b/BUILD": `layer(name="b", base="//c:c")`,
+				"c/BUILD": `layer(name="c", base="//:app")`,
+			},
+			want: `/project/c/BUILD:1:6: layer: base "//:app": targets name each other in a cycle: ` +
+				"//:app -> //b:b -> //c:c -> //:app",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.files["WORKSPACE"] = ""
+			r := vamos(t, project(t, tt.files), "graph", "app", "-C", projectDir)
+			if tt.want != "" {
+				r.failsWith(t, false, tt.want)
+				return
+			}
+			r.ran(t)
+			var g struct{ Nodes []struct{ Label string } }
+			testenv.Must(t, json.Unmarshal([]byte(r.stdout), &g))
+			var labels []string
+			for _, n := range g.Nodes {
+				labels = append(labels, n.Label)
+			}
+			if !slices.Equal(labels, tt.labels) {
+				t.Errorf("the graph's targets are %q, want %q", labels, tt.labels)
+			}
+		})
+	}
 }

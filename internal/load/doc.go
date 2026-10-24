@@ -3,9 +3,13 @@
 // # Invariants
 //
 // Evaluation, configuration and source capture happen on the client.
+// A package's BUILD file is named BUILD or BUILD.vms, never both; findBuildFile owns the names.
 // Package loading is demand-driven, including labels discovered while configuring;
 // there is no workspace-wide validation pass.
+// A package still loading, because one it loaded names its targets, gives the targets it has declared so far.
 // BUILD mistakes retain source positions here rather than becoming executor graph-validation errors.
+// A run() step's secrets are names alone; a step whose secret Request.Secrets lacks is refused once configured,
+// before sources are captured.
 //
 // # Lifecycle
 //

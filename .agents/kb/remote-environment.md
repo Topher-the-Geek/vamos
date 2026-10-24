@@ -57,3 +57,116 @@ a worker is lost with `docker restart -t 0`, which kills its process and brings 
 policy ignores a `docker kill`; a client is disconnected with `docker network disconnect`; and the coordinator
 restarts with `docker restart`.
 The checks themselves are in [smoke-checks.md](smoke-checks.md).
+
+## Kubernetes
+
+[remote/helm/vamos](../../remote/helm/vamos/values.yaml) is a Helm chart for the same services on a cluster,
+with each object named after the release, as `vamos-coordinator:8080`, `vamos-registry:5000` and
+`vamos-hub-proxy:5000` for a release named `vamos`.
+Its values file documents every setting; what differs from the compose file is below.
+
+| Object | Notes |
+| --- | --- |
+| Coordinator | A StatefulSet of one, so that a replacement starts only once the old instance has stopped; its build cache on a volume claim; not root |
+| Workers | A Deployment per pool in `workers.pools`, each pool one platform, on nodes of that architecture; the coordinator offers every pool's platform |
+| Registries | A StatefulSet each with a volume claim: the cache registry, and a proxy per entry of `pullThrough.caches`; either can be replaced by one elsewhere |
+| Registry settings | One ConfigMap, generated from the registries' addresses, as `$CONTAINERS_REGISTRIES_CONF` for the coordinator and the workers |
+
+Kubernetes runs a privileged container in the node's cgroup namespace, unlike Docker,
+so `/sys/fs/cgroup` in a worker is the node's whole hierarchy:
+workers on one node would share `/sys/fs/cgroup/vamos`, each cleaning up the others' attempts as its own leftovers,
+and attempts would run outside the pod's cgroup and the limits set on it.
+The worker's command therefore starts it in a cgroup namespace of its own with `unshare --cgroup --mount`,
+with cgroup2 mounted over `/sys/fs/cgroup`, which puts the root at its container's cgroup, as Docker does.
+The container store is an emptyDir, which outlives a restart of the container but not the pod,
+so a worker that crashed cleans up after its attempts, and a deleted pod takes its store with it.
+
+Clients reach the coordinator and the registries by the names above, which resolve only inside the cluster
+unless the values give `cacheRegistry.address` and each cache's `address` as names that clients resolve as well.
+`vamos build` needs the coordinator alone, which `kubectl port-forward` gives a client outside the cluster;
+`load`, `save` and `push --push-from=client` need the registries by the same names the workers use.
+
+The devcontainer has `kind`, `kubectl`, `helm` and `kubeconform`.
+kind runs the cluster's node as a container on the host's Docker, on a network named `kind`,
+which the devcontainer joins to reach the API server and the node, as it joins the compose network.
+A chart under development runs the working tree's release image rather than the published one,
+so it is built, loaded into the node as `vamos:latest` and named with `image.repository=vamos`;
+on an arm64 host the pool is `linux/arm64`.
+
+```sh
+kind create cluster --name vamos                             # once; skip if `kind get clusters` lists it
+docker network connect kind "vamos_$(basename "$WORKSPACE_FOLDER")"
+kind export kubeconfig --name vamos --internal               # the API server by its name on the kind network
+docker build -q . -t vamos:latest && kind load docker-image vamos:latest --name vamos
+helm install vamos remote/helm/vamos -n vamos --create-namespace --wait --set image.repository=vamos \
+  --set workers.pools.amd64=null --set workers.pools.arm64.platform=linux/arm64   # on an arm64 host
+helm test vamos -n vamos
+kubectl -n vamos port-forward svc/vamos-coordinator 18080:8080 &
+./vamos build server -C examples/typescript-mcp --coordinator http://127.0.0.1:18080
+helm uninstall vamos -n vamos && kubectl delete namespace vamos   # the namespace takes the volume claims
+```
+
+A worker is lost with `crictl stop --timeout 0` on its container, run in the node with `docker exec`:
+the kubelet starts it again in the same pod, as Docker's restart policy does.
+A worker's cgroups are seen from its own namespace, `kubectl exec <pod> -- nsenter -t 1 -C -m ls /sys/fs/cgroup/vamos`,
+since `kubectl exec` enters the container's other namespaces but not that one.
+
+## Releases
+
+The chart's default image is `ghcr.io/topher-the-geek/vamos`,
+which the [release workflow](../../.github/workflows/release.yml) publishes as an index for `linux/amd64` and `linux/arm64`,
+since developers and clusters run both.
+It runs only when started by hand, never on a push or pull request,
+because each run builds the Dockerfile twice and a cluster should take a new image deliberately:
+start it from the Actions tab, or with `gh workflow run release.yml --ref <branch> -f tag=<version>`.
+The version is required, such as `0.1.0` or `0.2.0-rc.1`, and a version already tagged is refused before any build,
+since a release is never replaced.
+Each run tags the index with the version and `sha-<commit>`, and a version without a suffix also tags it `latest`;
+then it creates the GitHub Release `v<version>` at the commit, the latest release unless the version is a prerelease.
+The git tag has the `v` that Go module versions have; the image tag has none, as image tags usually don't.
+The Dockerfile's `VERSION` argument stamps the version, with the `v`, into the binary, which `vamos --version` reports,
+since the build context has no git metadata for the build info to record.
+
+Each platform builds natively on a runner of its architecture, `ubuntu-24.04` and `ubuntu-24.04-arm`,
+and pushes its image by digest; the `merge` job tags the index of both, and the `release` job then tags the commit.
+Building both on one runner was rejected: buildah's namespace setup needs cgo,
+so the binary can't be cross-compiled without a cross toolchain, and under QEMU the Go build is many times slower.
+
+The release's assets are each platform's binary, `vamos-linux-amd64` and `vamos-linux-arm64`, plain executables
+from the Dockerfile's `binary` stage, which the build cache makes the same as the image's;
+[install.sh](../../install.sh), with the release's version as its default;
+and `SHA256SUMS` for all three, which `install.sh` checks the binary against.
+`install.sh` is the way to install vamos, as the [tutorial](../../docs/tutorial.md#in-your-projects-devcontainer) shows:
+in a Dockerfile from the release's URL, which pins that release, or on a machine from `releases/latest/download`.
+The Dockerfile downloads, runs and deletes it in one `RUN`, since an `ADD` would leave it in a layer
+that a later `rm` only hides, and piping it to `sh` would hide a failed download.
+It installs no packages, so that a Dockerfile keeps them in its own package step:
+it reports what vamos needs and the system lacks, with the `apt-get` or `dnf` command to install it,
+then fails once vamos is installed, so that a Dockerfile missing a package stops at the install rather than at the
+first build; `--allow-missing`, or `VAMOS_ALLOW_MISSING=1`, lets it succeed.
+It fails before installing for what it can't install vamos without: Linux, amd64 or arm64, glibc, root or `sudo`,
+`curl` or `wget`, a CA bundle for an `https` download, and a matching checksum.
+It checks for the CA bundle before downloading, since `apt-get install --no-install-recommends curl` leaves
+`ca-certificates` out and curl's failure wouldn't say so;
+it suggests that the release doesn't exist only when the server answers 404.
+`VAMOS_RELEASE_URL` replaces the release's download URL, which lets the smoke test install a binary not yet released.
+
+The binary must run outside Fedora.
+The Dockerfile builds it on Debian 12, whose glibc 2.36 is older than Ubuntu 24.04's,
+with the `containers_image_openpgp` and `exclude_graphdriver_btrfs` tags, so it links no C library but glibc.
+The newest glibc symbol it needs is from 2.34, the minimum that `install.sh` checks and the tutorial states;
+each build job checks the binary against `install.sh`'s minimum, so a newer need fails the release.
+A static build was rejected: with cgo disabled, buildah's chroot isolation fails to start a `run` step.
+The devcontainer's own builds, and the test suite, keep gpgme and btrfs, so a change to signature checking
+or storage drivers needs a release image smoke check as well.
+Before its digest is recorded, each platform's build job installs its binary with the working tree's `install.sh`
+in the tutorial's devcontainer Dockerfile, the only `dockerfile` block there, with its download of the release's
+script pointed at a local copy of the script and binaries, and builds the TypeScript MCP example with it;
+it also checks that `install.sh` fails in a plain Ubuntu 24.04 without a CA bundle, before downloading,
+and without the packages, unless given `--allow-missing`;
+it runs on the native runner because under emulation buildah can't re-execute itself.
+[Smoke check 11](smoke-checks.md) runs the same on the devcontainer's platform.
+The image is still published with the binary at `/usr/local/bin/vamos`, which a Dockerfile may copy out instead.
+The workflow pushes and releases with the job's `GITHUB_TOKEN`, so it needs no stored credential.
+Pull it locally with `docker pull ghcr.io/topher-the-geek/vamos:<tag>`;
+a cluster needs the package to be public, or a `kubernetes.io/dockerconfigjson` Secret in `imagePullSecrets`.

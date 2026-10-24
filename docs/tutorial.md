@@ -63,6 +63,9 @@ That is how the build tools stay out of the application image.
 The two operations that bring inputs into a build are **pull**, which fetches an image from a registry,
 and **glob**, which selects local files into a fileset.
 A `BUILD` file declares these operations as named **targets** in Starlark, a Python-like language.
+In a directory that also holds a `build` directory, name it `BUILD.vms`,
+since `BUILD` and `build` are one name where case is ignored, as on macOS;
+see [workspaces](reference/configuration.md#workspaces).
 Targets refer to one another by name: `base` selects an image, and `add()` copies in a fileset.
 Declare local targets before the targets that use them.
 A task's result is a fileset, so a task cannot be another target's base image.
@@ -70,7 +73,8 @@ A task's result is a fileset, so a task cannot be another target's base image.
 ## 2. Set up vamos
 
 vamos uses Buildah and needs Linux container privileges.
-Choose one of these setups, then use the same `vamos` command throughout the tutorial.
+Choose one of the first two setups, then use the same `vamos` command throughout the tutorial.
+The third installs vamos in your own project's devcontainer.
 
 ### In the repository's devcontainer
 
@@ -109,6 +113,77 @@ This assumes a Docker daemon at `/var/run/docker.sock` and a host directory Dock
 The named volume preserves the build cache between invocations.
 Run the function from your project directory; paths passed to vamos refer to the container's filesystem.
 If you are already inside a devcontainer, use the first setup because its paths may differ from the host's paths.
+
+### In your project's devcontainer
+
+To build your own project, install vamos in the image your devcontainer runs.
+Each [release](https://github.com/Topher-the-Geek/vamos/releases) has an `install.sh`,
+which downloads that release's binary for the platform it runs on, `linux/amd64` or `linux/arm64`,
+checks it against the release's `SHA256SUMS`, and installs it as `/usr/local/bin/vamos`.
+The binary needs glibc 2.34 or later; these lines are for an Ubuntu 24.04 base:
+
+```dockerfile
+FROM ubuntu:24.04
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      curl \
+      golang-github-containers-common \
+      netavark \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL -o /tmp/vamos-install.sh https://github.com/Topher-the-Geek/vamos/releases/download/v0.1.0/install.sh \
+ && sh /tmp/vamos-install.sh \
+ && rm /tmp/vamos-install.sh
+
+# Run build steps with chroot isolation, so no OCI runtime is needed.
+ENV BUILDAH_ISOLATION=chroot
+```
+
+Add the packages to your image's existing `apt-get install` step rather than a separate one;
+`install.sh` needs `curl`, or `wget`, and `ca-certificates` to download the binary,
+and fails before downloading without them.
+It installs no packages itself: it reports any that vamos needs and the system lacks,
+with the `apt-get` or `dnf` command that installs them, and then fails, after installing vamos,
+so that a Dockerfile missing one stops there rather than at the first build.
+Give `--allow-missing`, or set `VAMOS_ALLOW_MISSING=1`, to install vamos without them.
+On Fedora they are `ca-certificates`, `containers-common` and `netavark`.
+One `RUN` downloads, runs and deletes the script, so no layer keeps it,
+and a failed download stops the build, which piping it to `sh` would hide.
+The release in the URL is the one installed; `releases/latest/download/install.sh` installs the latest release,
+and `VAMOS_VERSION` or `--version` choose another.
+To install vamos on a Linux machine of your own, run the script there; it uses `sudo` unless you are root:
+
+```sh
+curl -fsSL https://github.com/Topher-the-Geek/vamos/releases/latest/download/install.sh | sh
+```
+
+The [published image](https://github.com/Topher-the-Geek/vamos/pkgs/container/vamos) has the same binary,
+at `/usr/local/bin/vamos`, if you would rather `COPY --from=ghcr.io/topher-the-geek/vamos:0.1.0` it.
+
+In `devcontainer.json`, run the container privileged, give container storage a volume of its own,
+and mount the Docker socket if you use `vamos load`:
+
+```json
+"runArgs": ["--privileged"],
+"mounts": [
+  "source=vamos-storage,target=/var/lib/containers,type=volume",
+  "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
+]
+```
+
+The named volume also keeps the build cache when the devcontainer is rebuilt.
+Run vamos as root, with `sudo` if your devcontainer's user is not root.
+Each requirement has a recognizable failure:
+
+| Requirement | Provides | Without it |
+| --- | --- | --- |
+| `ca-certificates` | Trust for registries' TLS certificates | `x509: certificate signed by unknown authority` on the first pull |
+| `golang-github-containers-common` | `/etc/containers/policy.json` and `registries.conf` | `no policy.json file found` on the first pull |
+| `netavark` | Networking for `run` steps | `could not find "netavark"` on the first `run` |
+| `BUILDAH_ISOLATION=chroot` | `run` steps without an OCI runtime | `did not get container create message from subprocess` on the first `run` |
+| A volume for `/var/lib/containers` | Overlay storage, which cannot nest in the container's own overlay filesystem | `Failed to built-in GetDriver graph btrfs` at startup, then slow `vfs` storage |
 
 ## 3. Open the example
 

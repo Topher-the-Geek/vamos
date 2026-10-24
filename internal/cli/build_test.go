@@ -18,8 +18,11 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/Topher-the-Geek/vamos/internal/testenv"
+
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/registry"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
@@ -1407,4 +1410,109 @@ func TestPullImageUnreachable(t *testing.T) {
 		t.Errorf("error = %q, want no hint about the name", r.err)
 	}
 	assertNoFiles(t, out)
+}
+
+// TestEntrypoint checks that a layer's entrypoint replaces its base's, and the base's command too unless it gives
+// one, as a Dockerfile's ENTRYPOINT does; that an empty one removes it; and that leaving it out keeps the base's.
+func TestEntrypoint(t *testing.T) {
+	requireBuildah(t)
+	fsys := project(t, map[string]string{"BUILD": pullBusybox + `
+layer(name="server", base="busybox", entrypoint=["java", "-jar", "server.jar"])
+layer(name="both", base="busybox", entrypoint=["echo"], command=["hello"])
+layer(name="kept", base="server", command=["--port", "9"])
+layer(name="none", base="server", entrypoint=[])
+`})
+	tests := []struct {
+		target          string
+		entrypoint, cmd []string
+	}{
+		{"server", []string{"java", "-jar", "server.jar"}, nil}, // busybox's command, sh, is dropped
+		{"both", []string{"echo"}, []string{"hello"}},
+		{"kept", []string{"java", "-jar", "server.jar"}, []string{"--port", "9"}},
+		{"none", nil, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.target, func(t *testing.T) {
+			out := filepath.Join(t.TempDir(), "app.tar")
+			vamos(t, fsys, "save", tt.target, out, "--tag", "app:test", "-C", projectDir).succeeds(t)
+			config, err := savedImage(t, out, "app:test").ConfigFile()
+			testenv.Must(t, err)
+			if !slices.Equal(config.Config.Entrypoint, tt.entrypoint) || !slices.Equal(config.Config.Cmd, tt.cmd) {
+				t.Errorf("entrypoint %q and command %q, want %q and %q", config.Config.Entrypoint, config.Config.Cmd,
+					tt.entrypoint, tt.cmd)
+			}
+		})
+	}
+}
+
+// TestSecrets checks that a run() step gets its secrets, as a variable and as a file, from the environment and from
+// a file; that neither stays in the image; that a new value reuses the cached result, since no key holds a value;
+// and that no value reaches the trace.
+func TestSecrets(t *testing.T) {
+	requireBuildah(t)
+	fsys := project(t, map[string]string{"BUILD": pullBusybox + `
+layer(
+    name="app",
+    base="busybox",
+    steps=[
+        # The values are encoded, so that the trace, which records argv, doesn't hold them.
+        run(["sh", "-c", 'test "$TOKEN" = "$(echo ZW52LXZhbHVl | base64 -d)" && ' +
+                         'test "$(cat /run/secrets/key)" = "$(echo ZmlsZS12YWx1ZQ== | base64 -d)" && echo got them'],
+            secrets=[secret("token", env="TOKEN"), secret("key", file="/run/secrets/key")]),
+    ],
+)
+`})
+	keyFile := filepath.Join(t.TempDir(), "key")
+	testenv.Must(t, os.WriteFile(keyFile, []byte("file-value"), 0o600))
+	t.Setenv("VAMOS_TEST_TOKEN", "env-value")
+	dir := t.TempDir()
+	out, trace := filepath.Join(dir, "app.tar"), filepath.Join(dir, "trace.json")
+	r := vamos(t, fsys, "save", "app", out, "--tag", "app:test", "--trace", trace, "-C", projectDir,
+		"--secret", "id=token,env=VAMOS_TEST_TOKEN", "--secret", "id=key,src="+keyFile).succeeds(t)
+	if !strings.Contains(r.stdout, "got them") {
+		t.Errorf("stdout = %q, want the step to have found both secrets", r.stdout)
+	}
+	img := savedImage(t, out, "app:test")
+	walkImage(t, img, func(hdr *tar.Header, r io.Reader) bool {
+		if strings.HasPrefix(imagePath(hdr), "/run") {
+			t.Errorf("the image has %s, where a secret was mounted", imagePath(hdr))
+		}
+		return false
+	})
+	config, err := img.ConfigFile()
+	testenv.Must(t, err)
+	data, err := os.ReadFile(trace)
+	testenv.Must(t, err)
+	for _, value := range []string{"env-value", "file-value"} {
+		if strings.Contains(strings.Join(config.Config.Env, "\n"), value) {
+			t.Errorf("the image's environment %q has a secret's value", config.Config.Env)
+		}
+		if strings.Contains(string(data), value) {
+			t.Errorf("the trace has the secret value %q", value)
+		}
+	}
+
+	// A new value builds nothing anew: the step's key names the secrets, not their values.
+	t.Setenv("VAMOS_TEST_TOKEN", "rotated")
+	r = vamos(t, fsys, "build", "app", "-C", projectDir,
+		"--secret", "id=token,env=VAMOS_TEST_TOKEN", "--secret", "id=key,src="+keyFile).ran(t)
+	if !strings.Contains(r.stdout, `layer "app": cached`) {
+		t.Errorf("stdout = %q, want the layer cached after its secret's value changed", r.stdout)
+	}
+
+	t.Run("unset", func(t *testing.T) {
+		vamos(t, fsys, "build", "app", "-C", projectDir, "--secret", "id=token,env=VAMOS_TEST_UNSET",
+			"--secret", "id=key,src="+keyFile).
+			failsWith(t, false, "--secret id=token,env=VAMOS_TEST_UNSET: $VAMOS_TEST_UNSET isn't set")
+	})
+}
+
+// savedImage reads the image tagged tag from the tarball at path, as save wrote it.
+func savedImage(t *testing.T, path, tag string) v1.Image {
+	t.Helper()
+	ref, err := name.NewTag(tag)
+	testenv.Must(t, err)
+	img, err := tarball.ImageFromPath(path, &ref)
+	testenv.Must(t, err)
+	return img
 }

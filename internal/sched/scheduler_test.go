@@ -1377,3 +1377,16 @@ func BenchmarkSchedulerCached(b *testing.B) {
 func storeLocation(id string) cache.Location {
 	return cache.Location{Kind: cache.LocationStore, Reference: "localhost/vamos-cache:" + id}
 }
+
+// TestRequestSecrets checks that an action's request carries the values of the secrets its steps use, and no others,
+// so that a target is never handed a secret it didn't ask for.
+func TestRequestSecrets(t *testing.T) {
+	s := &Scheduler{opts: Options{Secrets: map[string][]byte{"a": []byte("1"), "b": []byte("2")}}}
+	a := &Action{Steps: []Step{{Op: graph.OpEnv}, {Op: graph.OpRun, Secrets: []graph.Secret{{ID: "a", Env: "A"}}}}}
+	if got := s.secrets(a); !reflect.DeepEqual(got, map[string][]byte{"a": []byte("1")}) {
+		t.Errorf("secrets of an action that uses a = %q, want a's alone", got)
+	}
+	if got := s.secrets(&Action{Steps: []Step{{Op: graph.OpRun}}}); got != nil {
+		t.Errorf("secrets of an action that uses none = %q, want nil", got)
+	}
+}

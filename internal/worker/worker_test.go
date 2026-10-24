@@ -590,8 +590,9 @@ func TestPruneClearsRepository(t *testing.T) {
 	if problem, err := checker.CheckImage(ctx, res.Image, location); problem == nil || err != nil {
 		t.Errorf("the image at its location after the prune = %v, %v; want it gone", problem, err)
 	}
-	if caps, err := f.c.Capabilities(ctx); err != nil || caps.Generation != 1 {
-		t.Errorf("capabilities after the prune = %+v, %v; want generation 1", caps, err)
+	// A fresh store's generation is 1, so one prune makes it 2.
+	if caps, err := f.c.Capabilities(ctx); err != nil || caps.Generation != 2 {
+		t.Errorf("capabilities after the prune = %+v, %v; want generation 2", caps, err)
 	}
 	// The next build is cold: the layer is built again, and pushed again.
 	outcome, statuses := runJob(t, f.c, layerGraph(t, f, "pruned away"))

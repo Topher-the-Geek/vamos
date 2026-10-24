@@ -3,6 +3,7 @@ FROM fedora:44
 # - useful dev tools
 # - build dependencies
 # - VS Code server dependencies
+# - Kubernetes tools for the Helm chart: kubectl matches the node image of kind's release
 RUN dnf -y install \
     btrfs-progs-devel \
     buildah \
@@ -14,7 +15,10 @@ RUN dnf -y install \
     golang \
     gpgme-devel \
     gzip \
+    helm \
     jq \
+    kind \
+    kubernetes1.35-client \
     less \
     netavark \
     nodejs24 \
@@ -44,9 +48,14 @@ RUN case "$(uname -m)" in \
  && chmod 755 /usr/local/bin/trace_processor_shell \
  && rm /tmp/perfetto.zip
 
- RUN curl -LfsS https://claude.ai/install.sh | bash && \
-     curl -LfsS https://chatgpt.com/codex/install.sh | bash && \
-     curl -LfsS https://herdr.dev/install.sh | bash
+# kubeconform, to check rendered Helm manifests against the Kubernetes schemas; it has no Fedora package.
+RUN GOBIN=/usr/local/bin GOMODCACHE=/tmp/gomodcache GOCACHE=/tmp/gocache \
+      go install github.com/yannh/kubeconform/cmd/kubeconform@latest \
+ && rm -rf /tmp/gomodcache /tmp/gocache
+
+ RUN curl -LfsS https://claude.ai/install.sh | bash \
+  && curl -LfsS https://chatgpt.com/codex/install.sh | bash \
+  && curl -LfsS https://herdr.dev/install.sh | bash
 
 # Run build steps with chroot isolation, so no OCI runtime is needed.
 ENV BUILDAH_ISOLATION=chroot

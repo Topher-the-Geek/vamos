@@ -186,6 +186,8 @@ Runs the attempts the coordinator assigns, up to `--capacity` at once, each in a
 so that cancelling a build kills every process the attempt started, however it daemonized itself.
 A worker needs root, cgroup v2 and buildah's chroot isolation, as building does, and a container store of its own,
 which is a disposable cache of base images and built layers.
+It makes its cgroups under `/sys/fs/cgroup/vamos`, so it needs a cgroup namespace of its own, as Docker gives a
+container and Kubernetes doesn't give a privileged one; the Helm chart in `remote/helm/vamos` starts it in one.
 It renews each attempt's lease by heartbeat, and kills an attempt itself when it can't,
 so that the coordinator can count an expired lease as a stopped attempt;
 after a kill, or on starting after a crash, it removes the attempt's container.
@@ -200,6 +202,7 @@ These flags are shared by commands that build targets:
 | --- | --- | --- |
 | `-C`, `--dir <dir>` | Directory for unqualified target names and workspace discovery | `.` |
 | `--set <name=value>` | Set a named target's parameter; repeat for several parameters | Parameter defaults |
+| `--secret <id=ID,env=VARIABLE>`, `--secret <id=ID,src=FILE>` | Give `run()` steps' secret `ID` the value of an environment variable or a file; repeat for several secrets | None |
 | `--platform <os/arch[/variant]>` | Target platform for a pull, layer, or task | Host platform |
 | `--exec-platform <os/arch[/variant]>` | Platform that `run()` steps execute on; the executor must offer it | This machine's, or the only one offered |
 | `--coordinator <URL>` | Build on the coordinator at this URL rather than in this process | `$VAMOS_COORDINATOR`, or none |
@@ -213,6 +216,23 @@ See [parameters](configuration.md#parameters) for value syntax.
 
 `--timestamp` accepts Unix seconds or RFC 3339, such as `2026-01-01T00:00:00Z`.
 It does not invalidate existing cached results.
+
+### Secrets
+
+`--secret` gives the [secrets](build.md#secrets) that `run()` steps name:
+
+```sh
+vamos build //react:build --set docker_tag=1.2.3 --secret id=sentry,env=SENTRY_AUTH_TOKEN
+vamos build //app:deps --secret id=npmrc,src=$HOME/.npmrc
+```
+
+`env=` reads an environment variable of the vamos process, which must be set, though it may be empty;
+`src=` reads a file.
+They are read only when a build runs, and a secret that a step needs but no `--secret` gives fails the build
+before anything runs.
+Values stay in the vamos process: they never enter the build cache, images, traces or the graph.
+`--secret` can't be combined with `--coordinator`, since a coordinator has no authentication or TLS;
+build secrets in your own process.
 
 `--trace <file.json>` writes a [Perfetto trace](cache.md#traces)
 and is available on `build`, `push`, `load`, `save` (including its deprecated `write` alias), and `export`.

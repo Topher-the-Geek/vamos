@@ -5,8 +5,18 @@ and platforms to choose what its artifacts run on.
 
 ## Workspaces
 
-A package is a directory containing a `BUILD` file.
+A package is a directory containing a `BUILD` file, or one named `BUILD.vms`.
 A workspace groups packages beneath a directory containing a `WORKSPACE` file, which may be empty.
+
+Name a package's file `BUILD.vms` when the directory also holds a `build` directory, such as a project's build output.
+Where file names are compared without case, as on macOS's default filesystem or with git's `core.ignorecase`,
+`BUILD` and `build` are the same name: the two can't sit side by side,
+and a `.gitignore` entry for `build` silently ignores `BUILD` as well.
+A directory named `BUILD` or `build` is never taken for a BUILD file.
+A package has one BUILD file: a directory with both `BUILD` and `BUILD.vms` is an error,
+rather than one of them being silently ignored.
+Everything said here of a `BUILD` file applies to a `BUILD.vms` file, and labels don't change:
+`//ui:app` names the target `app` of `ui/BUILD` or `ui/BUILD.vms`.
 
 ```text
 project/
@@ -25,7 +35,7 @@ Without one, `-C`'s directory is the workspace root.
 | --- | --- |
 | `app` or `:app` | Target in the current BUILD file's package |
 | `//:tools` | Target in the workspace root's BUILD file |
-| `//backend:schema` | Target in `backend/BUILD` beneath the workspace root |
+| `//backend:schema` | Target in `backend/BUILD`, or `backend/BUILD.vms`, beneath the workspace root |
 
 Use labels wherever a target reference is accepted, including `base`, `add()`, `dep()`, and index entries:
 
@@ -44,6 +54,27 @@ task(
 
 A referenced glob keeps paths relative to its own BUILD directory.
 vamos loads only the packages needed by the requested targets and reports dependency cycles.
+
+Packages may name each other's targets, as where their files sit is often for other tools to say.
+A package's `BUILD` file runs when another first names one of its targets, while that other file is still running;
+it can then name the other file's targets declared above that point, as a file names its own earlier targets:
+
+```python
+# BUILD
+layer(name = "jre", base = "//:java")         # declared before scala/BUILD runs
+layer(name = "app", base = "//scala:server")  # runs scala/BUILD, which names //:jre
+```
+
+```python
+# scala/BUILD
+layer(name = "server", base = "//:jre", steps = [add("jar", "/app")])
+```
+
+A target declared below that point isn't declared yet when the other file names it,
+which is an error saying where the first file stopped; declare the target above that line.
+A reference made by a function of `ctx`, such as `base = lambda ctx: "//:later"`, is resolved
+once every BUILD file has run, so it can name any target.
+Targets that name each other in a cycle, such as `//:app -> //scala:server -> //:app`, are an error.
 The workspace root does not need a `BUILD` file unless a reference or command needs targets from it.
 
 On the command line, unqualified names refer to `-C`'s package:

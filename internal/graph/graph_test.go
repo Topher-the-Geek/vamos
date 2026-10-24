@@ -45,7 +45,12 @@ func testGraph(t *testing.T) *Graph {
 				Base: 1,
 				Steps: []Step{
 					{Op: OpAdd, Display: `add("src", "/src")`, From: from(0), Dest: "/src"},
-					{Op: OpRun, Display: `run(["make"])`, Argv: []string{"make"}},
+					{
+						Op:      OpRun,
+						Display: `run(["make"], secrets=[secret("token", env="TOKEN")])`,
+						Argv:    []string{"make"},
+						Secrets: []Secret{{ID: "token", Env: "TOKEN"}, {ID: "key", File: "/run/secrets/key"}},
+					},
 				},
 				Output: &Output{Source: "/out", Selection: testSelection(t, []string{"."}, nil, nil)},
 			}},
@@ -58,7 +63,8 @@ func testGraph(t *testing.T) *Graph {
 					{Op: OpBuildEnv, Display: `build_env(B="$A")`, Vars: []string{"B=$A"}},
 					{Op: OpWorkdir, Display: `workdir("/app")`, Dir: "/app"},
 				},
-				Command: []string{"/app/server"},
+				Command:    []string{"/app/server"},
+				Entrypoint: &[]string{"/bin/run"},
 			}},
 			{Label: "all", Desc: `index "all"`, Index: &Index{Manifests: []Ref{3}}},
 		},
@@ -154,6 +160,41 @@ func TestGraphValidate(t *testing.T) {
 			name:   "a field of another op",
 			change: func(g *Graph) { g.Nodes[2].Task.Steps[1].Dest = "/x" },
 			want:   "it sets fields that run doesn't use",
+		},
+		{
+			name:   "secrets on a step other than run",
+			change: func(g *Graph) { g.Nodes[3].Layer.Steps[1].Secrets = []Secret{{ID: "t", Env: "T"}} },
+			want:   "it sets fields that env doesn't use",
+		},
+		{
+			name:   "a secret given neither way",
+			change: func(g *Graph) { g.Nodes[2].Task.Steps[1].Secrets[0].Env = "" },
+			want:   `secret "token" must give env or file, but not both`,
+		},
+		{
+			name:   "a secret ID a mount would misread",
+			change: func(g *Graph) { g.Nodes[2].Task.Steps[1].Secrets[0].ID = "a=b" },
+			want:   `secret id "a=b" must be letters`,
+		},
+		{
+			name:   "a secret file that isn't clean",
+			change: func(g *Graph) { g.Nodes[2].Task.Steps[1].Secrets[1].File = "/run/../key" },
+			want:   `file "/run/../key" must be a clean absolute path`,
+		},
+		{
+			name:   "a secret file with a comma",
+			change: func(g *Graph) { g.Nodes[2].Task.Steps[1].Secrets[1].File = "/run/a,b" },
+			want:   `file "/run/a,b" must not contain ","`,
+		},
+		{
+			name:   "two secrets in one file",
+			change: func(g *Graph) { g.Nodes[2].Task.Steps[1].Secrets[0] = Secret{ID: "t", File: "/run/secrets/key"} },
+			want:   "two secrets give file /run/secrets/key",
+		},
+		{
+			name:   "NUL in an entrypoint",
+			change: func(g *Graph) { *g.Nodes[3].Layer.Entrypoint = []string{"a\x00"} },
+			want:   "NUL",
 		},
 		{
 			name:   "an empty argv",

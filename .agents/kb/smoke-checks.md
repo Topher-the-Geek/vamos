@@ -86,6 +86,25 @@ S=examples/strawberry-react
 ./examples/typescript-ui/check.sh
 ```
 
+```sh
+# 11. install.sh, as the release's smoke test runs it: the tutorial's devcontainer Dockerfile on Ubuntu 24.04,
+# installing this platform's release binary from a local directory rather than a release, then the MCP example.
+# Expect "vamos version v0.0.0-test", then the MCP reply.
+shellcheck -s sh install.sh && mkdir -p "$TMP/devc" \
+  && docker build -q --target binary --build-arg VERSION=v0.0.0-test --output "$TMP/devc/dist" . \
+  && mv "$TMP/devc/dist/vamos" "$TMP/devc/dist/vamos-linux-$(go env GOARCH)" && cp install.sh "$TMP/devc/dist/" \
+  && (cd "$TMP/devc/dist" && sha256sum vamos-linux-* > SHA256SUMS) \
+  && awk '/^```dockerfile/ { f = 1; next } /^```/ { f = 0 } f' docs/tutorial.md \
+  | sed 's#^RUN curl -fsSL -o /tmp/vamos-install.sh https://github.com/Topher-the-Geek/vamos/releases/download/[^ ]*/install.sh \\$#COPY dist /tmp/dist\nENV VAMOS_RELEASE_URL=file:///tmp/dist\nRUN curl -fsSL -o /tmp/vamos-install.sh file:///tmp/dist/install.sh \\#' \
+  > "$TMP/devc/Dockerfile" && grep -qF 'file:///tmp/dist/install.sh' "$TMP/devc/Dockerfile" \
+  && docker build -q -t vamos-devcontainer "$TMP/devc" \
+  && docker run --rm vamos-devcontainer vamos --version \
+  && tar -C examples/typescript-mcp --exclude=node_modules -c . | docker run -i --rm --privileged \
+  -v /var/run/docker.sock:/var/run/docker.sock vamos-devcontainer \
+  sh -c 'mkdir /example && tar -x -C /example && vamos load server vamos-example:install -C /example' \
+  && docker run -i --rm vamos-example:install < examples/typescript-mcp/echo-request.jsonl
+```
+
 `push` has no manual check here:
 the tests already push to a real (in-process) registry, from the executor and from the client.
 
@@ -164,6 +183,38 @@ docker compose -f remote/compose.yaml up -d --wait \
       for i in 1 2; do docker compose -f remote/compose.yaml exec --index $i worker ls /sys/fs/cgroup/vamos; done); \
   docker network disconnect remote_default "vamos_$(basename "$WORKSPACE_FOLDER")"; \
   docker compose -f remote/compose.yaml down
+```
+
+## Kubernetes
+
+The Helm chart's checks run on the kind cluster of the [remote environment](remote-environment.md#kubernetes),
+installed as that section shows, with the slow project of the checks above and the coordinator forwarded to
+`127.0.0.1:18080`. Run each check's lines as one script: a client started in the background of one shell and watched
+from another is easily killed with it.
+
+```sh
+# K1. The chart renders, and what it renders is valid Kubernetes; expect no errors and every resource valid.
+helm lint --strict remote/helm/vamos \
+  && helm template vamos remote/helm/vamos | kubeconform -strict -summary
+
+# K2. A worker killed mid-build, as R4: the build succeeds with a retry, and the worker comes back in the same pod,
+# cleaning up after its attempt. Each worker has a cgroup namespace of its own, so the attempt's cgroup is in the
+# pod that runs it alone, which picks the victim.
+./vamos build slow --rebuild -C "$TMP/slow" --coordinator http://127.0.0.1:18080 --trace "$TMP/k2.json" & B=$!
+sleep 15
+for p in $(kubectl -n vamos get pods -o name | grep worker); do
+  kubectl -n vamos exec $p -- nsenter -t 1 -C -m ls /sys/fs/cgroup/vamos | grep -q attempt && V=$p
+done
+docker exec vamos-control-plane crictl stop --timeout 0 \
+  "$(kubectl -n vamos get $V -o jsonpath='{.status.containerStatuses[0].containerID}' | sed 's|containerd://||')"
+wait $B; grep -o '"retry 1"' "$TMP/k2.json"; sleep 5; kubectl -n vamos logs $V | grep -i "registered\|cleaning up"
+
+# K3. Ctrl-C kills the running attempt, as R5: expect no attempt cgroup left on any worker.
+./vamos build slow --rebuild -C "$TMP/slow" --coordinator http://127.0.0.1:18080 & B=$!
+sleep 15; kill -INT $B; wait $B; sleep 5
+for p in $(kubectl -n vamos get pods -o name | grep worker); do
+  kubectl -n vamos exec $p -- nsenter -t 1 -C -m ls /sys/fs/cgroup/vamos | grep attempt
+done
 ```
 
 Remove the temporary artifacts after the checks: `rm -rf -- "$TMP"`.

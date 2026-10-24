@@ -64,6 +64,7 @@ type options struct {
 	tlsVerify     tlsVerifyFlag // --tls-verify, which applies to the client's own registry access
 	timestamp     timestampFlag // --timestamp
 	sets          []string      // --set
+	secrets       secretsFlag   // --secret
 	platform      string        // --platform
 	trace         string        // --trace
 	execPlatform  string        // --exec-platform
@@ -180,8 +181,9 @@ func NewRootCommand(cfg Config) *cobra.Command {
 	opts := &defaults
 
 	root := &cobra.Command{
-		Use:   "vamos",
-		Short: "Build container images from Starlark BUILD files",
+		Use:     "vamos",
+		Short:   "Build container images from Starlark BUILD files",
+		Version: cmp.Or(run.Version(), "(devel)"),
 		// Arguments are valid by the time this runs, so later errors shouldn't print usage.
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			cmd.SilenceUsage = true
@@ -217,6 +219,10 @@ func NewRootCommand(cfg Config) *cobra.Command {
 	root.PersistentFlags().StringArrayVar(&opts.sets, "set", nil,
 		"give a parameter of the named target a value, as `name=value`; separate a list's strings with commas. "+
 			"build gives it to each named target that has the parameter")
+	root.PersistentFlags().Var(&opts.secrets, "secret",
+		"give run() steps' secret `id=ID,env=VARIABLE` the value of this environment variable, "+
+			"or id=ID,src=FILE that of this file; repeat it for each secret. "+
+			"Secrets stay out of the build cache and images, and are never sent to a coordinator")
 	root.PersistentFlags().StringVar(&opts.platform, "platform", "",
 		"build for this `os/arch`, such as linux/arm64, rather than the host's")
 	root.PersistentFlags().StringVar(&opts.execPlatform, "exec-platform", "",
@@ -410,17 +416,28 @@ func NewRootCommand(cfg Config) *cobra.Command {
 }
 
 // UsesContainerStore reports whether the command line args names a command that opens container storage:
-// every command but a coordinator, which schedules builds and keeps no images, unless it builds locally.
-// main consults it before the re-exec that container storage needs from a root without capabilities.
+// every command but a coordinator, which schedules builds and keeps no images, unless it builds locally,
+// and but the root command, help and --version, which print and exit.
+// main consults it before the re-exec that container storage needs from a root without capabilities,
+// which fails where user namespaces are refused, as in a Dockerfile's RUN step that runs `vamos --version`.
 // The command is found as cobra finds it, so that a target or directory named "coordinator" isn't mistaken for it;
 // a command line that doesn't parse is left to Execute to refuse, after the re-exec, which is harmless.
 func UsesContainerStore(args []string) bool {
 	root := NewRootCommand(Config{Fs: afero.NewMemMapFs()})
 	cmd, rest, err := root.Traverse(args)
-	if err != nil || cmd.Name() != "coordinator" {
+	if err != nil {
 		return true
 	}
+	// Execute adds these flags, and the help and completion commands, which Traverse leaves to the root.
+	cmd.InitDefaultHelpFlag()
+	root.InitDefaultVersionFlag()
 	if err := cmd.ParseFlags(rest); err != nil {
+		return true
+	}
+	if help, err := cmd.Flags().GetBool("help"); cmd == root || err == nil && help {
+		return false
+	}
+	if cmd.Name() != "coordinator" {
 		return true
 	}
 	local, err := cmd.Flags().GetBool("local")
@@ -521,6 +538,10 @@ func (inv *invocation) executor() (executor, *types.SystemContext, error) {
 		return nil, nil, err
 	}
 	if inv.opts.coordinator != "" {
+		if len(inv.opts.secrets) > 0 {
+			return nil, nil, fmt.Errorf("--secret %s can't go to a coordinator, which has no authentication or TLS; "+
+				"build in this process, without --coordinator or $VAMOS_COORDINATOR", inv.opts.secrets[0].id)
+		}
 		client, err := remote.NewClient(inv.opts.coordinator)
 		if err != nil {
 			return nil, nil, fmt.Errorf("--coordinator: %w", err)
@@ -848,6 +869,14 @@ func (inv *invocation) runGraph(
 		}
 		return fileset.Store(ctx, c, fsys, dir, sel)
 	}
+	secrets, err := inv.opts.secrets.values()
+	if err != nil {
+		return nil, nil, err
+	}
+	req.Secrets = map[string]bool{}
+	for id := range secrets {
+		req.Secrets[id] = true
+	}
 	ctx := inv.ctx
 	g, err := load.Load(ctx, inv.app.fs, req)
 	if err != nil {
@@ -876,6 +905,7 @@ func (inv *invocation) runGraph(
 		Timestamp:  time.Time(inv.opts.timestamp),
 		Emulate:    inv.opts.emulate,
 		Generation: inv.generation, // read before the sources were captured: a prune since refuses the build
+		Secrets:    secrets,
 	}
 	events.graph = g
 	var runSpan *tracing.Active
@@ -1426,6 +1456,86 @@ func (f *tlsVerifyFlag) Type() string { return "bool" }
 
 // IsBoolFlag lets the flag be given without a value, as a bool flag is.
 func (f *tlsVerifyFlag) IsBoolFlag() bool { return true }
+
+// secretsFlag is the value of --secret, repeated: the secrets that run() steps are given, each by its ID,
+// from an environment variable or a file, which are read only once a build needs them.
+type secretsFlag []secretSource
+
+// secretSource is where one --secret's value comes from: the variable env or the file src, one of them.
+type secretSource struct {
+	id, env, src string
+}
+
+func (f *secretsFlag) String() string {
+	var given []string
+	for _, s := range *f {
+		if s.env != "" {
+			given = append(given, "id="+s.id+",env="+s.env)
+		} else {
+			given = append(given, "id="+s.id+",src="+s.src)
+		}
+	}
+	return strings.Join(given, " ")
+}
+
+// Set parses value as id=ID,env=VARIABLE or id=ID,src=FILE, refusing an ID given before.
+func (f *secretsFlag) Set(value string) error {
+	var s secretSource
+	for _, field := range strings.Split(value, ",") {
+		key, v, ok := strings.Cut(field, "=")
+		switch {
+		case !ok || v == "":
+			return fmt.Errorf("%q isn't key=value; want id=ID,env=VARIABLE or id=ID,src=FILE", field)
+		case key == "id":
+			s.id = v
+		case key == "env":
+			s.env = v
+		case key == "src":
+			s.src = v
+		default:
+			return fmt.Errorf("unknown key %q; want id=ID,env=VARIABLE or id=ID,src=FILE", key)
+		}
+	}
+	if err := graph.CheckSecret(graph.Secret{ID: s.id, File: "/" + s.id}); err != nil {
+		return err
+	}
+	if (s.env == "") == (s.src == "") {
+		return fmt.Errorf("secret %q needs env=VARIABLE or src=FILE, but not both", s.id)
+	}
+	for _, given := range *f {
+		if given.id == s.id {
+			return fmt.Errorf("secret %q is given twice", s.id)
+		}
+	}
+	*f = append(*f, s)
+	return nil
+}
+
+func (f *secretsFlag) Type() string {
+	return "id=ID,env=VARIABLE|src=FILE"
+}
+
+// values reads each secret's value, by its ID: an unset variable or a file that can't be read is an error,
+// naming the secret but never a value.
+func (f secretsFlag) values() (map[string][]byte, error) {
+	values := map[string][]byte{}
+	for _, s := range f {
+		if s.env != "" {
+			v, ok := os.LookupEnv(s.env)
+			if !ok {
+				return nil, fmt.Errorf("--secret id=%s,env=%s: $%s isn't set", s.id, s.env, s.env)
+			}
+			values[s.id] = []byte(v)
+			continue
+		}
+		data, err := os.ReadFile(s.src)
+		if err != nil {
+			return nil, fmt.Errorf("--secret id=%s,src=%s: %w", s.id, s.src, err)
+		}
+		values[s.id] = data
+	}
+	return values, nil
+}
 
 // timestampFlag is the value of --timestamp: a time given in Unix seconds or in RFC 3339 form.
 type timestampFlag time.Time

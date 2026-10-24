@@ -1,6 +1,8 @@
 # BUILD language reference
 
 A `BUILD` file is a Starlark program that declares named targets.
+It may be named `BUILD.vms` instead, where a `build` directory beside it would clash with `BUILD`;
+see [workspaces](configuration.md#workspaces).
 Use lists, dictionaries, functions, and comprehensions to compose declarations.
 Commands run inside build containers through `run()` steps.
 
@@ -114,11 +116,29 @@ layer(
 | `base` | A pull or layer reference, or `"scratch"` | Required |
 | `steps` | Steps applied in order | `[]` |
 | `command` | Image's default command as an argument list | Inherited from the base |
+| `entrypoint` | Image's entrypoint as an argument list | Inherited from the base |
 
 A layer keeps the base's files and runtime configuration and applies its own changes.
 `command` sets the image's command; it does not run while building.
-It follows the inherited image entrypoint, if one exists, as Docker's `CMD` does.
+It follows the entrypoint, if one exists, as Docker's `CMD` does.
 An omitted or empty `command` leaves the inherited command in place.
+
+`entrypoint` sets the program the image runs, as Docker's `ENTRYPOINT` does:
+`docker run` arguments are appended to it rather than replacing it.
+
+```python
+layer(
+    name = "server",
+    base = "jre",
+    steps = [add("jar", "/app")],
+    entrypoint = ["java", "-jar", "/app/server.jar"],
+)
+```
+
+`docker run server --port 9` then runs `java -jar /app/server.jar --port 9`.
+As in a Dockerfile, giving `entrypoint` drops the inherited command, which would otherwise become its arguments;
+give `command` as well for default arguments.
+`entrypoint = []` removes the inherited entrypoint, and an omitted `entrypoint` keeps it.
 A layer's base must have the same platform as the layer.
 
 ## `index()`
@@ -190,6 +210,43 @@ run(["sh", "-c", "mkdir -p /out && printf 'hello\\n' > /out/message.txt"])
 
 Use a shell explicitly for redirection, pipes, or shell variable expansion.
 The base image must contain every command you run, including the shell.
+
+A command runs with chroot isolation, in the network of the process that runs vamos:
+the same interfaces and addresses, and the same DNS servers, from its `/etc/resolv.conf`.
+In a devcontainer, a step reaches what the devcontainer reaches,
+such as the services of a Docker Compose network that the devcontainer is on, by their names;
+on a [coordinator's](cli.md#coordinator) workers, it reaches what the worker's container reaches.
+The step gets a hostname of its own and an `/etc/hosts` that names it and `host.containers.internal`,
+neither of which stays in the image.
+Network access is not an input of a target's [cache key](cache.md#what-changes-a-result):
+a step that downloads, or talks to a service, is reused like any other until its inputs change.
+
+### Secrets
+
+A step that needs a credential, such as a token to upload source maps, is given it as a secret:
+
+```python
+run(
+    ["sh", "-c", "sentry-cli sourcemaps upload dist"],
+    secrets = [secret("sentry", env = "SENTRY_AUTH_TOKEN")],
+)
+run(["sh", "-c", "npm ci"], secrets = [secret("npmrc", file = "/root/.npmrc")])
+```
+
+`secret(id, env = ...)` sets the variable `env` for that step alone,
+and `secret(id, file = ...)` mounts a read-only file, owned by root, at that absolute path for that step alone.
+Each secret gives exactly one of them.
+The value comes from the command line, `--secret id=sentry,env=SENTRY_AUTH_TOKEN` or `--secret id=npmrc,src=.npmrc`;
+see [the CLI reference](cli.md#secrets).
+A build that reaches a step whose secret the command line doesn't give fails when the BUILD file loads,
+before anything runs.
+
+A secret's value never enters an image, the build cache, a trace or the graph.
+The step's cache key covers each secret's ID and where it is given, but not its value,
+so a new value doesn't run the step again, and a cached step's replayed output is from the run that made it.
+A step that must run again, such as an upload for each release, should depend on what identifies the release,
+such as a parameter, `build_env(VERSION = ctx.version)`.
+A step can still print its secret, and its output is kept with its result; don't echo secrets.
 
 ### `env(**variables)` and `build_env(**variables)`
 

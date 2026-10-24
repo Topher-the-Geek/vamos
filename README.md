@@ -5,6 +5,8 @@ to build container images described by `BUILD` files written in [Starlark](https
 
 Start with the [tutorial](docs/tutorial.md) to learn the core concepts, set up vamos,
 and build a website into a running container.
+To build your own project, [install vamos](docs/tutorial.md#in-your-projects-devcontainer) in its devcontainer,
+or on a Linux machine, with a release's `install.sh`.
 The [user guide](docs/README.md) links to the CLI, BUILD language, configuration, and cache references.
 
 ## Development

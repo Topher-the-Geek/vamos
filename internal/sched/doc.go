@@ -13,6 +13,8 @@
 // so that no record names an artifact that isn't there; the latest write wins.
 // Action keys exclude provenance, emulation, locations and target naming; ActionVersion changes when what a key
 // covers, or how a target is built, changes.
+// A key names a run() step's secrets by ID and how they are given, never by value; Request.Secrets, the values an
+// action's steps use, is never encoded, so it reaches only a Runner in the job's own process, never a worker.
 // Demanded tells a coordinator whether any attached job still wants an attempt, so that one waiting for a worker is
 // taken back once every job that needed it has expired.
 // Emulation is permission, not identity: a Request says whether its commands run emulated and whether its job

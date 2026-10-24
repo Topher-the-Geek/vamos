@@ -33,7 +33,7 @@ type workspace struct {
 	root         string                // absolute: the directory holding the WORKSPACE file, or else the only package
 	current      string                // the package of -C, whose targets are named without a label
 	packages     map[string]*buildFile // those loaded, by package
-	loading      []string              // packages being loaded, innermost last, to report a cycle
+	loading      []*buildFile          // BUILD files running, innermost last, which others may name targets of
 	modules      map[string]*module    // .star files loaded, by label
 	execPlatform *platformValue        // the executor's, which run() steps run on without emulation, as EXEC_PLATFORM
 	platform     *platformValue        // the command's, given with --platform: the named target's, unless an index
@@ -48,6 +48,11 @@ type buildFile struct {
 	path  string                  // of the BUILD file, for messages
 	names []string                // of every target, globs included, in the order declared
 	decls map[string]*declaration // each target, by name
+
+	// While the file runs: the thread running it, which says how far it has run, for a package it loads that names
+	// a target it hasn't declared yet, and the name of the target it is declaring, if any, to report a cycle.
+	thread    *starlark.Thread
+	declaring string
 }
 
 // declaration records a target of a BUILD file: where it was declared, by which builtin,
@@ -147,8 +152,10 @@ type targetSpec struct {
 	base    confLabel // of an instance: the base in its configuration
 	steps   []step    // applied in order
 	command []string  // a layer's default command
-	source  string    // a task's directory of output
-	output  *fileSet  // a task's output, found in source; nil for a layer, or a task without output
+	// entrypoint is a layer's, if given, even empty, which graph.Layer.Entrypoint describes; nil if not given
+	entrypoint *[]string
+	source     string   // a task's directory of output
+	output     *fileSet // a task's output, found in source; nil for a layer, or a task without output
 }
 
 // indexSpec is an index of images for several platforms, declared by a call to index():
@@ -275,32 +282,32 @@ func (w *workspace) display(l string) string {
 // load returns the BUILD file of package pkg, loading it if it hasn't been.
 // Loading it loads the packages whose targets it names too, before the targets that name them are declared,
 // so every target is declared after those it uses.
+// A package still loading, because the file of one it loaded names its targets, is returned as it is so far:
+// its targets declared above the point where it loaded the other can be named, as within one file;
+// resolve reports the others, which are those declared below it, a cycle of targets, or none.
 func (w *workspace) load(pkg string) (*buildFile, error) {
 	if f, ok := w.packages[pkg]; ok {
 		return f, nil
 	}
-	if i := slices.Index(w.loading, pkg); i >= 0 {
-		var cycle []string
-		for _, p := range append(slices.Clone(w.loading[i:]), pkg) {
-			cycle = append(cycle, "//"+p+":")
-		}
-		return nil, fmt.Errorf("packages name each other's targets in a cycle: %s", strings.Join(cycle, " -> "))
+	if i := slices.IndexFunc(w.loading, func(f *buildFile) bool { return f.pkg == pkg }); i >= 0 {
+		return w.loading[i], nil
 	}
 	if err := w.checkPackageDir(pkg); err != nil {
 		return nil, err
 	}
 	dir := filepath.Join(w.root, filepath.FromSlash(pkg))
-	buildPath := filepath.Join(dir, "BUILD")
+	buildPath, err := w.findBuildFile(dir)
+	if err != nil {
+		return nil, err
+	}
 	src, err := afero.ReadFile(w.fs, buildPath)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("no BUILD file in %s", dir)
-	} else if err != nil {
+	if err != nil {
 		return nil, err
 	}
 
-	w.loading = append(w.loading, pkg)
-	defer func() { w.loading = w.loading[:len(w.loading)-1] }()
 	f := &buildFile{pkg: pkg, dir: dir, path: buildPath, decls: map[string]*declaration{}}
+	w.loading = append(w.loading, f)
+	defer func() { w.loading = w.loading[:len(w.loading)-1] }()
 	if err := w.exec(f, src); err != nil {
 		var nested *loadError
 		if !errors.As(err, &nested) {
@@ -310,6 +317,38 @@ func (w *workspace) load(pkg string) (*buildFile, error) {
 	}
 	w.packages[pkg] = f
 	return f, nil
+}
+
+// buildFileNames are the names a package's BUILD file may have.
+// BUILD.vms is for a directory that also holds a directory named build, as a project's build output often is:
+// where names are compared without case, as on macOS or with git's core.ignorecase, BUILD can't sit beside it,
+// and a .gitignore of build ignores BUILD too.
+var buildFileNames = []string{"BUILD", "BUILD.vms"}
+
+// findBuildFile returns the path of the BUILD file in dir, by one of buildFileNames.
+// A directory by one of the names, as build is found as BUILD where names are compared without case, isn't one.
+// Two are an error rather than one hiding the other, since a change to the hidden one would be silently ignored.
+func (w *workspace) findBuildFile(dir string) (string, error) {
+	var found []string
+	for _, name := range buildFileNames {
+		p := filepath.Join(dir, name)
+		info, err := w.fs.Stat(p)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return "", err
+		}
+		if !info.IsDir() {
+			found = append(found, p)
+		}
+	}
+	switch len(found) {
+	case 0:
+		return "", fmt.Errorf("no BUILD or BUILD.vms file in %s", dir)
+	case 1:
+		return found[0], nil
+	}
+	return "", fmt.Errorf("%s has both BUILD and BUILD.vms; a package has one BUILD file, so remove one of them", dir)
 }
 
 // checkPackageDir reports a symbolic link on the way from the workspace's root to package pkg,
@@ -389,6 +428,8 @@ func (w *workspace) exec(f *buildFile, src []byte) error {
 	thread := &starlark.Thread{Name: f.path, Load: w.loadModule}
 	thread.SetLocal(contextKey, c)
 	defer cancelWith(w.ctx, thread)()
+	f.thread = thread
+	defer func() { f.thread, f.declaring = nil, "" }()
 	if _, err := starlark.ExecFileOptions(&syntax.FileOptions{}, thread, f.path, src, w.predeclared()); err != nil {
 		return w.interrupted(describeExecError(err))
 	}
@@ -473,11 +514,12 @@ func (w *workspace) predeclared() starlark.StringDict {
 		return names
 	}
 	globParams := append([]string{"name"}, selectionNames(true)...)
+	layerParams := []string{"name", "base", "steps?", "command?", "entrypoint?"}
 	taskParams := append([]string{"name", "base", "steps?", "source?"}, selectionNames(false)...)
 	w.builtins = starlark.StringDict{
 		"glob":          w.declarer("glob", globParams, w.makeGlob),
 		"pull":          w.declarer("pull", []string{"name", "image", "tag?"}, w.makePull),
-		"layer":         w.declarer("layer", []string{"name", "base", "steps?", "command?"}, w.makeLayer),
+		"layer":         w.declarer("layer", layerParams, w.makeLayer),
 		"task":          w.declarer("task", taskParams, w.makeTask),
 		"index":         w.declarer("index", []string{"name", "layer", "platforms?"}, w.makeIndex),
 		"add":           track(starlark.NewBuiltin("add", w.newAdd)),
@@ -526,6 +568,10 @@ func (w *workspace) declarer(kind string, params []string, makeTemplate makeFunc
 				"declare it in a function that a BUILD file calls", fn.Name())
 		}
 		d := &declaration{kind: kind, pos: thread.CallFrame(1).Pos, file: c.file}
+		// Say which target the file is declaring while it names others, which may name it back.
+		outer := c.file.declaring
+		c.file.declaring = nameArg(args, kwargs)
+		defer func() { c.file.declaring = outer }()
 		var err error
 		if kwargs, d.params, err = takeParams(fn.Name(), kwargs); err != nil {
 			return nil, err
@@ -713,6 +759,8 @@ func (w *workspace) resolve(
 	d, ok := from.decls[name]
 	declaring := from == c.file && c.mode == declaring
 	switch {
+	case !ok && from.thread != nil && from != c.file:
+		return nil, fmt.Errorf("%s: %s %q: %w", fn.Name(), param, ref.ref, w.notDeclaredYet(from, name))
 	case !ok && declaring && !image && strings.Contains(name, ":"):
 		return nil, fmt.Errorf("%s: %s %q is not an earlier %s%s",
 			fn.Name(), param, ref.ref, want, labelHint(name))
@@ -733,6 +781,46 @@ func (w *workspace) resolve(
 	}
 	ref.label = label(from.pkg, name)
 	return d, nil
+}
+
+// notDeclaredYet explains why the file from, which is still running, has no target name yet:
+// from is declaring it, so the targets that name it name each other in a cycle;
+// or it declares it, if at all, below the point where it loaded the package naming it.
+func (w *workspace) notDeclaredYet(from *buildFile, name string) error {
+	if from.declaring == name {
+		var cycle []string
+		for _, f := range w.loading[slices.Index(w.loading, from):] {
+			cycle = append(cycle, label(f.pkg, f.declaring))
+		}
+		return fmt.Errorf("targets name each other in a cycle: %s -> %s", strings.Join(cycle, " -> "),
+			label(from.pkg, name))
+	}
+	at := from.path
+	for depth := 0; depth < from.thread.CallStackDepth(); depth++ {
+		if pos := from.thread.CallFrame(depth).Pos; pos.Filename() == from.path {
+			at = pos.String()
+			break
+		}
+	}
+	return fmt.Errorf("%s isn't declared yet: its BUILD file is stopped at %s, loading this package; "+
+		"declare %s above that line, or name it from a function of ctx, which runs once every BUILD file has run",
+		label(from.pkg, name), at, name)
+}
+
+// nameArg returns the name a call declaring a target gives, as its first argument or by name, or "" if it gives none
+// that is a string, which the declarer then reports.
+func nameArg(args starlark.Tuple, kwargs []starlark.Tuple) string {
+	if len(args) > 0 {
+		s, _ := starlark.AsString(args[0])
+		return s
+	}
+	for _, kv := range kwargs {
+		if string(kv[0].(starlark.String)) == "name" {
+			s, _ := starlark.AsString(kv[1])
+			return s
+		}
+	}
+	return ""
 }
 
 // newAdd implements add(source, dest, owner, group), checking the target it names as it is called.
@@ -796,12 +884,13 @@ func (w *workspace) makeLayer(
 ) (string, any, error) {
 	var name string
 	var base starlark.Value
-	var steps, command *starlark.List
+	var steps, command, entrypoint *starlark.List
 	if err := starlark.UnpackArgs(fn.Name(), args, kwargs,
 		"name", &name,
 		"base", &base,
 		"steps?", &steps,
 		"command?", &command,
+		"entrypoint?", &entrypoint,
 	); err != nil {
 		return "", nil, err
 	}
@@ -813,6 +902,13 @@ func (w *workspace) makeLayer(
 	}
 	if s.command, err = stringList(fn.Name(), "command", command); err != nil {
 		return "", nil, err
+	}
+	if entrypoint != nil {
+		list, err := stringList(fn.Name(), "entrypoint", entrypoint)
+		if err != nil {
+			return "", nil, err
+		}
+		s.entrypoint = &list
 	}
 	if s.baseRef, err = w.makeBase(c, fn, base); err != nil {
 		return "", nil, err

@@ -84,7 +84,8 @@ func Isolation() string {
 	return isolation.String()
 }
 
-// Version returns the version of vamos, as the Go module that built it records, or "" if that is unknown.
+// Version returns the version of vamos, as the release build stamped it or the Go module that built it records,
+// or "" if that is unknown.
 func Version() string {
 	return vamosVersion()
 }
@@ -186,7 +187,11 @@ func (l *Local) Close() error {
 	defer l.mu.Unlock()
 	var errs []error
 	if l.store != nil {
-		if _, err := l.store.Shutdown(false); err != nil {
+		// Shutdown reports a layer used if any in the store is mounted, by this process or another sharing the store,
+		// such as a second vamos building at the same time. This executor's jobs have removed their own containers,
+		// and reported a failure to, so a layer still mounted is another's, and that is no failure.
+		// force must stay false: it would unmount every mounted layer in the store, under another's running build.
+		if _, err := l.store.Shutdown(false); err != nil && !errors.Is(err, storage.ErrLayerUsedByContainer) {
 			errs = append(errs, fmt.Errorf("shutting down the container store: %w", err))
 		}
 		l.store = nil
@@ -228,8 +233,17 @@ func checkExecPlatform(platform string) error {
 	return nil
 }
 
-// vamosVersion returns the version of vamos, as the Go module that built it records, or "" if that is unknown.
+// stampedVersion is the release's version, such as v0.1.0, which the release build sets with
+// -ldflags "-X github.com/Topher-the-Geek/vamos/internal/run.stampedVersion=v0.1.0";
+// the Dockerfile builds outside the repository's git metadata, so the build info can't record it.
+var stampedVersion string
+
+// vamosVersion returns the version of vamos, as the release build stamped it or the Go module that built it records,
+// or "" if that is unknown.
 func vamosVersion() string {
+	if stampedVersion != "" {
+		return stampedVersion
+	}
 	info, ok := debug.ReadBuildInfo()
 	if !ok || info.Main.Version == "(devel)" {
 		return ""
@@ -366,7 +380,9 @@ func (l *Local) run(ctx context.Context, req api.GraphRequest, ev sched.Events) 
 	// Emulation needs no permission locally, as it never has; whether it should is decided before remote execution
 	// is released, and the switch is optIn.
 	b := sched.Backend{Content: l.content, Records: l.records, Checker: l.runner, Runner: l.sharing}
-	opts := sched.Options{Rebuild: req.Rebuild, Timestamp: req.Timestamp, Emulate: req.Emulate, Bound: 1}
+	opts := sched.Options{
+		Rebuild: req.Rebuild, Timestamp: req.Timestamp, Emulate: req.Emulate, Bound: 1, Secrets: req.Secrets,
+	}
 	return sched.New(g, b, ev, opts).Run(ctx)
 }
 

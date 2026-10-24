@@ -1,6 +1,7 @@
 {
   "name": "vamos_${localWorkspaceFolderBasename}",
   "dockerFile": "Dockerfile",
+  "initializeCommand": "mkdir -p \"$HOME/tmp/vamos-scratch\"",
   "workspaceMount": "source=${localWorkspaceFolder}/..,target=/worktrees,type=bind,consistency=cached",
   "workspaceFolder": "/worktrees/${localWorkspaceFolderBasename}",
   "containerEnv": {
@@ -15,6 +16,7 @@
         "dbaeumer.vscode-eslint",
         "golang.go",
         "ms-azuretools.vscode-docker",
+        "ms-kubernetes-tools.vscode-kubernetes-tools",
         "ms-python.python",
         "ms-python.vscode-pylance",
         "openai.chatgpt",
@@ -24,7 +26,8 @@
     }
   },
   "mounts": [
-    "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
+    "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind",
+    "source=${localEnv:HOME}/tmp/vamos-scratch,target=/scratch,type=bind"
   ],
   "runArgs": [
     "--name=vamos_${localWorkspaceFolderBasename}",
