@@ -1,0 +1,11 @@
+# Placeholder so GitHub can dispatch this workflow; the real one lives on release-deploy.
+# Run it there with `gh workflow run release.yml --ref release-deploy -f tag=...`.
+name: release
+
+on: workflow_dispatch
+
+jobs:
+  hola:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo hola
