@@ -234,11 +234,19 @@ Reading the target platform here changes the compiler environment, producing a s
 A layer's base must match the layer's own platform; use a task to separate native tools from target output.
 
 The execution platform is chosen among those the executor offers, before the BUILD files are read:
-the one `--exec-platform` names if it is given, otherwise this machine's platform if the executor offers it,
-and otherwise the only one it offers.
+the one `--exec-platform` names if it is given, otherwise the one a coordinator's `--default-exec-platform` names,
+otherwise this machine's platform if the executor offers it, and otherwise the only one it offers.
+Since it configures `EXEC_PLATFORM`, it is part of those targets' cache keys:
+a coordinator with `--default-exec-platform` gives clients on laptops and CI runners of other architectures
+the same keys, so they reuse each other's results.
 The executor built into vamos offers this machine's platform alone; a [coordinator](cli.md#coordinator) offers the
 platforms of its workers, so a client on an Apple-silicon laptop building against an amd64 pool runs its commands
 on `linux/amd64`, while `--platform` still says what to build and defaults to the client's own platform.
+A coordinator runs each layer's and task's commands on a worker of its image's platform
+when the deployment offers that platform, and on the execution platform otherwise,
+so an index for `linux/amd64` and `linux/arm64` builds natively on a pool with workers of both.
+The execution platform runs what `EXEC_PLATFORM` names, and tasks on `scratch`.
+Where a target runs is no part of its cache key, so a result built on either platform's worker is reused.
 
 If a `run()` executes another architecture's programs, the kernel needs a registered emulator for that architecture.
 Otherwise the command can fail with `exec format error`.

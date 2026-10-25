@@ -7,6 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/Topher-the-Geek/vamos/internal/api"
@@ -30,6 +33,11 @@ type Request struct {
 	// Platform is the platform of the image a layer or task is built on, which buildah is told to expect;
 	// "" on scratch.
 	Platform string `json:"platform,omitempty"`
+	// RunPlatform is the platform of the executor that runs the action: its image's, ImagePlatform, where the
+	// executor runs that natively, as Options.Native says, and otherwise the graph's execution platform;
+	// a coordinator gives an action that runs commands only to a worker of it, and one that runs none, a resolve or
+	// a target that only adds files, to a worker of it if one is registered and otherwise to any.
+	RunPlatform string `json:"run_platform,omitempty"`
 	// Bases is where the base image's bytes are, for a Runner whose store lacks it; the image is Action.Base.
 	Bases []cache.Location `json:"bases,omitempty"`
 	// Displays names each step as the BUILD file wrote it, by index, for the trace; messages are the Scheduler's.
@@ -45,7 +53,7 @@ type Request struct {
 	// Rewrite names the blobs found corrupt in this job, which a task that makes them writes again
 	// rather than finding them present.
 	Rewrite map[digest.Digest]bool `json:"rewrite,omitempty"`
-	// Emulated says the action's run() steps run in an image for another platform than the execution platform,
+	// Emulated says the action's run() steps run in an image for another platform than RunPlatform,
 	// so under emulation: such work goes only to a worker that emulates ImagePlatform.
 	Emulated bool `json:"emulated,omitempty"`
 	// Permitted says the job permits emulated execution; a job without it may attach to an emulating attempt in
@@ -66,6 +74,19 @@ func (r *Request) ImagePlatform() string {
 	return r.Platform
 }
 
+// RunsCommands reports whether the action has a run() step, which must run on RunPlatform; a resolve has none.
+func (r *Request) RunsCommands() bool {
+	if r.Action == nil {
+		return false
+	}
+	for _, in := range r.Action.Steps {
+		if in.Op == graph.OpRun {
+			return true
+		}
+	}
+	return false
+}
+
 // Report is what a Runner returns from an attempt, for the caller to record once the artifact is published:
 // the result, and for a resolve the tag record to write, with its instance for the platform complete.
 // It crosses as JSON, from a worker to its coordinator.
@@ -80,6 +101,12 @@ type Output interface {
 	// Output passes on what the action's run() steps print to stream: cache.StreamStdout or cache.StreamStderr.
 	// data is valid only during the call.
 	Output(stream byte, data []byte)
+}
+
+// Joiner is an Output that a Runner tells, before the action runs, whose attempt runs it: its own, with nil, or the
+// one in flight of the same key that it attached to, with the Output of the job that started that attempt.
+type Joiner interface {
+	Join(starter Output)
 }
 
 // OutputFunc is an Output that calls itself.
@@ -239,6 +266,15 @@ type Options struct {
 	// Secrets are the values of the secrets the build was given, by ID, as api.GraphRequest.Secrets has them;
 	// each action's request carries those its steps use.
 	Secrets map[string][]byte
+	// Native names the platforms, as platforms.Format gives them normalized, that the executor runs commands on
+	// without emulation, besides the graph's execution platform, which it always does: an action runs on its
+	// image's platform if that is one of them, and otherwise on the execution platform. Where it runs is no part
+	// of its key. A local executor runs on its own platform alone.
+	Native []string
+	// Offered, if set, is asked whether the executor now runs commands natively on an image's platform that
+	// Native doesn't name, as the walk reaches an action for it; once it says so, the platform is native for the
+	// rest of the build. It is called by one goroutine at a time.
+	Offered func(platform string) bool
 }
 
 // Scheduler walks a graph in dependency order, resolving each node's inputs, computing its key,
@@ -261,6 +297,9 @@ type Scheduler struct {
 	images  map[graph.Ref]builtImage // the images of pulls and layers, once they are ready
 	trees   map[graph.Ref]setTree    // the files of tasks, once they have run
 	indexes map[graph.Ref][]api.Manifest
+	// native names the platforms that commands run on natively: Options.Native, the execution platform and those
+	// that Options.Offered said were; the walk alone reads and writes it.
+	native map[string]bool
 
 	// handled, if set, is called by walk once it has handled each completion,
 	// so that a test can order what it releases after what the walk has seen.
@@ -293,6 +332,10 @@ func New(g *graph.Graph, b Backend, ev Events, opts Options) *Scheduler {
 			}
 		}
 	}
+	native := map[string]bool{g.ExecPlatform: true}
+	for _, p := range opts.Native {
+		native[p] = true
+	}
 	return &Scheduler{
 		graph:   g,
 		content: b.Content,
@@ -309,6 +352,7 @@ func New(g *graph.Graph, b Backend, ev Events, opts Options) *Scheduler {
 		},
 		trees:   map[graph.Ref]setTree{},
 		indexes: map[graph.Ref][]api.Manifest{},
+		native:  native,
 	}
 }
 
@@ -632,6 +676,7 @@ func (s *Scheduler) prepareResolve(ref graph.Ref, again bool) func(context.Conte
 	again = again && a.Index == ""
 	// A fresh resolution never joins one in flight, which may give the tag as the record store has it.
 	force := s.rebuild[ref] || again
+	runPlatform := s.runPlatform(a.Platform)
 	return func(ctx context.Context) (c completion) {
 		c.ref = ref
 		ctx, span := tracing.StartTrack(ctx, n.Desc, n.Desc, "image", n.Pull.Image, "platform", n.Pull.Platform)
@@ -640,7 +685,7 @@ func (s *Scheduler) prepareResolve(ref graph.Ref, again bool) func(context.Conte
 			// The tag may name a newer image now.
 			s.events.Status(ref, "pulling again")
 		}
-		result, err := s.resolve(ctx, ref, a, again, force)
+		result, err := s.resolve(ctx, ref, a, runPlatform, again, force)
 		if err != nil {
 			c.err = s.failed(ref, err)
 			return c
@@ -657,7 +702,8 @@ func (s *Scheduler) prepareResolve(ref graph.Ref, again bool) func(context.Conte
 // whose image the Checker finds present, and otherwise through the Runner, which is given the record,
 // so that a cached resolve asks the Runner nothing.
 // A record of another index than the one pinned is passed on all the same: the Runner resolves the pinned index.
-func (s *Scheduler) resolve(ctx context.Context, ref graph.Ref, a *Action, again, force bool) (
+// The Runner runs it on runPlatform, by preference.
+func (s *Scheduler) resolve(ctx context.Context, ref graph.Ref, a *Action, runPlatform string, again, force bool) (
 	*cache.ActionResult, error) {
 	var recorded *cache.TagRecord
 	if !again {
@@ -686,7 +732,7 @@ func (s *Scheduler) resolve(ctx context.Context, ref graph.Ref, a *Action, again
 			}
 		}
 	}
-	req := Request{Action: a, Tag: recorded, Again: again, Force: force}
+	req := Request{Action: a, Tag: recorded, Again: again, Force: force, RunPlatform: runPlatform}
 	rep, err := s.runner.Run(ctx, req, s.output(ref))
 	if err != nil {
 		return nil, err
@@ -717,11 +763,33 @@ func (s *Scheduler) prepareTarget(ref graph.Ref, why string) func(context.Contex
 		Permitted: s.opts.Emulate || !s.opts.OptIn,
 		Secrets:   s.secrets(a),
 	}
-	req.Emulated = s.emulates(&req) != ""
+	req.RunPlatform = s.runPlatform(req.ImagePlatform())
+	// The refusal is made here, since it names the platforms native now, which only the walk reads.
+	var refused error
+	if platform := s.emulates(&req); platform != "" {
+		req.Emulated = true
+		refused = s.emulationRefused(ref, platform)
+	}
 	return func(ctx context.Context) completion {
-		result, err := s.runCached(ctx, ref, req, base, why)
+		result, err := s.runCached(ctx, ref, req, base, why, refused)
 		return completion{ref: ref, result: result, err: err}
 	}
+}
+
+// runPlatform returns the platform that an action whose image is for platform runs on: that one, if commands run
+// on it natively, as Options.Offered may say now, and otherwise the execution platform, as for an action without a
+// platform, a task on Scratch. Only the walk calls it.
+func (s *Scheduler) runPlatform(platform string) string {
+	if platform == "" {
+		return s.graph.ExecPlatform
+	}
+	if !s.native[platform] && s.opts.Offered != nil && s.opts.Offered(platform) {
+		s.native[platform] = true
+	}
+	if s.native[platform] {
+		return platform
+	}
+	return s.graph.ExecPlatform
 }
 
 // secrets returns the values of the secrets that a's steps use, of those the build was given, or nil if they use none.
@@ -744,8 +812,10 @@ func (s *Scheduler) secrets(a *Action) map[string][]byte {
 // reusing the result the record store holds for its inputs or else running it.
 // It reports which it did, and replays a reused target's output, so a build prints what the target printed.
 // If why isn't "", it runs the target even if its result is cached, reporting why, and replaces that result.
+// It reports whose attempt a run joined, if the Runner says, so that a target configured alike for several platforms
+// isn't taken to build again. refused is its failure if the Runner can't emulate it, or nil if it runs natively.
 func (s *Scheduler) runCached(
-	ctx context.Context, ref graph.Ref, req Request, base builtImage, why string,
+	ctx context.Context, ref graph.Ref, req Request, base builtImage, why string, refused error,
 ) (_ *cache.ActionResult, err error) {
 	n := s.graph.Node(ref)
 	target := n.Desc
@@ -788,12 +858,14 @@ func (s *Scheduler) runCached(
 		return nil, s.failed(ref, fmt.Errorf("its base %s is for %s, not %s; a layer's base must be for its platform",
 			s.graph.Node(n.Base()).Label, base.platform, n.Layer.Platform))
 	}
-	status(why)
-	rep, err := s.runner.Run(ctx, req, s.output(ref))
-	if errors.Is(err, ErrEmulationNeeded) {
-		// The Runner found no emulating attempt for an unpermitted job to attach to, or the permitted jobs left.
-		return nil, s.emulationRefused(ref, s.emulates(&req))
+	out := &targetOutput{s: s, ref: ref, why: why, status: status}
+	rep, err := s.runner.Run(ctx, req, out)
+	if errors.Is(err, ErrEmulationNeeded) && refused != nil {
+		// The Runner found no emulating attempt for an unpermitted job to attach to, which it says before the
+		// target is reported as running, or the permitted jobs left.
+		return nil, refused
 	}
+	out.Join(nil) // for a Runner that doesn't say whose attempt ran it
 	if err != nil {
 		return nil, s.describe(ref, key, err)
 	}
@@ -803,31 +875,67 @@ func (s *Scheduler) runCached(
 	return rep.Result, nil
 }
 
+// targetOutput is the Output of the layer or task ref as it runs: it reports the target's status, why it runs, once
+// the Runner says whose attempt runs it, naming the target or build it shares one with, or else before what it
+// prints, so that the status comes first.
+type targetOutput struct {
+	s      *Scheduler
+	ref    graph.Ref
+	why    string
+	status func(string)
+	once   sync.Once
+}
+
+// Join reports the target's status, as running in the attempt that starter, if not nil, started.
+func (o *targetOutput) Join(starter Output) {
+	o.once.Do(func() {
+		why := o.why
+		if starter != nil {
+			with := "another build"
+			if t, ok := starter.(*targetOutput); ok && t.s == o.s {
+				with = o.s.graph.Node(t.ref).Desc
+			}
+			if why == "building" {
+				why += ", shared with " + with
+			} else {
+				why += "; shared with " + with
+			}
+		}
+		o.status(why)
+	})
+}
+
+// Output passes on what the target prints, after its status.
+func (o *targetOutput) Output(stream byte, data []byte) {
+	o.Join(nil)
+	o.s.events.Output(o.ref, stream, data)
+}
+
 // emulates returns the platform that the run() steps of req run under emulation for: an image's platform other than
-// the execution platform; or "" if nothing runs emulated.
+// the one req runs on; or "" if nothing runs emulated.
 func (s *Scheduler) emulates(req *Request) string {
 	platform := req.ImagePlatform() // a task on Scratch has no platform, and its commands nothing to run
-	if platform == "" || platform == s.graph.ExecPlatform {
+	if platform == "" || platform == req.RunPlatform || !req.RunsCommands() {
 		return ""
 	}
-	for _, in := range req.Action.Steps {
-		if in.Op == graph.OpRun {
-			return platform
-		}
-	}
-	return ""
+	return platform
 }
 
 // emulationRefused returns the failure of the layer or task ref, whose run() steps would run under emulation for
-// platform, which the build doesn't permit: it names both platforms and both ways out.
+// platform, which the build doesn't permit: it names the platforms that run commands natively and the ways out.
+// Only a coordinator requires the permission, so a worker for the platform is one of them.
 func (s *Scheduler) emulationRefused(ref graph.Ref, platform string) error {
+	native := "on " + strings.Join(slices.Sorted(maps.Keys(s.native)), ", ")
+	if len(s.native) == 1 {
+		native = "only " + native
+	}
 	return &failure{
 		Failure: api.Failure{
 			Nodes: []graph.Ref{ref},
 			Message: fmt.Sprintf("its commands would run under emulation: its image is for %s, and this build "+
-				"runs commands on %s", platform, s.graph.ExecPlatform),
-			Hint: fmt.Sprintf("give --platform %s to build for the platform that runs them, "+
-				"or --emulate to allow emulation", s.graph.ExecPlatform),
+				"runs commands %s", platform, native),
+			Hint: fmt.Sprintf("give --platform %s to build for the platform that runs them, add a worker for %s, "+
+				"or give --emulate to allow emulation", s.graph.ExecPlatform, platform),
 		},
 		graph: s.graph,
 		cause: ErrEmulationNeeded,

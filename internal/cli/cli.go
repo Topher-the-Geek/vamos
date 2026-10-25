@@ -81,6 +81,7 @@ type options struct {
 	cacheDir      string        // coordinator --cache-dir
 	offer         []string      // coordinator --offer
 	offerEmulated []string      // coordinator --offer-emulated
+	defaultExec   string        // coordinator --default-exec-platform
 	lease         time.Duration // coordinator --lease
 	retries       int           // coordinator --retries
 	bound         int           // coordinator --bound
@@ -365,6 +366,9 @@ func NewRootCommand(cfg Config) *cobra.Command {
 		"the `directory` of the build cache: sources, trees, logs and results")
 	coordinatorCmd.Flags().StringArrayVar(&opts.offer, "offer", nil,
 		"an `os/arch` the deployment offers workers for, besides those registered now; repeat for several")
+	coordinatorCmd.Flags().StringVar(&opts.defaultExec, "default-exec-platform", "",
+		"the `os/arch` that clients run commands on unless they give --exec-platform, rather than their own, "+
+			"so that clients of every platform share cache keys; one that --offer names")
 	coordinatorCmd.Flags().StringArrayVar(&opts.offerEmulated, "offer-emulated", nil,
 		"an `os/arch` the deployment has workers with emulators for, besides what registered workers report; "+
 			"a build that --emulate lets run commands for it waits for such a worker")
@@ -469,8 +473,9 @@ func (inv *invocation) request(names []string, want load.Want, execPlatform imgs
 }
 
 // execPlatform returns the execution platform to configure the graph for, among those the executor offers, caps:
-// the one --exec-platform names, or else this machine's, if offered, or else the only one offered.
-// Several offered, none of them this machine's, must be chosen between.
+// the one --exec-platform names, or else the one the executor says clients use, as a coordinator may, or else this
+// machine's, if offered, or else the only one offered. Several offered, none of them this machine's, must be chosen
+// between.
 func (inv *invocation) execPlatform(caps api.Capabilities) (imgspecv1.Platform, error) {
 	var offered []string
 	for _, p := range caps.Platforms {
@@ -491,6 +496,9 @@ func (inv *invocation) execPlatform(caps api.Capabilities) (imgspecv1.Platform, 
 				"it offers %s", inv.opts.execPlatform, platforms.Format(p), fileset.QuoteNames(offered))
 		}
 		return p, nil
+	}
+	if p := caps.ExecPlatform; p != nil && caps.Offers(*p) {
+		return platforms.Normalize(*p), nil
 	}
 	if caps.Offers(run.HostPlatform) {
 		return run.HostPlatform, nil
@@ -635,6 +643,18 @@ func (inv *invocation) newCoordinator() (*coordinatorStores, error) {
 	if err != nil {
 		return nil, err
 	}
+	var execPlatform *imgspecv1.Platform
+	if text := inv.opts.defaultExec; text != "" {
+		parsed, err := parsePlatforms("--default-exec-platform", []string{text})
+		if err != nil {
+			return nil, err
+		}
+		if !(api.Capabilities{Platforms: offered}).Offers(parsed[0]) {
+			return nil, fmt.Errorf("--default-exec-platform %s: give --offer %s too, so that it is offered whether "+
+				"or not a worker of it is registered", text, text)
+		}
+		execPlatform = &parsed[0]
+	}
 	retries := inv.opts.retries
 	switch {
 	case retries < 0:
@@ -669,6 +689,7 @@ func (inv *invocation) newCoordinator() (*coordinatorStores, error) {
 	}
 	c, err := coord.New(directory, directory, coord.Config{
 		Platforms:       offered,
+		ExecPlatform:    execPlatform,
 		Emulated:        emulated,
 		Lease:           inv.opts.lease,
 		Grace:           inv.opts.grace,

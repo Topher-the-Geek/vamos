@@ -36,6 +36,10 @@ coordinator:
   offer: []
   # Platforms that workers emulate, as `--offer-emulated` says; workers report their emulators themselves.
   offerEmulated: []
+  # The platform that clients run commands on unless they give --exec-platform, as `--default-exec-platform` says,
+  # such as linux/amd64, so that clients of every architecture configure EXEC_PLATFORM alike and share cache keys;
+  # one of the pools' platforms or `offer`. Unset, each client chooses its own platform where the pools offer it.
+  defaultExecPlatform: ""
   extraArgs: []
   extraEnv: []
 

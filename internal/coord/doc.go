@@ -15,8 +15,9 @@
 // cancelled or released job ends too. A shutdown records nothing, so that what it ends is resumed, not cancelled.
 // What a restart decides, a resumed build's count of restarts and the outcome of a job it ends, is recorded before
 // the job runs or is readable, or the coordinator fails to start, so that the next restart finds the same; what a
-// running coordinator records, a cancellation, a release and an outcome, is reported to Config.Warn if it can't be,
-// and the job goes on in memory, since a restart then only runs a build again, or ends it, or a push as unknown.
+// running coordinator records, a cancellation, a release, an outcome and a platform a build reached, is reported to
+// Config.Warn if it can't be, and the job goes on in memory, since a restart then only runs a build again, or ends it,
+// or a push as unknown, or emulates or refuses what remains of a platform's work.
 // Only the coordinator writes records, through sched.Sharing, once a worker has published an artifact and
 // reported; a report is accepted from a live attempt alone: one whose lease hasn't expired, that wasn't killed and
 // wasn't replaced by a retry, so that a stale report is discarded.
@@ -28,7 +29,17 @@
 // # Lifecycle
 //
 // Workers register with their platform, version and capacity, and ask for assignments, which wait until there is
-// work for their platform; slots go to the build with the fewest attempts running, then the oldest work.
+// work for their platform: each action runs on its image's platform if the build runs that natively, and otherwise
+// on the build's execution platform, as sched.Request.RunPlatform says, so that a pool of several platforms builds
+// each natively; an action that runs no command goes to any worker while none of its platform is registered.
+// Slots go to the build with the fewest attempts running, then the oldest work.
+// A build runs natively on the platforms offered, by configuration or by a registered worker, when it was submitted,
+// and on any offered since, as it reaches them; each joins its record before work is given to it, and none leaves,
+// so that a restart, before the workers register again, resumes it with the same platforms, and what ran natively
+// never becomes emulated: a build that reaches a platform whose workers have gone waits, says so, and can be
+// cancelled. A platform whose record can't be written runs natively all the same, and the next record of the build's
+// platforms carries it; a restart before then holds the build to the weaker guarantee above.
+// A record written before builds recorded their platforms resumes with the platforms configured.
 // A worker renews each attempt's lease by heartbeat, carrying its estimate of its clock's offset, made from the
 // coordinator's clock in earlier answers, and sends what it prints and traces as events, which reach the attached
 // builds and, shifted by that offset onto the coordinator's clock, the starting build's trace, nested where the
@@ -37,6 +48,8 @@
 // report that meets an expired attempt first loses it too, so that none renews or ends it between sweeps.
 // Submit refuses a graph for a platform the deployment doesn't offer, by configuration or by a worker registered now;
 // one for an offered platform with no worker present waits, and says so to the build after a heartbeat interval.
+// Config.ExecPlatform, one of the platforms configured, is the execution platform that Capabilities tells clients to
+// configure graphs for unless they ask for another, so that clients of every platform share cache keys.
 // The bound on open jobs is sched.Jobs's, decided under its lock, as are the grace period, after which an unwatched
 // build's demand is withdrawn, and the window, after which a finished build is evicted; the pool's ticker sweeps both.
 // The journal keeps the instance, so that a client resumes its watch across a restart that kept the disk, and the
@@ -54,16 +67,17 @@
 // against another generation fails once it is open, when no prune can start, and Report refuses an attempt that
 // started in one, with messages that say to run the command again.
 // A cancelled push's outcome says the destination may or may not have been written.
-// Emulated work, a request the scheduler marks Emulated, goes only to a worker of the build's platform that reports
-// an emulator for the image's platform; a platform neither configured as emulated nor emulated by a registered
-// worker fails the target at once, and the pool starts or retries an emulated attempt only while a build that
-// permits emulation needs it, which sched.Permitted tells it.
+// Emulated work, a request the scheduler marks Emulated, goes only to a worker of the build's execution platform that
+// reports an emulator for the image's platform, which the deployment doesn't offer natively;
+// a platform neither configured as emulated nor emulated by a registered worker fails the target at once,
+// and the pool starts or retries an emulated attempt only while a build that permits emulation needs it,
+// which sched.Permitted tells it.
 //
 // # Changes
 //
 // pool.go owns workers, attempts, assignment, leases, kills and reports; coordinator.go owns the executor's
 // methods, the build's context and recovery; journal.go owns the jobs on disk; checker.go checks cached results
 // against the content store and the registry.
-// coord_test.go drives a coordinator with fake workers over the worker-facing API; restart_test.go restarts one over
-// the same stores and state.
+// coord_test.go drives a coordinator with fake workers over the worker-facing API; platform_test.go does so with
+// workers of several platforms; restart_test.go restarts one over the same stores and state.
 package coord

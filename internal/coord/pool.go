@@ -72,7 +72,7 @@ type attempt struct {
 // buildInfo is what the pool knows of the build an attempt serves: for fairness and platform matching.
 type buildInfo struct {
 	job      api.JobID
-	platform imgspecv1.Platform // the execution platform
+	platform imgspecv1.Platform // the execution platform, which runs what names no platform of its own
 }
 
 type buildKey struct{}
@@ -185,7 +185,7 @@ func (p *pool) platformsOffered() []imgspecv1.Platform {
 	return offered
 }
 
-// Run runs req on a worker, as sched.Runner asks: it waits for a worker of the build's platform to take the attempt,
+// Run runs req on a worker, as sched.Runner asks: it waits for a worker of req's RunPlatform to take the attempt,
 // relays what the attempt prints to out, and returns what the worker reported; an attempt whose worker is lost is
 // tried again on another, up to the retries configured. Once ctx ends, the attempt is killed and ctx's error
 // returned, without waiting for the worker's cleanup.
@@ -285,7 +285,12 @@ func (p *pool) await(ctx context.Context, at *attempt) error {
 			}
 			if platform, waiting := p.unserved(at); waiting && !told {
 				told = true
-				at.out.Output(2, fmt.Appendf(nil, "waiting for a worker that runs %s; none is registered\n", platform))
+				if platform == "" {
+					at.out.Output(2, []byte("waiting for a worker; none is registered\n"))
+				} else {
+					at.out.Output(2, fmt.Appendf(nil, "waiting for a worker that runs %s; none is registered\n",
+						platform))
+				}
 			}
 		}
 	}
@@ -298,7 +303,8 @@ func (p *pool) waiting(at *attempt) bool {
 	return at.worker == nil
 }
 
-// unserved reports whether at is pending with no registered worker that suits it, and the platform it waits for.
+// unserved reports whether at is pending with no registered worker that suits it, and the platform it waits for, or
+// "" if any would do.
 func (p *pool) unserved(at *attempt) (string, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -310,7 +316,10 @@ func (p *pool) unserved(at *attempt) (string, bool) {
 			return "", false
 		}
 	}
-	platform := platforms.Format(platforms.Normalize(at.build.platform))
+	if at.req != nil && !at.req.RunsCommands() {
+		return "", true // it waits for any worker, since none is registered
+	}
+	platform := at.runsOn()
 	if at.req != nil && at.req.Emulated {
 		platform += " and emulates " + at.req.ImagePlatform()
 	}
@@ -457,20 +466,40 @@ func (p *pool) load(job api.JobID) int {
 	return n
 }
 
-// suits reports whether w runs the platform at's build runs on, and, for an emulated action, emulates the
-// platform of its image.
+// runsOn returns the platform of the worker that at needs: the one its request runs on, as the scheduler chose it,
+// or else its build's execution platform.
+func (at *attempt) runsOn() string {
+	if at.req != nil && at.req.RunPlatform != "" {
+		return at.req.RunPlatform
+	}
+	return platforms.Format(platforms.Normalize(at.build.platform))
+}
+
+// suits reports whether w runs the platform at runs on, and, for an emulated action, emulates the platform of its
+// image; p.mu must be held. An action that runs no command, a resolve or a target that only adds files, runs on any
+// worker while none of its platform is registered.
 func (p *pool) suits(w *worker, at *attempt) bool {
 	if at.push != nil {
 		return true // a push copies between registries, which any worker can
 	}
-	if platforms.Format(w.info.Platform) != platforms.Format(platforms.Normalize(at.build.platform)) {
-		return false
+	if platforms.Format(w.info.Platform) != at.runsOn() {
+		return at.req != nil && !at.req.RunsCommands() && !p.serves(at.runsOn())
 	}
 	if at.req != nil && at.req.Emulated {
 		want, err := platforms.Parse(at.req.ImagePlatform())
 		return err == nil && emulates(w.info, platforms.Format(platforms.Normalize(want)))
 	}
 	return true
+}
+
+// serves reports whether a worker of platform is registered; p.mu must be held.
+func (p *pool) serves(platform string) bool {
+	for _, w := range p.workers {
+		if platforms.Format(w.info.Platform) == platform {
+			return true
+		}
+	}
+	return false
 }
 
 // live returns the attempt id if it is live, and otherwise ErrStaleAttempt; p.mu must be held.
@@ -576,7 +605,8 @@ func (p *pool) Report(_ context.Context, id string, report remote.AttemptReport)
 }
 
 // expire loses every attempt whose lease has passed, so that its work is tried again elsewhere,
-// and forgets killed attempts whose leases have passed and workers not seen for a lease.
+// and forgets killed attempts whose leases have passed and workers not seen for a lease, waking the pollers, since
+// work that runs no command goes to any worker once none of its platform is left.
 func (p *pool) expire() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -591,10 +621,15 @@ func (p *pool) expire() {
 			delete(p.settling, id)
 		}
 	}
+	forgot := false
 	for id, w := range p.workers {
 		if w.running == 0 && w.polling == 0 && now.Sub(w.lastSeen) > p.cfg.Lease {
 			delete(p.workers, id)
+			forgot = true
 		}
+	}
+	if forgot {
+		p.wake()
 	}
 }
 

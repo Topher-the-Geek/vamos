@@ -21,6 +21,10 @@ func (c Capabilities) Clone() Capabilities {
 		}
 		c.Platforms = platforms
 	}
+	if c.ExecPlatform != nil {
+		p := clonePlatform(*c.ExecPlatform)
+		c.ExecPlatform = &p
+	}
 	c.GraphVersions = slices.Clone(c.GraphVersions)
 	return c
 }

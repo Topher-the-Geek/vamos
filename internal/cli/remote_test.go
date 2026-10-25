@@ -383,6 +383,12 @@ func TestCoordinatorFlagMistakes(t *testing.T) {
 			want: "--pull-through docker.io: want registry=cache, such as docker.io=hub-proxy:5000",
 		},
 		{
+			name: "default execution platform not offered",
+			args: []string{"--offer", "linux/amd64", "--default-exec-platform", "linux/arm64"},
+			want: "--default-exec-platform linux/arm64: give --offer linux/arm64 too, so that it is offered whether " +
+				"or not a worker of it is registered",
+		},
+		{
 			name: "offered emulation without an architecture",
 			args: []string{"--offer-emulated", "linux"},
 			want: `--offer-emulated linux: platform "linux": want os/arch or os/arch/variant, such as "linux/arm64"`,

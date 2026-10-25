@@ -11,6 +11,8 @@ import (
 
 	"github.com/Topher-the-Geek/vamos/internal/graph"
 	"github.com/Topher-the-Geek/vamos/internal/tracing"
+
+	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 // stub is an executor that does nothing, which compiles without buildah or the container store:
@@ -171,5 +173,24 @@ func TestGraphRequestSecrets(t *testing.T) {
 	clone.Graph.Secrets["token"][0] = 'H'
 	if string(req.Graph.Secrets["token"]) != "hunter2" {
 		t.Errorf("changing a clone's secret changed the original's, to %q", req.Graph.Secrets["token"])
+	}
+}
+
+// TestCapabilitiesClone checks that a clone of capabilities shares no platform with the original, the execution
+// platform and its OS features included, so that a caller changing its copy changes nothing an executor keeps.
+func TestCapabilitiesClone(t *testing.T) {
+	caps := Capabilities{
+		Platforms:    []imgspecv1.Platform{{OS: "windows", Architecture: "amd64", OSFeatures: []string{"win32k"}}},
+		ExecPlatform: &imgspecv1.Platform{OS: "windows", Architecture: "amd64", OSFeatures: []string{"win32k"}},
+	}
+	clone := caps.Clone()
+	clone.Platforms[0].OSFeatures[0] = "changed"
+	clone.ExecPlatform.Architecture = "arm64"
+	clone.ExecPlatform.OSFeatures[0] = "changed"
+	if caps.Platforms[0].OSFeatures[0] != "win32k" {
+		t.Errorf("changing a clone's platform changed the original's, to %+v", caps.Platforms[0])
+	}
+	if p := caps.ExecPlatform; p.Architecture != "amd64" || p.OSFeatures[0] != "win32k" {
+		t.Errorf("changing a clone's execution platform changed the original's, to %+v", *p)
 	}
 }

@@ -156,9 +156,15 @@ they pull base images through the pull-through caches that `--pull-through regis
 and a `pull()` from an unmapped registry fails with a message naming the mapping to add.
 The coordinator checks cached layers against the cache repository and deletes its tags when it prunes, so its
 credentials need read and delete access to it, and the workers' need push access.
-Commands for another platform than the one that runs them, as `--platform linux/arm64` asks of an amd64 pool, run
-under emulation only when the build gives `--emulate`, a flag kept out of `--help` until local builds take it too;
-without it the target fails before anything runs, naming both platforms and both ways out.
+A target's commands run on a worker of its image's platform when the deployment offers that platform,
+so a pool of amd64 and arm64 workers builds both platforms of an index natively.
+A build runs natively on the platforms offered when it is submitted, by `--offer` or by a registered worker,
+and on any offered later that it reaches; it keeps them, across a restart too,
+so if the only worker of one leaves, its targets for that platform wait for another rather than being emulated.
+Commands for a platform the deployment doesn't offer, as `--platform linux/arm64` asks of an amd64 pool, run
+under emulation on the execution platform's workers only when the build gives `--emulate`,
+a flag kept out of `--help` until local builds take it too;
+without it the target fails before anything runs, naming the platforms and the ways out.
 Emulated work goes to workers that report an emulator for the platform, which they find in the kernel's binfmt_misc
 handlers; `--offer-emulated os/arch` says the deployment has such workers, so a build waits for one,
 where a platform nobody emulates fails the target at once.
@@ -166,6 +172,11 @@ where a platform nobody emulates fails the target at once.
 a build for an offered platform without a worker present waits, printing that it waits for a worker of that
 platform after a heartbeat interval, so offer only platforms the deployment serves; one for a platform never
 offered is refused.
+Pulls and targets that only add files prefer a worker of their image's platform,
+but run on any worker while none of that platform is registered.
+`--default-exec-platform os/arch`, one that `--offer` names, is the execution platform clients use
+unless they give `--exec-platform`, so that clients of every architecture configure `EXEC_PLATFORM` alike
+and reuse each other's results; without it each client uses its own platform where the coordinator offers it.
 A worker that stops renewing an attempt's lease (`--lease`) is lost, and its work tried again elsewhere,
 up to `--retries` times; a push is never retried, since its write may have happened.
 Beyond `--max-builds` open builds, submissions are refused as busy.
@@ -210,7 +221,7 @@ These flags are shared by commands that build targets:
 | `--set <name=value>` | Set a named target's parameter; repeat for several parameters | Parameter defaults |
 | `--secret <id=ID,env=VARIABLE>`, `--secret <id=ID,src=FILE>` | Give `run()` steps' secret `ID` the value of an environment variable or a file; repeat for several secrets | None |
 | `--platform <os/arch[/variant]>` | Target platform for a pull, layer, or task | Host platform |
-| `--exec-platform <os/arch[/variant]>` | Platform that `run()` steps execute on; the executor must offer it | This machine's, or the only one offered |
+| `--exec-platform <os/arch[/variant]>` | Platform that `EXEC_PLATFORM` names, and that runs `run()` steps for platforms the executor doesn't offer; the executor must offer it | The coordinator's `--default-exec-platform`, or else this machine's, or the only one offered |
 | `--coordinator <URL>` | Build on the coordinator at this URL rather than in this process | `$VAMOS_COORDINATOR`, or none |
 | `--tls-verify <bool>` | Require HTTPS and verify certificates when vamos itself contacts a registry: pushing from the client, and reading a coordinator's images to deliver | `registries.conf` |
 | `--timestamp <time>` | Minimum timestamp for newly executed targets | Derived from bases and added tasks |
@@ -275,6 +286,9 @@ Alternatively, mount an auth file and point `REGISTRY_AUTH_FILE` to its containe
 ## Output and failures
 
 Build progress reports target states such as `building` and `cached`, along with command output.
+A target configured alike for several platforms of an index, such as a task on an `EXEC_PLATFORM` base,
+is built once: the others report `building, shared with` the one whose work they share,
+or with `another build` when another build started it.
 Cached targets replay output from their previous execution.
 Successful delivery prints one of these lines:
 
@@ -301,8 +315,9 @@ Command-line usage mistakes print usage; runtime failures do not.
 | Docker cannot be reached | Check the socket mount, `DOCKER_HOST`, and Docker's TLS environment variables |
 | `can't reach the coordinator at ...` | Check the URL in `--coordinator` or `VAMOS_COORDINATOR`, and that this machine is on the coordinator's network |
 | `the coordinator ... runs graph versions ..., not this vamos's` | Use a vamos of the coordinator's version, or upgrade the coordinator |
-| `waiting for a worker that runs ...; none is registered` | Start a worker of that platform, or build with `--exec-platform` for one the pool has |
-| `its commands would run under emulation` | Give `--platform` for the platform that runs them, or `--emulate` to allow emulation on a worker that has an emulator |
+| `waiting for a worker that runs ...; none is registered` | Start a worker of that platform, or interrupt the build and run it again; a platform that `--offer` names is waited for again, so stop offering it first |
+| `waiting for a worker; none is registered` | Start a worker |
+| `its commands would run under emulation` | Add a worker of the image's platform, give `--platform` for one that runs them, or `--emulate` to allow emulation on a worker that has an emulator |
 | `the connection to the coordinator was lost for ...` | Run the command again once the coordinator is reachable; finished targets are cached |
 | `the build expired` | The build went unwatched for the coordinator's grace period; run the command again |
 | `the build cache was pruned while the build's sources were being captured` | Run the command again |

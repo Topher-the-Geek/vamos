@@ -543,11 +543,30 @@ func TestCancelKillsAttempt(t *testing.T) {
 	}
 }
 
-// TestPlatformRouting checks that work goes only to workers of the build's platform, that a build for a platform
-// no worker runs yet waits for one, and that one for a platform the deployment doesn't offer is refused at submit.
+// TestPlatformRouting checks that commands run only on workers of the build's platform, that a build for a platform
+// no worker runs yet waits for one, while what runs no command, its pull, runs on another worker meanwhile, and that
+// one for a platform the deployment doesn't offer is refused at submit.
 func TestPlatformRouting(t *testing.T) {
 	f := newFixture(t, Config{Platforms: []imgspecv1.Platform{amd64}})
-	other := startWorker(t, f, arm64, 1, fakeRun(f, nil))
+	var mu sync.Mutex
+	var commands, resolves int // what the arm64 worker took
+	run := fakeRun(f, nil)
+	startWorker(t, f, arm64, 1, func(a *remote.Assignment, killed func() bool) remote.AttemptReport {
+		mu.Lock()
+		switch {
+		case a.Request != nil && a.Request.RunsCommands():
+			commands++
+		case a.Request != nil && a.Request.Action.Kind == sched.KindResolve:
+			resolves++
+		}
+		mu.Unlock()
+		return run(a, killed)
+	})
+	took := func() (int, int) {
+		mu.Lock()
+		defer mu.Unlock()
+		return commands, resolves
+	}
 	req := testGraph(t, f, "routing")
 	done := make(chan api.Outcome, 1)
 	go func() {
@@ -559,8 +578,9 @@ func TestPlatformRouting(t *testing.T) {
 		t.Fatalf("the build ended without a worker of its platform: %+v", outcome)
 	case <-time.After(300 * time.Millisecond):
 	}
-	if other.takenCount() != 0 {
-		t.Errorf("the arm64 worker took %d attempts of an amd64 build", other.takenCount())
+	if commands, resolves := took(); commands != 0 || resolves != 1 {
+		t.Errorf("the arm64 worker ran %d commands and %d pulls of an amd64 build, want its pull alone, since no "+
+			"amd64 worker was registered", commands, resolves)
 	}
 	startWorker(t, f, amd64, 1, fakeRun(f, nil))
 	select {
@@ -571,8 +591,8 @@ func TestPlatformRouting(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("the build didn't end once a worker of its platform registered")
 	}
-	if other.takenCount() != 0 {
-		t.Errorf("the arm64 worker took %d attempts of an amd64 build", other.takenCount())
+	if commands, _ := took(); commands != 0 {
+		t.Errorf("the arm64 worker ran %d commands of an amd64 build", commands)
 	}
 
 	refused := req
@@ -909,7 +929,7 @@ func TestEmulationRules(t *testing.T) {
 		w := startWorker(t, f, amd64, 1, fakeRun(f, nil), arm64)
 		outcome, _ := runJob(t, f.c, emulatedGraph(t, f, "refused"))
 		if outcome.Failure == nil || !strings.Contains(outcome.Failure.Message, "its commands would run under "+
-			"emulation: its image is for linux/arm64, and this build runs commands on linux/amd64") ||
+			"emulation: its image is for linux/arm64, and this build runs commands only on linux/amd64") ||
 			!strings.Contains(outcome.Failure.Hint, "--emulate") {
 			t.Fatalf("outcome = %+v, want the mismatch message with both ways out", outcome.Failure)
 		}
@@ -999,7 +1019,7 @@ func TestEmulationRules(t *testing.T) {
 				t.Fatal("a build didn't end once the emulating worker finished")
 			}
 		}
-		if statuses := <-attachedStatuses; !slices.Contains(statuses, "[1]: building") {
+		if statuses := <-attachedStatuses; !slices.Contains(statuses, "[1]: building, shared with another build") {
 			t.Errorf("the attached build's statuses = %q, want the layer building, attached to the attempt", statuses)
 		}
 		if emulating.takenCount() == 0 || native.takenCount() > 1 {

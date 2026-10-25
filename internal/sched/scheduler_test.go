@@ -38,6 +38,7 @@ type fakeRunner struct {
 	fail     func(req Request) error
 	resolves []Request       // every resolve run, in order
 	runs     []digest.Digest // the keys of the layers and tasks run, in order
+	requests []Request       // the requests of the layers and tasks run, in order
 	images   map[digest.Digest]bool
 	files    map[digest.Digest][]cache.Blob // the files each task's tree holds, by task key
 }
@@ -92,6 +93,7 @@ func (f *fakeRunner) Run(ctx context.Context, req Request, ev Output) (*Report, 
 	}
 
 	f.runs = append(f.runs, req.Key)
+	f.requests = append(f.requests, req)
 	if f.fail != nil {
 		if err := f.fail(req); err != nil {
 			return nil, err
@@ -1244,8 +1246,9 @@ func TestSchedulerResolvePinnedRecordMoved(t *testing.T) {
 }
 
 // TestSchedulerEmulation checks that, where the executor requires permission for emulation, a layer or task whose
-// run() steps are for another platform than the execution platform fails before running, naming both platforms
-// and both ways out, unless the build permits it; without the requirement, as locally, it runs.
+// run() steps are for another platform than the execution platform fails before running, or being reported as
+// running, naming both platforms and both ways out, unless the build permits it; without the requirement, as locally,
+// it runs.
 func TestSchedulerEmulation(t *testing.T) {
 	// The execution platform is linux/amd64; the arm64 layer runs a command, the amd64 one doesn't need permission,
 	// and a layer on Scratch that only adds files never does.
@@ -1260,8 +1263,8 @@ func TestSchedulerEmulation(t *testing.T) {
 			name: "refused",
 			opts: Options{OptIn: true},
 			want: `layer "app" (linux/arm64): its commands would run under emulation: its image is for linux/arm64, ` +
-				"and this build runs commands on linux/amd64; give --platform linux/amd64 to build for the platform " +
-				"that runs them, or --emulate to allow emulation",
+				"and this build runs commands only on linux/amd64; give --platform linux/amd64 to build for the " +
+				"platform that runs them, add a worker for linux/arm64, or give --emulate to allow emulation",
 		},
 		{
 			name: "permitted",
@@ -1275,7 +1278,8 @@ func TestSchedulerEmulation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m, f := fakeFixture(t)
 			b := Backend{Content: m, Records: m, Checker: f, Runner: NewSharing(f, m, m)}
-			_, err := New(g, b, &recordedEvents{}, tc.opts).Run(t.Context())
+			ev := &recordedEvents{}
+			_, err := New(g, b, ev, tc.opts).Run(t.Context())
 			switch {
 			case tc.want == "" && err != nil:
 				t.Errorf("run = %v, want success", err)
@@ -1285,7 +1289,90 @@ func TestSchedulerEmulation(t *testing.T) {
 			if tc.want != "" && slices.Contains(f.runs, recordedKey(g, m, f, 3)) {
 				t.Error("the layer ran though its emulation was refused")
 			}
+			if tc.want != "" && slices.ContainsFunc(ev.statuses, func(s string) bool {
+				return strings.HasPrefix(s, "3: ")
+			}) {
+				t.Errorf("statuses = %q, want the refused layer never reported as running", ev.statuses)
+			}
 		})
+	}
+}
+
+// TestSchedulerRunPlatform checks that an action runs on its image's platform where the executor runs that natively,
+// so that its commands aren't emulated, and on the execution platform otherwise, resolves included, without its key
+// changing; and that a refusal names every platform that runs commands natively.
+func TestSchedulerRunPlatform(t *testing.T) {
+	g := multiPlatformGraph(t)
+	for _, tc := range []struct {
+		name     string
+		native   []string
+		runsOn   map[string]string // the platform each image's platform runs on
+		emulated map[string]bool   // whether a layer whose image is for the platform runs emulated
+	}{
+		{
+			name:     "native",
+			native:   []string{"linux/arm64"},
+			runsOn:   map[string]string{"linux/amd64": "linux/amd64", "linux/arm64": "linux/arm64"},
+			emulated: map[string]bool{"linux/amd64": false, "linux/arm64": false},
+		},
+		{
+			name:     "emulated",
+			runsOn:   map[string]string{"linux/amd64": "linux/amd64", "linux/arm64": "linux/amd64"},
+			emulated: map[string]bool{"linux/amd64": false, "linux/arm64": true},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, f := fakeFixture(t)
+			b := Backend{Content: m, Records: m, Checker: f, Runner: NewSharing(f, m, m)}
+			opts := Options{OptIn: true, Emulate: true, Native: tc.native}
+			if _, err := New(g, b, &recordedEvents{}, opts).Run(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			for _, req := range f.resolves {
+				if got, want := req.RunPlatform, tc.runsOn[req.Action.Platform]; got != want {
+					t.Errorf("the resolve for %s runs on %q, want %q", req.Action.Platform, got, want)
+				}
+			}
+			if len(f.requests) != 2 {
+				t.Fatalf("ran %d layers, want 2", len(f.requests))
+			}
+			for _, req := range f.requests {
+				platform := req.ImagePlatform()
+				if got, want := req.RunPlatform, tc.runsOn[platform]; got != want {
+					t.Errorf("the layer for %s runs on %q, want %q", platform, got, want)
+				}
+				if got, want := req.Emulated, tc.emulated[platform]; got != want {
+					t.Errorf("the layer for %s: emulated = %v, want %v", platform, got, want)
+				}
+			}
+		})
+	}
+	// Where it runs is no part of the key: the native build's results are hits for the emulating one.
+	m, f := fakeFixture(t)
+	b := Backend{Content: m, Records: m, Checker: f, Runner: NewSharing(f, m, m)}
+	native := Options{OptIn: true, Native: []string{"linux/arm64"}}
+	if _, err := New(g, b, &recordedEvents{}, native).Run(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	ev := &recordedEvents{}
+	if _, err := New(g, b, ev, Options{OptIn: true, Emulate: true}).Run(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.runs) != 2 {
+		t.Errorf("ran %d layers in both builds, want the native build's two alone; statuses %v", len(f.runs),
+			ev.statuses)
+	}
+
+	// A refusal names every platform that runs commands natively.
+	g = multiPlatformGraph(t)
+	g.Nodes[1].Pull.Platform, g.Nodes[3].Layer.Platform = "linux/s390x", "linux/s390x"
+	m, f = fakeFixture(t)
+	b = Backend{Content: m, Records: m, Checker: f, Runner: NewSharing(f, m, m)}
+	_, err := New(g, b, &recordedEvents{}, native).Run(t.Context())
+	if want := "its image is for linux/s390x, and this build runs commands on linux/amd64, linux/arm64; " +
+		"give --platform linux/amd64 to build for the platform that runs them, add a worker for linux/s390x, " +
+		"or give --emulate to allow emulation"; err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("run = %v, want %q", err, want)
 	}
 }
 
@@ -1388,5 +1475,95 @@ func TestRequestSecrets(t *testing.T) {
 	}
 	if got := s.secrets(&Action{Steps: []Step{{Op: graph.OpRun}}}); got != nil {
 		t.Errorf("secrets of an action that uses none = %q, want nil", got)
+	}
+}
+
+// attachGate is a Runner whose layers and tasks wait, for a few seconds at most, until two jobs or nodes are attached
+// to the attempt of their key, so that nodes alike overlap, and otherwise run as its fake does.
+type attachGate struct {
+	*fakeRunner
+	sharing *Sharing
+}
+
+func (g *attachGate) Run(ctx context.Context, req Request, ev Output) (*Report, error) {
+	if req.Action.Kind != KindResolve {
+		for start := time.Now(); g.sharing.AttachedTo(req.Action.Key()) < 2 && time.Since(start) < 5*time.Second; {
+			time.Sleep(time.Millisecond)
+		}
+	}
+	return g.fakeRunner.Run(ctx, req, ev)
+}
+
+// TestSchedulerSharedStatus checks that, of two nodes of one job with the same key, the one that attaches to the
+// other's attempt says whose it shares, as Sharing attached it, whether the result was missing or unusable.
+func TestSchedulerSharedStatus(t *testing.T) {
+	g := &graph.Graph{Version: graph.Version, ExecPlatform: "linux/amd64", Roots: []graph.Ref{1, 2}}
+	g.Nodes = []graph.Node{
+		{Label: "base", Desc: `pull "base"`, Pull: &graph.Pull{Image: "example.com/base:v1", Platform: "linux/amd64"}},
+		{Label: "a", Desc: `layer "a"`, Layer: &graph.Layer{Base: 0, Platform: "linux/amd64", Steps: []graph.Step{
+			{Op: graph.OpRun, Display: `run(["make"])`, Argv: []string{"make"}},
+		}}},
+		{Label: "b", Desc: `layer "b"`, Layer: &graph.Layer{Base: 0, Platform: "linux/amd64", Steps: []graph.Step{
+			{Op: graph.OpRun, Display: `run(["make"])`, Argv: []string{"make"}},
+		}}},
+	}
+	testenv.Must(t, g.Validate())
+	m, f := fakeFixture(t)
+	gate := &attachGate{fakeRunner: f}
+	gate.sharing = NewSharing(gate, m, m)
+	b := Backend{Content: m, Records: m, Checker: f, Runner: gate.sharing}
+	for _, why := range []string{"building", "building, since the cached result can't be used: its image "} {
+		ev := &recordedEvents{}
+		_, err := New(g, b, ev, Options{Bound: 2}).Run(t.Context())
+		testenv.Must(t, err)
+		shared := func(first, second graph.Ref) bool {
+			var built, sharing bool
+			for _, s := range ev.statuses {
+				built = built || strings.HasPrefix(s, fmt.Sprintf("%d: %s", first, why)) &&
+					!strings.Contains(s, "shared")
+				sharing = sharing || strings.HasPrefix(s, fmt.Sprintf("%d: %s", second, why)) &&
+					strings.HasSuffix(s, "shared with "+g.Nodes[first].Desc)
+			}
+			return built && sharing
+		}
+		if !shared(1, 2) && !shared(2, 1) {
+			t.Errorf("statuses = %q, want one layer %q and the other sharing its attempt", ev.statuses, why)
+		}
+		clear(f.images) // the next run finds the result unusable
+	}
+	if len(f.runs) != 2 {
+		t.Errorf("the Runner ran %d layers, want one in each run", len(f.runs))
+	}
+}
+
+// TestSchedulerOffered checks that a platform Options.Native doesn't name runs natively once Options.Offered says
+// the executor offers it, which it is asked once, and that one it doesn't offer runs on the execution platform.
+func TestSchedulerOffered(t *testing.T) {
+	g := multiPlatformGraph(t)
+	for _, offered := range []bool{true, false} {
+		m, f := fakeFixture(t)
+		b := Backend{Content: m, Records: m, Checker: f, Runner: NewSharing(f, m, m)}
+		var asked []string
+		opts := Options{OptIn: true, Emulate: true, Offered: func(platform string) bool {
+			asked = append(asked, platform)
+			return offered
+		}}
+		_, err := New(g, b, &recordedEvents{}, opts).Run(t.Context())
+		testenv.Must(t, err)
+		want := map[bool][]string{true: {"linux/arm64"}, false: {"linux/arm64", "linux/arm64"}}[offered]
+		if !slices.Equal(asked, want) {
+			t.Errorf("offered = %v: asked about %q, want %q", offered, asked, want)
+		}
+		for _, req := range append(f.resolves, f.requests...) {
+			want := "linux/amd64"
+			if offered {
+				want = req.Action.Platform
+			}
+			emulated := req.Action.Kind == KindLayer && want != req.Action.Platform
+			if req.RunPlatform != want || req.Emulated != emulated {
+				t.Errorf("offered = %v: the %s for %s runs on %s, emulated %v", offered, req.Action.Kind,
+					req.Action.Platform, req.RunPlatform, req.Emulated)
+			}
+		}
 	}
 }

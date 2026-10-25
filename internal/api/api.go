@@ -68,11 +68,15 @@ var (
 type Capabilities struct {
 	// Platforms are the execution platforms it offers: those that run() steps run on without emulation.
 	// A local executor offers its host's; a coordinator every platform its workers may have.
-	Platforms     []imgspecv1.Platform `json:"platforms"`
-	GraphVersions []int                `json:"graph_versions"`      // the graph versions it runs
-	Isolation     string               `json:"isolation,omitempty"` // how it runs commands, such as "chroot"
-	Version       string               `json:"version,omitempty"`   // of vamos
-	Clock         time.Time            `json:"clock"`               // the time by its clock, when it answered
+	Platforms []imgspecv1.Platform `json:"platforms"`
+	// ExecPlatform, if set, is the execution platform that a client configures a graph for when none is asked
+	// for, one of Platforms, so that clients on any platform configure EXEC_PLATFORM alike and share cache keys.
+	// A coordinator gives it only if configured to; a client of an executor without one chooses its own.
+	ExecPlatform  *imgspecv1.Platform `json:"exec_platform,omitempty"`
+	GraphVersions []int               `json:"graph_versions"`      // the graph versions it runs
+	Isolation     string              `json:"isolation,omitempty"` // how it runs commands, such as "chroot"
+	Version       string              `json:"version,omitempty"`   // of vamos
+	Clock         time.Time           `json:"clock"`               // the time by its clock, when it answered
 	// Instance identifies the executor's jobs: new each time it starts without those of an earlier run, so that a
 	// client whose connection dropped can tell a restart that lost its jobs from a drop alone. A coordinator keeps
 	// its jobs on disk, and its instance with them, so that a restart that keeps its disk keeps its instance too.

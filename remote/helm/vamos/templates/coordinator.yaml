@@ -70,6 +70,13 @@ spec:
             {{- range include "vamos.poolPlatforms" . | trim | splitList "\n" | compact }}
             - --offer={{ . }}
             {{- end }}
+            {{- with .Values.coordinator.defaultExecPlatform }}
+            {{- if not (has . (include "vamos.poolPlatforms" $ | trim | splitList "\n")) }}
+            {{- fail (printf "coordinator.defaultExecPlatform %s is neither a pool's platform nor in %s" .
+                  "coordinator.offer") }}
+            {{- end }}
+            - --default-exec-platform={{ . }}
+            {{- end }}
             {{- range .Values.coordinator.offerEmulated }}
             - --offer-emulated={{ . }}
             {{- end }}

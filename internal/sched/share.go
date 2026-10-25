@@ -17,6 +17,9 @@ import (
 // an ordinary job that must run an Action attaches to the attempt of that key already running, if any,
 // including one that a forced rebuild started, and otherwise starts one; a forced run never attaches,
 // and its attempt replaces any in flight as the one that later jobs attach to, since it is the later write.
+// Nor does a job that runs the action natively attach to an emulated attempt, as a job offered fewer platforms
+// starts: it starts its own, which replaces that one likewise, so that native work never waits for an emulator or
+// on another job's permission. A job is told whose attempt it runs in, if its Output is a Joiner.
 // Each attempt returns its own result to every job attached, whether or not a later write replaces the record.
 // An attempt runs while any job is attached to it, and is cancelled when none is: cancelling a job detaches it,
 // and the last job to detach waits for the attempt to end, since a command in flight can't be interrupted,
@@ -40,10 +43,12 @@ type Sharing struct {
 
 // attempt is one execution of an Action, which jobs attach to.
 type attempt struct {
-	cancel context.CancelFunc // ends the attempt, once no job is attached
-	done   chan struct{}      // closed when the attempt has its result
-	result *cache.ActionResult
-	err    error
+	cancel   context.CancelFunc // ends the attempt, once no job is attached
+	done     chan struct{}      // closed when the attempt has its result
+	emulated bool               // its request is Emulated
+	starter  Output             // the Output of the job that started it
+	result   *cache.ActionResult
+	err      error
 
 	mu       sync.Mutex
 	attached []*listener // the jobs waiting for the result, with their events; the attempt is cancelled when none is
@@ -64,9 +69,9 @@ func NewSharing(r Runner, content cache.ContentStore, records cache.RecordStore)
 	return &Sharing{runner: r, content: content, records: records, inflight: map[digest.Digest]*attempt{}}
 }
 
-// Run runs req through the attempt of its key: attaching to one in flight, unless req.Force,
-// or else starting one, which a forced run registers too, in place of any in flight, so that ordinary jobs
-// attach to it.
+// Run runs req through the attempt of its key: attaching to one in flight, unless req.Force, or the one in flight
+// is emulated and req isn't, or else starting one, which those runs register too, in place of the one in flight,
+// so that ordinary jobs attach to it.
 // The Report returned carries the attempt's result alone: its record has been written.
 func (s *Sharing) Run(ctx context.Context, req Request, ev Output) (*Report, error) {
 	result, err := s.attempt(ctx, req, ev)
@@ -80,12 +85,13 @@ func (s *Sharing) Run(ctx context.Context, req Request, ev Output) (*Report, err
 func (s *Sharing) attempt(ctx context.Context, req Request, ev Output) (*cache.ActionResult, error) {
 	key := req.Action.Key()
 	s.mu.Lock()
-	if at, found := s.inflight[key]; found && !req.Force {
+	if at, found := s.inflight[key]; found && !req.Force && (req.Emulated || !at.emulated) {
 		// A job that doesn't permit emulation may still attach to an emulating attempt: its result would be a
 		// cache hit moments later anyway.
 		l := &listener{ev: ev, late: true, permitted: req.Permitted, withdrawn: Withdrawn(ctx)}
 		at.attach(l)
 		s.mu.Unlock()
+		join(ev, at.starter)
 		return s.await(ctx, at, l)
 	}
 	if req.Emulated && !req.Permitted {
@@ -97,13 +103,15 @@ func (s *Sharing) attempt(ctx context.Context, req Request, ev Output) (*cache.A
 	actx, revoke := tracing.Revocable(context.WithoutCancel(ctx))
 	actx, cancel := context.WithCancel(actx)
 	l := &listener{ev: ev, revoke: revoke, permitted: req.Permitted, withdrawn: Withdrawn(ctx)}
-	at := &attempt{cancel: cancel, done: make(chan struct{}), attached: []*listener{l}}
+	at := &attempt{cancel: cancel, done: make(chan struct{}), emulated: req.Emulated, starter: ev,
+		attached: []*listener{l}}
 	actx = withDemand(actx, at.demanded)
 	if req.Emulated {
 		actx = withPermission(actx, at.permitted)
 	}
 	s.inflight[key] = at
 	s.mu.Unlock()
+	join(ev, nil)
 	go func() {
 		defer close(at.done)
 		rep, err := s.runner.Run(actx, req, at)
@@ -122,6 +130,13 @@ func (s *Sharing) attempt(ctx context.Context, req Request, ev Output) (*cache.A
 		s.mu.Unlock()
 	}()
 	return s.await(ctx, at, l)
+}
+
+// join tells ev, if it is a Joiner, whose attempt runs its job's action: the one starter started, or its own.
+func join(ev Output, starter Output) {
+	if j, ok := ev.(Joiner); ok {
+		j.Join(starter)
+	}
 }
 
 // publish writes what the attempt of req reported: a layer's or task's result under its key,
@@ -220,6 +235,20 @@ func (s *Sharing) Attached() int {
 		at.mu.Unlock()
 	}
 	return n
+}
+
+// AttachedTo returns how many jobs are attached to the attempt in flight of key, for tests that wait for nodes alike
+// to share one attempt, whatever else is in flight.
+func (s *Sharing) AttachedTo(key digest.Digest) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	at, ok := s.inflight[key]
+	if !ok {
+		return 0
+	}
+	at.mu.Lock()
+	defer at.mu.Unlock()
+	return len(at.attached)
 }
 
 // wants reports whether the job l still wants the attempt: its demand isn't withdrawn.

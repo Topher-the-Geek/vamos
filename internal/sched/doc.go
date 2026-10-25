@@ -11,8 +11,11 @@
 // to a worker and back.
 // Only Sharing writes the record store, once the runner has published the artifact and returned its Report,
 // so that no record names an artifact that isn't there; the latest write wins.
-// Action keys exclude provenance, emulation, locations and target naming; ActionVersion changes when what a key
-// covers, or how a target is built, changes.
+// Action keys exclude provenance, emulation, the platform an action runs on, locations and target naming;
+// ActionVersion changes when what a key covers, or how a target is built, changes.
+// An action runs on its image's platform where the executor runs that natively, as Options.Native and
+// Options.Offered say, and otherwise on the graph's execution platform, which Request.RunPlatform says; only commands
+// for another platform than that one are emulated, and an action that runs none may run on any.
 // A key names a run() step's secrets by ID and how they are given, never by value; Request.Secrets, the values an
 // action's steps use, is never encoded, so it reaches only a Runner in the job's own process, never a worker.
 // Demanded tells a coordinator whether any attached job still wants an attempt, so that one waiting for a worker is
@@ -39,6 +42,12 @@
 // A Scheduler resolves pulls first, then dispatches ready targets up to Options.Bound at once, checking cached
 // results through a Checker and running the rest through the Runner, which Sharing wraps: an ordinary job attaches to
 // an attempt of the same key in flight, a forced one never does, and an attempt is cancelled once no job is attached.
+// Nodes of one job with the same key, as an index's platforms configure a task on an EXEC_PLATFORM base, share one
+// attempt unless forced: Sharing tells each, through Joiner, whose attempt it joined, and the later report that they
+// share the earlier's, or another build's, rather than that they build.
+// Jobs of one executor may disagree on whether an action is emulated, as when a worker of its platform registered
+// between their starts: one that runs it natively never attaches to another's emulated attempt, but starts its own,
+// so that it never waits on an emulator or on another job's permission.
 // Once a target fails nothing more is dispatched, what runs finishes and is recorded, and the first failure is the
 // job's, as a failure naming its node, which the client renders against its graph.
 //

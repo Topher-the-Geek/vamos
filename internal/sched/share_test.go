@@ -535,3 +535,80 @@ func TestSharingWithdrawnListeners(t *testing.T) {
 		t.Error("a job whose demand never lapses doesn't permit the attempt to emulate")
 	}
 }
+
+// joins records whose attempt a job's action ran in, as Sharing tells a Joiner, besides what it prints.
+type joins struct {
+	outputs
+	starters []Output
+}
+
+// Join keeps starter.
+func (j *joins) Join(starter Output) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.starters = append(j.starters, starter)
+}
+
+// TestSharingNativeOverEmulated checks that a job that runs an action natively never attaches to an emulated attempt
+// of its key, however often emulated attempts replace the one in flight, but starts its own, which later jobs attach
+// to, emulating ones included; and that each job is told whose attempt it runs in.
+func TestSharingNativeOverEmulated(t *testing.T) {
+	b := &blockingRunner{gated: true}
+	s, _ := testSharing(b)
+	emulated := func(force bool) Request {
+		req := testRequest(force)
+		req.Emulated, req.Permitted = true, true
+		return req
+	}
+	type job struct {
+		out    *joins
+		result chan *cache.ActionResult
+	}
+	start := func(req Request, runs int32, attached int) job {
+		j := job{out: &joins{}, result: make(chan *cache.ActionResult, 1)}
+		go func() {
+			r, err := s.attempt(t.Context(), req, j.out)
+			if err != nil {
+				t.Error(err)
+			}
+			j.result <- r
+		}()
+		waitFor(t, func() bool { return b.runs.Load() == runs && attachedCount(s) == attached })
+		return j
+	}
+	// Only the attempt in flight of the key counts its jobs.
+	e1 := start(emulated(false), 1, 1)
+	n1 := start(testRequest(false), 2, 1) // its own, though e1's is in flight, which it replaces
+	e2 := start(emulated(false), 2, 2)    // attaches to n1's
+	e3 := start(emulated(true), 3, 1)     // forced: its own, in place of n1's
+	n2 := start(testRequest(false), 4, 1) // its own again, though e3's is in flight
+	for n := int32(1); n <= 4; n++ {
+		b.releaseRun(n)
+	}
+	for _, tc := range []struct {
+		name    string
+		j       job
+		result  int64
+		starter Output
+	}{
+		{name: "the first emulating job", j: e1, result: 1},
+		{name: "the first native job", j: n1, result: 2},
+		{name: "the emulating job after it", j: e2, result: 2, starter: n1.out},
+		{name: "the forced emulating job", j: e3, result: 3},
+		{name: "the second native job", j: n2, result: 4},
+	} {
+		select {
+		case r := <-tc.j.result:
+			if r == nil || r.Epoch != tc.result {
+				t.Errorf("%s got %+v, want the result of run %d", tc.name, r, tc.result)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s never ended", tc.name)
+		}
+		tc.j.out.mu.Lock()
+		if len(tc.j.out.starters) != 1 || tc.j.out.starters[0] != tc.starter {
+			t.Errorf("%s was told it joined %v, want %v alone", tc.name, tc.j.out.starters, tc.starter)
+		}
+		tc.j.out.mu.Unlock()
+	}
+}

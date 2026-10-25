@@ -26,6 +26,9 @@ type Config struct {
 	// Platforms are the execution platforms the deployment offers, beyond those of the workers registered now:
 	// a build for one waits for a worker; one for a platform offered by neither is refused.
 	Platforms []imgspecv1.Platform
+	// ExecPlatform, if set, is the execution platform that clients configure graphs for unless they ask for
+	// another, which Capabilities reports; it must be one of Platforms, so that it is always offered.
+	ExecPlatform *imgspecv1.Platform
 	// Emulated are the platforms the deployment has workers with emulators for, beyond those the registered
 	// workers report: an emulated target for one waits for such a worker; one for a platform offered by neither
 	// fails at once.
@@ -129,6 +132,14 @@ var (
 // With cfg.State, it resumes the jobs that an earlier run kept there, as recover describes.
 func New(content cache.ContentStore, records cache.RecordStore, cfg Config) (*Coordinator, error) {
 	cfg = cfg.withDefaults()
+	if p := cfg.ExecPlatform; p != nil {
+		normalized := platforms.Normalize(*p)
+		if name := platforms.Format(normalized); !slices.Contains(names(cfg.Platforms), name) {
+			return nil, fmt.Errorf("the execution platform %s isn't one of the platforms offered, %v", name,
+				names(cfg.Platforms))
+		}
+		cfg.ExecPlatform = &normalized
+	}
 	var id [8]byte
 	rand.Read(id[:])
 	c := &Coordinator{
@@ -236,11 +247,17 @@ func (c *Coordinator) resume(r *record) error {
 		return c.conclude(r, sched.Failed(fmt.Errorf("the coordinator restarted and couldn't resume the build: %w",
 			err)))
 	}
-	if err := c.journal.update(r.ID, func(r *record) { r.Restarts = restarts }); err != nil {
+	// A record from before builds ran natively on several platforms has none: it runs natively on those configured,
+	// which a restart keeps, as the version that recorded it would have on the execution platform alone.
+	native := r.Native
+	if native == nil {
+		native = c.configuredNames()
+	}
+	if err := c.journal.update(r.ID, func(r *record) { r.Restarts, r.Native = restarts, native }); err != nil {
 		reserved.Cancel()
 		return fmt.Errorf("recording that it resumed: %w", err)
 	}
-	_, err = reserved.Start(c.build(*r.Build))
+	_, err = reserved.Start(c.build(*r.Build, native))
 	return err
 }
 
@@ -316,23 +333,17 @@ func (c *Coordinator) Report(ctx context.Context, attempt string, report remote.
 	return c.pool.Report(ctx, attempt, report)
 }
 
-// Capabilities reports the platforms offered, by configuration and by the workers registered, the graph versions
-// run, the instance and its grace period.
+// Capabilities reports the platforms offered, by configuration and by the workers registered, the execution platform
+// configured for clients, the graph versions run, the instance and its grace period.
 func (c *Coordinator) Capabilities(ctx context.Context) (api.Capabilities, error) {
-	offered := slices.Clone(c.cfg.Platforms)
-	for _, p := range c.pool.platformsOffered() {
-		if !slices.ContainsFunc(offered, func(o imgspecv1.Platform) bool {
-			return platforms.Format(platforms.Normalize(o)) == platforms.Format(p)
-		}) {
-			offered = append(offered, p)
-		}
-	}
 	generation, err := c.generation(ctx)
 	if err != nil {
 		return api.Capabilities{}, err
 	}
+	// The clone keeps every caller from changing the configuration.
 	return api.Capabilities{
-		Platforms:     offered,
+		Platforms:     c.platforms(),
+		ExecPlatform:  c.cfg.ExecPlatform,
 		GraphVersions: []int{graph.Version},
 		Isolation:     c.cfg.Isolation,
 		Version:       c.cfg.Version,
@@ -401,18 +412,21 @@ func (c *Coordinator) Submit(ctx context.Context, req api.Request) (api.JobID, e
 		return "", fmt.Errorf("the graph was configured for an executor on %s, which this coordinator doesn't offer; "+
 			"it offers %v", platforms.Format(platforms.Normalize(g.Platform)), c.platformNames())
 	}
-	return c.begin(ctx, record{Build: g}, sched.Spec{Build: true}, c.build(*g))
+	native := c.platformNames()
+	return c.begin(ctx, record{Build: g, Native: native}, sched.Spec{Build: true}, c.build(*g, native))
 }
 
-// build returns the work of a build of g.
-func (c *Coordinator) build(g api.GraphRequest) func(ctx context.Context, ev sched.Events) api.Outcome {
+// build returns the work of a build of g, whose actions run natively on the platforms native names, as they were
+// offered when it was submitted and as its record has them, and on those offered later, as offer says.
+func (c *Coordinator) build(g api.GraphRequest, native []string) func(ctx context.Context,
+	ev sched.Events) api.Outcome {
 	return func(ctx context.Context, ev sched.Events) api.Outcome {
 		// The generation is checked once the build is open, since no prune starts then: checked before, a prune
 		// could run between the check and the build's start.
 		if err := c.checkGeneration(ctx, g.Generation); err != nil {
 			return sched.Failed(err)
 		}
-		results, err := c.run(ctx, g, ev)
+		results, err := c.run(ctx, g, native, ev)
 		if err != nil {
 			return sched.Failed(err)
 		}
@@ -488,19 +502,64 @@ func (c *Coordinator) checkGeneration(ctx context.Context, captured uint64) erro
 	return nil
 }
 
-// platformNames returns the platforms offered, as text.
+// platforms returns the platforms the deployment offers: by configuration, and those of the workers registered now.
+func (c *Coordinator) platforms() []imgspecv1.Platform {
+	offered := slices.Clone(c.cfg.Platforms)
+	for _, p := range c.pool.platformsOffered() {
+		if !slices.ContainsFunc(offered, func(o imgspecv1.Platform) bool {
+			return platforms.Format(platforms.Normalize(o)) == platforms.Format(p)
+		}) {
+			offered = append(offered, p)
+		}
+	}
+	return offered
+}
+
+// platformNames returns the platforms offered, as text, normalized and sorted.
 func (c *Coordinator) platformNames() []string {
-	caps, _ := c.Capabilities(context.Background())
-	var names []string
-	for _, p := range caps.Platforms {
+	return names(c.platforms())
+}
+
+// configuredNames returns the platforms offered by configuration, as text, normalized and sorted.
+func (c *Coordinator) configuredNames() []string {
+	return names(c.cfg.Platforms)
+}
+
+// names returns ps as text, normalized, sorted and without repeats.
+func names(ps []imgspecv1.Platform) []string {
+	names := []string{}
+	for _, p := range ps {
 		names = append(names, platforms.Format(platforms.Normalize(p)))
 	}
 	slices.Sort(names)
-	return names
+	return slices.Compact(names)
 }
 
-// run runs the graph req names: reads it from the content store, and schedules it across the workers.
-func (c *Coordinator) run(ctx context.Context, req api.GraphRequest, ev sched.Events) (_ []api.Result, err error) {
+// offer returns the sched.Options.Offered of the build id, whose actions run natively on the platforms native
+// names: a platform the deployment offers now, by configuration or by a worker registered, joins them, recorded
+// before the scheduler gives any action to it, so that a restart resumes the build with it. A platform never leaves
+// them, so that what ran natively never becomes emulated: a build that reaches a platform whose workers have gone
+// waits for one, saying so, until it is cancelled. A record that can't be written is reported to Warn, as the other
+// records of a running build are, and the platform joins them all the same, which the next record carries.
+func (c *Coordinator) offer(id api.JobID, native []string) func(platform string) bool {
+	native = slices.Clone(native)
+	return func(platform string) bool {
+		if !slices.Contains(c.platformNames(), platform) {
+			return false
+		}
+		native = append(native, platform)
+		slices.Sort(native)
+		if err := c.journal.update(id, func(r *record) { r.Native = slices.Clone(native) }); err != nil {
+			c.cfg.Warn(fmt.Errorf("recording that the build %s runs commands natively on %s: %w", id, platform, err))
+		}
+		return true
+	}
+}
+
+// run runs the graph req names: reads it from the content store, and schedules it across the workers, each action
+// on a worker of its image's platform if native names it or the deployment offers it, as offer says.
+func (c *Coordinator) run(ctx context.Context, req api.GraphRequest, native []string, ev sched.Events) (
+	_ []api.Result, err error) {
 	ctx, flush := sched.ForCall(ctx, req.Trace, ev)
 	defer flush()
 	ctx, span := tracing.StartTrack(ctx, "run", "run", "graph", req.Graph.Digest.String(), "rebuild", req.Rebuild)
@@ -525,8 +584,10 @@ func (c *Coordinator) run(ctx context.Context, req api.GraphRequest, ev sched.Ev
 	// A worker that left meanwhile is waited for, as the pool says.
 	ctx = withBuild(ctx, buildInfo{job: jobOf(ctx), platform: platform})
 	b := sched.Backend{Content: c.content, Records: c.records, Checker: c.checker, Runner: c.sharing}
+	// An action whose image's platform the build runs natively waits for a worker of it rather than being emulated,
+	// even if none is registered now, as after a restart.
 	opts := sched.Options{Rebuild: req.Rebuild, Timestamp: req.Timestamp, Emulate: req.Emulate, OptIn: true,
-		Bound: c.cfg.Bound}
+		Bound: c.cfg.Bound, Native: native, Offered: c.offer(jobOf(ctx), native)}
 	return sched.New(g, b, ev, opts).Run(ctx)
 }
 

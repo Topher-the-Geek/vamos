@@ -18,6 +18,7 @@ import (
 
 	"github.com/Topher-the-Geek/vamos/internal/api"
 	"github.com/Topher-the-Geek/vamos/internal/cache"
+	"github.com/Topher-the-Geek/vamos/internal/graph"
 	"github.com/Topher-the-Geek/vamos/internal/run"
 
 	"github.com/containerd/platforms"
@@ -132,20 +133,41 @@ func TestPlatformMistakes(t *testing.T) {
 }
 
 // TestExecPlatformChoice checks which execution platform the client configures a graph for, among those the
-// executor offers: the one named, or else this machine's, or else the only one; several, none this machine's,
-// must be chosen between.
+// executor offers: the one named, or else the one the executor says clients use, or else this machine's, or else the
+// only one; several, none this machine's, must be chosen between. An older coordinator, which says none, is answered
+// as before.
 func TestExecPlatformChoice(t *testing.T) {
 	other := imgspecv1.Platform{OS: "linux", Architecture: "s390x"}
 	another := imgspecv1.Platform{OS: "linux", Architecture: "ppc64le"}
 	host := platforms.Normalize(platforms.DefaultSpec())
 	tests := []struct {
-		name    string
-		offered []imgspecv1.Platform
-		flag    string
-		want    string // the platform chosen, or "" for an error
-		err     string
+		name      string
+		offered   []imgspecv1.Platform
+		preferred *imgspecv1.Platform // the executor's
+		flag      string
+		want      string // the platform chosen, or "" for an error
+		err       string
 	}{
 		{name: "this machine's among several", offered: []imgspecv1.Platform{other, host}, want: native},
+		{
+			name:      "the executor's, over this machine's",
+			offered:   []imgspecv1.Platform{host, other},
+			preferred: &other,
+			want:      "linux/s390x",
+		},
+		{
+			name:      "named, over the executor's",
+			offered:   []imgspecv1.Platform{host, other},
+			preferred: &other,
+			flag:      native,
+			want:      native,
+		},
+		{
+			name:      "the executor's, not offered",
+			offered:   []imgspecv1.Platform{other, host},
+			preferred: &another,
+			want:      native,
+		},
 		{name: "the only one", offered: []imgspecv1.Platform{other}, want: "linux/s390x"},
 		{name: "named", offered: []imgspecv1.Platform{other, another}, flag: "linux/ppc64le", want: "linux/ppc64le"},
 		{
@@ -160,7 +182,7 @@ func TestExecPlatformChoice(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			inv := &invocation{opts: options{execPlatform: tt.flag}}
-			got, err := inv.execPlatform(api.Capabilities{Platforms: tt.offered})
+			got, err := inv.execPlatform(api.Capabilities{Platforms: tt.offered, ExecPlatform: tt.preferred})
 			switch {
 			case tt.err != "" && (err == nil || err.Error() != tt.err):
 				t.Errorf("execPlatform = %v, want %q", err, tt.err)
@@ -169,6 +191,15 @@ func TestExecPlatformChoice(t *testing.T) {
 			}
 		})
 	}
+	// An older coordinator's answer has no execution platform for clients: this machine's is chosen, as before.
+	var older api.Capabilities
+	must(t, json.Unmarshal(fmt.Appendf(nil, `{"platforms":[{"os":"linux","architecture":"s390x"},`+
+		`{"os":%q,"architecture":%q}],"graph_versions":[%d]}`, host.OS, host.Architecture, graph.Version), &older))
+	if got, err := (&invocation{}).execPlatform(older); err != nil || platforms.Format(got) != native {
+		t.Errorf("execPlatform of an older coordinator = %s, %v; want this machine's, %s", platforms.Format(got),
+			err, native)
+	}
+
 	// Naming this machine's platform builds as without the flag.
 	requireBuildah(t)
 	fsys := project(t, map[string]string{"BUILD": `layer(name="app", base="scratch")`})

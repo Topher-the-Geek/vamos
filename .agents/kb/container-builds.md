@@ -26,12 +26,22 @@ See the native compiler configuration in [golang-cli/BUILD](../../examples/golan
 Foreign executable steps depend on the host kernel's binfmt_misc handlers;
 `setPlatform`, `forPlatform` and `emulatorHint` in [run](../../internal/run/doc.go) own platform checks,
 library contexts and diagnostics.
-`sched.Scheduler.checkEmulation` refuses a target whose commands would run emulated when `sched.Options.OptIn` requires
-the build's permission, `api.GraphRequest.Emulate`, which the hidden `--emulate` flag gives;
+`sched.Scheduler.emulationRefused` refuses a target whose commands would run emulated
+when `sched.Options.OptIn` requires the build's permission, `api.GraphRequest.Emulate`,
+which the hidden `--emulate` flag gives;
 the local executor doesn't require it yet, so local builds emulate as they always have, and the result's
 provenance records that they did.
-The execution platform is chosen by `invocation.execPlatform` among `api.Capabilities.Platforms`,
-with `--exec-platform` where this machine's isn't offered and several are.
+The execution platform is chosen by `invocation.execPlatform` among `api.Capabilities.Platforms`:
+`--exec-platform`, else the coordinator's `api.Capabilities.ExecPlatform`, which `--default-exec-platform` sets,
+else this machine's, else the only one offered.
+It is the graph's one platform: it fixes what `EXEC_PLATFORM` configures, and with it cache keys,
+so a coordinator without a default gives clients of different architectures different keys.
+Where each action runs is decided later, by `Scheduler.runPlatform`: its image's platform when the executor offers it
+natively, as `sched.Options.Native` and `sched.Options.Offered` say, and otherwise the execution platform;
+a coordinator offers its configured and registered platforms, and records with each build those it used,
+so a mixed pool builds every platform natively, while a local executor offers its own alone.
+That choice is execution metadata, `sched.Request.RunPlatform`, outside the key, like emulation;
+for an action that runs no command it is a preference, which the pool drops while no worker of it is registered.
 For Docker Desktop's bundled QEMU support,
 see its [emulation guide](https://docs.docker.com/build/building/multi-platform/#qemu).
 On Apple silicon, Rosetta for amd64 is an option tied to the selected VM backend;

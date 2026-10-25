@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +19,9 @@ import (
 	"github.com/Topher-the-Geek/vamos/internal/cache"
 	"github.com/Topher-the-Geek/vamos/internal/remote"
 	"github.com/Topher-the-Geek/vamos/internal/sched"
+	"github.com/Topher-the-Geek/vamos/internal/testenv"
+
+	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 // restartable is a fixture whose coordinator keeps its jobs on disk and can be restarted over the same stores and
@@ -640,5 +644,224 @@ func TestRecordWriteFails(t *testing.T) {
 	}
 	if err := os.Mkdir(tmp, 0o700); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestRestartKeepsNativePlatforms checks that a build resumed after a restart, before the workers of its platforms
+// register again, still runs each platform's commands natively: it waits for a worker of the platform that only a
+// worker offered when it was submitted, rather than refusing them as emulated.
+func TestRestartKeepsNativePlatforms(t *testing.T) {
+	r := newRestartable(t, Config{Grace: 10 * time.Second})
+	handle, ended := blockedRun(t, r.fixture)
+	blocked := startWorker(t, r.fixture, amd64, 2, handle)
+	startWorker(t, r.fixture, arm64, 2, handle)
+	t.Cleanup(ended)
+	req := indexGraph(t, r.fixture, "restarted", true)
+	id, err := r.c.Submit(t.Context(), api.Request{Graph: &req})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return blocked.takenCount() >= 2 }) // a resolve, and a task that never ends
+
+	r.restart()
+	ran := &ranOn{runs: map[string][]string{}, kind: map[string]string{}}
+	startWorker(t, r.fixture, amd64, 2, ran.handler(r.fixture, amd64))
+	watched := make(chan []api.Event, 1)
+	go func() { watched <- watchAll(t, r, id, 0) }()
+	select {
+	case <-watched:
+		outcome, _ := r.c.Result(t.Context(), id)
+		t.Fatalf("the build ended without an arm64 worker: %+v", outcome.Failure)
+	case <-time.After(500 * time.Millisecond):
+	}
+	startWorker(t, r.fixture, arm64, 2, ran.handler(r.fixture, arm64))
+	select {
+	case <-watched:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the build didn't end once an arm64 worker registered")
+	}
+	outcome, err := r.c.Result(t.Context(), id)
+	if err != nil || outcome.Failure != nil {
+		t.Fatalf("outcome = %+v, %v; want the build's result", outcome.Failure, err)
+	}
+	for key, runs := range ran.runs {
+		if ran.kind[key] == "layer linux/arm64" && !slices.Equal(runs, []string{"linux/arm64"}) {
+			t.Errorf("the arm64 layer ran on %q, want the arm64 worker alone", runs)
+		}
+	}
+}
+
+// TestRestartKeepsPlatformsOfferedLater checks that a platform offered only once the build had started, by a worker
+// that registered then, which the build reached, is recorded with it, so that the build resumed after a restart,
+// before that worker registers again, waits for one rather than refusing its commands as emulated.
+func TestRestartKeepsPlatformsOfferedLater(t *testing.T) {
+	r := newRestartable(t, Config{Grace: 10 * time.Second})
+	release := make(chan struct{})
+	run := fakeRun(r.fixture, nil)
+	startWorker(t, r.fixture, amd64, 2, func(a *remote.Assignment, killed func() bool) remote.AttemptReport {
+		if a.Request != nil && a.Request.Action.Kind == sched.KindTask {
+			select { // the tasks wait until the arm64 worker registered
+			case <-release:
+			case <-time.After(10 * time.Second):
+			}
+		}
+		return run(a, killed)
+	})
+	req := indexGraph(t, r.fixture, "later", true)
+	id, err := r.c.Submit(t.Context(), api.Request{Graph: &req})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, ended := blockedRun(t, r.fixture)
+	later := startWorker(t, r.fixture, arm64, 2, handle)
+	t.Cleanup(ended)
+	close(release)
+	waitFor(t, func() bool { return later.takenCount() >= 1 }) // the arm64 layer, which never ends
+	recorded := func() []string {
+		r.c.journal.mu.Lock()
+		defer r.c.journal.mu.Unlock()
+		return r.c.journal.records[id].Native
+	}
+	if got := recorded(); !slices.Equal(got, []string{"linux/amd64", "linux/arm64"}) {
+		t.Errorf("the build's record runs %q natively, want both platforms", got)
+	}
+
+	r.restart()
+	ran := &ranOn{runs: map[string][]string{}, kind: map[string]string{}}
+	startWorker(t, r.fixture, amd64, 2, ran.handler(r.fixture, amd64))
+	watched := make(chan []api.Event, 1)
+	go func() { watched <- watchAll(t, r, id, 0) }()
+	select {
+	case <-watched:
+		outcome, _ := r.c.Result(t.Context(), id)
+		t.Fatalf("the build ended without an arm64 worker: %+v", outcome.Failure)
+	case <-time.After(500 * time.Millisecond):
+	}
+	startWorker(t, r.fixture, arm64, 2, ran.handler(r.fixture, arm64))
+	select {
+	case <-watched:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the build didn't end once an arm64 worker registered")
+	}
+	outcome, err := r.c.Result(t.Context(), id)
+	if err != nil || outcome.Failure != nil {
+		t.Fatalf("outcome = %+v, %v; want the build's result", outcome.Failure, err)
+	}
+}
+
+// TestPlatformWriteFails checks that a build that reaches a platform offered once it had started, whose record then
+// can't be written, reports it and runs that platform's commands natively all the same, as the other records of a
+// running build are best-effort.
+func TestPlatformWriteFails(t *testing.T) {
+	var mu sync.Mutex
+	var warned []error
+	r := newRestartable(t, Config{Warn: func(err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		warned = append(warned, err)
+	}})
+	release := make(chan struct{})
+	ran := &ranOn{runs: map[string][]string{}, kind: map[string]string{}}
+	run := ran.handler(r.fixture, amd64)
+	startWorker(t, r.fixture, amd64, 2, func(a *remote.Assignment, killed func() bool) remote.AttemptReport {
+		if a.Request != nil && a.Request.Action.Kind == sched.KindTask {
+			select { // the tasks wait until the arm64 worker registered
+			case <-release:
+			case <-time.After(10 * time.Second):
+			}
+		}
+		return run(a, killed)
+	})
+	id := func() api.JobID {
+		req := indexGraph(t, r.fixture, "unrecorded platform", true)
+		id, err := r.c.Submit(t.Context(), api.Request{Graph: &req})
+		testenv.Must(t, err)
+		return id
+	}()
+	// Records are written through the journal's tmp directory: a file in its place fails every write.
+	tmp := filepath.Join(r.cfg.State, "tmp")
+	testenv.Must(t, os.RemoveAll(tmp))
+	testenv.Must(t, os.WriteFile(tmp, nil, 0o600))
+	startWorker(t, r.fixture, arm64, 2, ran.handler(r.fixture, arm64))
+	close(release)
+	events := watchAll(t, r, id, 0)
+	if done := events[len(events)-1]; done.Outcome.Failure != nil {
+		t.Fatalf("the build's outcome = %+v, want its success", done.Outcome.Failure)
+	}
+	for key, runs := range ran.runs {
+		if ran.kind[key] == "layer linux/arm64" && !slices.Equal(runs, []string{"linux/arm64"}) {
+			t.Errorf("the arm64 layer ran on %q, want the arm64 worker alone, natively", runs)
+		}
+	}
+	mu.Lock()
+	if !slices.ContainsFunc(warned, func(err error) bool {
+		return strings.Contains(err.Error(), "recording that the build "+string(id)+
+			" runs commands natively on linux/arm64")
+	}) {
+		t.Errorf("warnings = %v, want one saying the arm64 platform wasn't recorded", warned)
+	}
+	mu.Unlock()
+	// The state is made writable again, so that the fixture's shutdown and cleanup find it as they expect.
+	testenv.Must(t, os.Remove(tmp))
+	testenv.Must(t, os.Mkdir(tmp, 0o700))
+}
+
+// TestRestartResumesUnrecordedPlatforms checks that a build recorded before builds ran natively on several platforms,
+// whose record names none, resumes running natively on the platforms configured, recording them, so that it waits
+// for a worker of one rather than refusing its commands as emulated.
+func TestRestartResumesUnrecordedPlatforms(t *testing.T) {
+	r := newRestartable(t, Config{Grace: 10 * time.Second, Platforms: []imgspecv1.Platform{amd64, arm64}})
+	handle, ended := blockedRun(t, r.fixture)
+	blocked := startWorker(t, r.fixture, amd64, 2, handle)
+	t.Cleanup(ended)
+	req := indexGraph(t, r.fixture, "unrecorded", true)
+	id, err := r.c.Submit(t.Context(), api.Request{Graph: &req})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return blocked.takenCount() >= 2 })
+
+	// The record is rewritten as the version before wrote it, while the coordinator is down.
+	r.stop()
+	path := filepath.Join(r.cfg.State, "jobs", string(id)+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	testenv.Must(t, json.Unmarshal(data, &fields))
+	if _, ok := fields["native"]; !ok {
+		t.Fatalf("the record %s names no platforms to remove", data)
+	}
+	delete(fields, "native")
+	data, err = json.Marshal(fields)
+	testenv.Must(t, err)
+	testenv.Must(t, os.WriteFile(path, data, 0o600))
+	r.start(strings.TrimPrefix(r.url, "http://"))
+
+	r.c.journal.mu.Lock()
+	native := r.c.journal.records[id].Native
+	r.c.journal.mu.Unlock()
+	if !slices.Equal(native, []string{"linux/amd64", "linux/arm64"}) {
+		t.Errorf("the resumed build's record runs %q natively, want the configured platforms", native)
+	}
+	ran := &ranOn{runs: map[string][]string{}, kind: map[string]string{}}
+	startWorker(t, r.fixture, amd64, 2, ran.handler(r.fixture, amd64))
+	watched := make(chan []api.Event, 1)
+	go func() { watched <- watchAll(t, r, id, 0) }()
+	select {
+	case <-watched:
+		outcome, _ := r.c.Result(t.Context(), id)
+		t.Fatalf("the build ended without an arm64 worker: %+v", outcome.Failure)
+	case <-time.After(500 * time.Millisecond):
+	}
+	startWorker(t, r.fixture, arm64, 2, ran.handler(r.fixture, arm64))
+	select {
+	case <-watched:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the build didn't end once an arm64 worker registered")
+	}
+	if outcome, err := r.c.Result(t.Context(), id); err != nil || outcome.Failure != nil {
+		t.Fatalf("outcome = %+v, %v; want the build's result", outcome.Failure, err)
 	}
 }
