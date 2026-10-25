@@ -1,6 +1,7 @@
 {{- /*
-The coordinator: one instance, which keeps its state in memory and its build cache on a volume.
-A StatefulSet, so that a replacement starts only once the old instance has stopped writing the cache.
+The coordinator: one instance, which keeps its build cache and its jobs on a volume, and resumes the jobs when it
+starts again, on this node or another.
+A StatefulSet, so that a replacement starts only once the old instance has stopped writing the cache and the jobs.
 */}}
 apiVersion: v1
 kind: Service
@@ -133,7 +134,8 @@ spec:
             {{- if .Values.coordinator.authSecret }}
             {{- include "vamos.authMount" (dict "secret" .Values.coordinator.authSecret) | nindent 12 }}
             {{- end }}
-      # The coordinator closes its cache and stops serving within ten seconds of being told to stop.
+      # The coordinator cuts its connections and closes its cache within ten seconds of being told to stop; its jobs
+      # are on the volume as they were, for the next instance to resume.
       terminationGracePeriodSeconds: 30
       volumes:
         {{- include "vamos.registriesVolume" . | nindent 8 }}

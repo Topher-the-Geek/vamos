@@ -22,10 +22,16 @@
 // Submit carries a submission ID the client chooses, so that a retry of a lost acknowledgement returns the job
 // already accepted rather than starting another, for as long as the client may retry; a retry also names the
 // instance it was first sent to, which another instance refuses, since it can't know whether the job started.
+// Server.EndStreams cuts the event streams and assignment polls, as a drop, for a shutdown that the executor resumes
+// from, so that what else is in flight can finish before it closes.
+// An executor that keeps its jobs across restarts, and its instance with them, is a SubmissionLog, which answers for
+// the submissions an earlier run accepted; the ID reaches its Submit in the context, as Submission returns it.
 // Watch is a stream of events, one JSON line each, which the client resumes from the last position delivered when
 // the connection drops, warning that it did, until the grace period has passed since the drop;
 // the drop is over once a line arrives again, so that the next has the whole grace period. A coordinator that
-// answers with another instance ID, or that doesn't know the job, has restarted, which ends the watch with a
+// restarted keeping its jobs answers with the same instance, and the watch resumes, meeting a gap that says so.
+// A coordinator that answers with another instance ID, or that doesn't know the job, has restarted without them,
+// which ends the watch with a
 // message that says so, and one that answers that the job expired, having held it unwatched for the grace period,
 // says that instead.
 // Cancel, Release, Result and Prune retry transport failures the same way; what they ask is idempotent.

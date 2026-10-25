@@ -5,7 +5,18 @@
 //
 // The package imports neither buildah, the container store nor Starlark; TestImportRules holds it to that.
 // Coordinator implements api.Executor, which remote.Server serves to clients, and remote.Workers, which it serves
-// to workers; coordination state lives in memory, and a restart loses the builds in flight.
+// to workers; coordination state lives in memory, but with Config.State its jobs are journaled to disk, and a
+// restart resumes them: journal.go owns the records, each written and synced once the jobs table has admitted the
+// job, through a sched.Reservation, and before the submission is acknowledged, so that a refused job is never
+// recorded; the journal's lock keeps a second coordinator from its state.
+// What a restart loses is the workers' registrations and the attempts they run, which their next requests are
+// refused, so that they kill what they run and register again; a resumed build runs again from its start, and what
+// finished before is a hit. A push or prune cut off by a restart fails, since what it wrote is unknown, and a
+// cancelled or released job ends too. A shutdown records nothing, so that what it ends is resumed, not cancelled.
+// What a restart decides, a resumed build's count of restarts and the outcome of a job it ends, is recorded before
+// the job runs or is readable, or the coordinator fails to start, so that the next restart finds the same; what a
+// running coordinator records, a cancellation, a release and an outcome, is reported to Config.Warn if it can't be,
+// and the job goes on in memory, since a restart then only runs a build again, or ends it, or a push as unknown.
 // Only the coordinator writes records, through sched.Sharing, once a worker has published an artifact and
 // reported; a report is accepted from a live attempt alone: one whose lease hasn't expired, that wasn't killed and
 // wasn't replaced by a retry, so that a stale report is discarded.
@@ -28,6 +39,12 @@
 // one for an offered platform with no worker present waits, and says so to the build after a heartbeat interval.
 // The bound on open jobs is sched.Jobs's, decided under its lock, as are the grace period, after which an unwatched
 // build's demand is withdrawn, and the window, after which a finished build is evicted; the pool's ticker sweeps both.
+// The journal keeps the instance, so that a client resumes its watch across a restart that kept the disk, and the
+// submission IDs, so that a retried submission that an earlier run accepted gets that run's job.
+// A resumed job's events start a restartPositions per restart past its first run's, so that a watcher resuming from
+// an earlier run's position meets a gap that says the coordinator restarted; a finished job's terminal event is
+// recorded with its position, through sched.Spec.Ending, before any watcher sees it, and restored there, so that a
+// client holding the build past it gets nothing, and one before it a gap, then the event.
 // Release lets a client end its hold on a build once it has delivered. Prune is refused while any job is open, while
 // any attempt is live, a killed one included until its worker reports or its lease would have passed, since the
 // answer telling the worker may be lost, and for a lease after the instance started; it clears the content, then the
@@ -45,6 +62,8 @@
 // # Changes
 //
 // pool.go owns workers, attempts, assignment, leases, kills and reports; coordinator.go owns the executor's
-// methods and the build's context; checker.go checks cached results against the content store and the registry.
-// coord_test.go drives a coordinator with fake workers over the worker-facing API.
+// methods, the build's context and recovery; journal.go owns the jobs on disk; checker.go checks cached results
+// against the content store and the registry.
+// coord_test.go drives a coordinator with fake workers over the worker-facing API; restart_test.go restarts one over
+// the same stores and state.
 package coord

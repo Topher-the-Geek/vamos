@@ -81,12 +81,13 @@ func newFixtureWithLease(t *testing.T, lease time.Duration) *fixture {
 	sys, err := transfer.SystemContext()
 	testenv.Must(t, err)
 	m := cache.NewMemory()
-	c := coord.New(m, m, coord.Config{
+	c, err := coord.New(m, m, coord.Config{
 		Lease:           lease,
 		Heartbeat:       lease / 6,
 		CacheRepository: host + "/vamos-cache",
 		Images:          &coord.Registry{Sys: sys},
 	})
+	testenv.Must(t, err)
 	t.Cleanup(func() { c.Close() })
 	server := httptest.NewServer((&remote.Server{Executor: c, Content: m, Workers: c.Workers()}).Handler())
 	t.Cleanup(server.Close)

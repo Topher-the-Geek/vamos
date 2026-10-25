@@ -81,9 +81,15 @@ func resolve(p string) string {
 }
 
 // addGap records that the events from position from to before first weren't retained by the executor,
-// so the trace lacks the spans they carried: an instant in the client's trace says so.
-func (t *traceSession) addGap(from, first int64) {
+// or, if restarted, that the executor restarted and resumed the job, so the trace lacks the spans they carried:
+// an instant in the client's trace says so.
+func (t *traceSession) addGap(from, first int64, restarted bool) {
 	ctx := tracing.WithRecorder(context.Background(), t.recorder, "")
+	if restarted {
+		tracing.Instant(ctx, "trace incomplete", "lost events from", from,
+			"reason", "the coordinator restarted")
+		return
+	}
 	tracing.Instant(ctx, "trace incomplete", "lost events from", from, "to", first-1,
 		"reason", "the executor no longer retained them")
 }

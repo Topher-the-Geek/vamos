@@ -27,8 +27,8 @@ import (
 // dropped, is retried with backoff: reads, submissions, which carry an ID so that the coordinator runs each once,
 // and watches, which resume from the last position delivered; a blob being read resumes where it was cut.
 // The retries last the coordinator's grace period, as its capabilities give it, since a build whose client has been
-// gone longer may have been withdrawn; a coordinator that answers with another instance ID has restarted,
-// and the build is lost.
+// gone longer may have been withdrawn; a coordinator that answers with another instance ID has restarted without
+// its jobs, and the build is lost, while one that kept them answers with the same, and the watch resumes.
 // A coordinator that never answered isn't retried: a wrong URL, or one that is down, fails at once.
 // Warn, if set, is told when the connection drops and when it resumes.
 type Client struct {
@@ -228,7 +228,7 @@ func (c *Client) Capabilities(ctx context.Context) (api.Capabilities, error) {
 	return caps, nil
 }
 
-// errRestarted says that the coordinator isn't the one the build was submitted to.
+// errRestarted says that the coordinator isn't the one the build was submitted to: it restarted without its jobs.
 var errRestarted = errors.New("the coordinator restarted, so the build is lost; running the command again reuses " +
 	"what finished")
 

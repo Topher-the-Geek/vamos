@@ -18,7 +18,7 @@ The registries are plain CNCF Distribution registries, nothing vamos-specific; t
 
 | Service | Role | Notes |
 | --- | --- | --- |
-| `coordinator` | Schedules what clients submit across the workers, keeps the shared build cache, checks hits against the cache registry | Not privileged; a volume for `/var/lib/vamos`; its registry settings are the compose file's inline copy of `remote/registries.conf`, since a devcontainer path can't be mounted |
+| `coordinator` | Schedules what clients submit across the workers, keeps the shared build cache, checks hits against the cache registry | Not privileged; a volume for `/var/lib/vamos`, which keeps its jobs too, so that a restart resumes them; its registry settings are the compose file's inline copy of `remote/registries.conf`, since a devcontainer path can't be mounted |
 | `worker` | Runs attempts in contained subprocesses, pushes layers to the cache registry, pulls bases through the proxy | Privileged, as buildah needs; an anonymous volume for its container store, a disposable cache; two replicas |
 | `registry` | The cache registry, which holds built layers tagged `<repository>:<image ID>` | Deletion enabled, so a prune can remove tags; blob space returns only when the registry's garbage collection runs |
 | `hub-proxy` | The pull-through cache for Docker Hub, which base images are pulled through | Proxy mode mirrors one upstream and refuses pushes (405); upstream credentials belong on the proxy |
@@ -67,7 +67,7 @@ Its values file documents every setting; what differs from the compose file is b
 
 | Object | Notes |
 | --- | --- |
-| Coordinator | A StatefulSet of one, so that a replacement starts only once the old instance has stopped; its build cache on a volume claim; not root |
+| Coordinator | A StatefulSet of one, so that a replacement starts only once the old instance has stopped; its build cache and jobs on a volume claim, so that a replacement on any node resumes the builds in flight; not root |
 | Workers | A Deployment per pool in `workers.pools`, each pool one platform, on nodes of that architecture; the coordinator offers every pool's platform |
 | Registries | A StatefulSet each with a volume claim: the cache registry, and a proxy per entry of `pullThrough.caches`; either can be replaced by one elsewhere |
 | Registry settings | One ConfigMap, generated from the registries' addresses, as `$CONTAINERS_REGISTRIES_CONF` for the coordinator and the workers |

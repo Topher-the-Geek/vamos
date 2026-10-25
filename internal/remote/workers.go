@@ -139,11 +139,13 @@ func (s *Server) registerWorkers(mux *http.ServeMux, w Workers) {
 		writeJSON(rw, http.StatusCreated, reg)
 	})
 	mux.HandleFunc("GET "+pathAssignments, func(rw http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), pollTimeout)
+		streaming, end := s.streaming(r)
+		defer end()
+		ctx, cancel := context.WithTimeout(streaming, pollTimeout)
 		defer cancel()
 		a, err := w.NextAssignment(ctx, r.PathValue("id"))
 		switch {
-		case err != nil && r.Context().Err() == nil && ctx.Err() == nil:
+		case err != nil && ctx.Err() == nil:
 			writeError(rw, r, err)
 		case a == nil:
 			rw.WriteHeader(http.StatusNoContent)

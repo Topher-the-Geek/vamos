@@ -31,7 +31,7 @@ services:
     environment:
       CONTAINERS_REGISTRIES_CONF: /etc/vamos/registries.conf
     volumes:
-      - coordinator-cache:/var/lib/vamos
+      - coordinator-cache:/var/lib/vamos # the build cache and the jobs, which a restart resumes
     configs:
       - source: registries
         target: /etc/vamos/registries.conf

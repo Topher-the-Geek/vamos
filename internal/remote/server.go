@@ -20,7 +20,8 @@ import (
 
 // Server serves an executor and a content store over HTTP, for Clients.
 // It holds no state of the builds: the executor does. What it keeps is which job each submission made,
-// so that a client retrying a submission whose acknowledgement was lost gets the job already accepted.
+// so that a client retrying a submission whose acknowledgement was lost gets the job already accepted;
+// an executor that keeps its jobs across restarts, a SubmissionLog, answers for the submissions of its earlier runs.
 // It doesn't serve ClearContent: clearing the store while builds use it is a prune's, which the executor excludes
 // them from.
 type Server struct {
@@ -40,6 +41,36 @@ type Server struct {
 	mu          sync.Mutex
 	submissions map[string]*submission // the job each submission ID made, or is making
 	finished    []*submission          // the submissions whose jobs were made, in the order they were
+	streams     context.Context        // ends when EndStreams is called; nil until first asked for
+	endStreams  context.CancelFunc
+}
+
+// EndStreams ends every event stream and assignment poll being served, and those that arrive later, at once, as cut
+// connections, which clients and workers retry, so that a shutdown that resumes its jobs can wait for what else is
+// in flight, uploads and reports, with http.Server.Shutdown, without waiting for streams that never end.
+func (s *Server) EndStreams() {
+	s.streamContext()
+	s.endStreams()
+}
+
+// streamContext returns the context that EndStreams ends.
+func (s *Server) streamContext() context.Context {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.streams == nil {
+		s.streams, s.endStreams = context.WithCancel(context.Background())
+	}
+	return s.streams
+}
+
+// streaming returns r's context, ended too by EndStreams, for a request whose answer may last indefinitely.
+func (s *Server) streaming(r *http.Request) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(r.Context())
+	stop := context.AfterFunc(s.streamContext(), cancel)
+	return ctx, func() {
+		stop()
+		cancel()
+	}
 }
 
 // submission is what a submission ID made: a job, once done is closed, or a refusal.
@@ -108,12 +139,12 @@ func (s *Server) submit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, fmt.Errorf("decoding the request: %w", err))
 		return
 	}
-	s.accept(w, r, func() (api.JobID, error) { return s.Executor.Submit(r.Context(), req) })
+	s.accept(w, r, func(ctx context.Context) (api.JobID, error) { return s.Executor.Submit(ctx, req) })
 }
 
 // prune starts a prune job, or returns the job that the same submission started before.
 func (s *Server) prune(w http.ResponseWriter, r *http.Request) {
-	s.accept(w, r, func() (api.JobID, error) { return s.Executor.Prune(r.Context()) })
+	s.accept(w, r, func(ctx context.Context) (api.JobID, error) { return s.Executor.Prune(ctx) })
 }
 
 // accept answers r, a submission, with the job that start starts, or with the job the submission ID the request
@@ -122,12 +153,12 @@ func (s *Server) prune(w http.ResponseWriter, r *http.Request) {
 // A retry names the instance it was first sent to, and another instance refuses it with errOtherInstance:
 // it can't know whether the first accepted it.
 // The submission is remembered for as long as its client may retry it: until the grace period, and some slack,
-// has passed since its job was made.
+// has passed since its job was made; one an earlier run of a SubmissionLog accepted is its to answer for.
 // A submission without an ID is accepted every time.
-func (s *Server) accept(w http.ResponseWriter, r *http.Request, start func() (api.JobID, error)) {
+func (s *Server) accept(w http.ResponseWriter, r *http.Request, start func(context.Context) (api.JobID, error)) {
 	id := r.Header.Get(headerSubmission)
 	if id == "" {
-		jobID, err := start()
+		jobID, err := start(r.Context())
 		if err != nil {
 			writeError(w, r, err)
 			return
@@ -159,7 +190,15 @@ func (s *Server) accept(w http.ResponseWriter, r *http.Request, start func() (ap
 		writeJSON(w, http.StatusOK, jobHandle{ID: sub.id})
 		return
 	}
-	sub.id, sub.err = start()
+	if log, ok := s.Executor.(SubmissionLog); ok {
+		if job, found := log.Submitted(id); found {
+			sub.id = job
+			s.finish(sub)
+			writeJSON(w, http.StatusOK, jobHandle{ID: job})
+			return
+		}
+	}
+	sub.id, sub.err = start(context.WithValue(r.Context(), submissionKey{}, id))
 	s.finish(sub)
 	if sub.err != nil {
 		s.forget(id)
@@ -167,6 +206,22 @@ func (s *Server) accept(w http.ResponseWriter, r *http.Request, start func() (ap
 		return
 	}
 	writeJSON(w, http.StatusCreated, jobHandle{ID: sub.id})
+}
+
+// SubmissionLog is an executor that keeps its jobs across its restarts, and with each the ID of the submission that
+// made it, which the context of Submit and Prune carries, as Submission returns it.
+type SubmissionLog interface {
+	// Submitted returns the job that the submission id made, if it made one that the executor still holds.
+	Submitted(id string) (api.JobID, bool)
+}
+
+type submissionKey struct{}
+
+// Submission returns the ID of the submission that ctx, a Submit's or a Prune's that a Server serves, carries,
+// or "" for a submission without one.
+func Submission(ctx context.Context) string {
+	id, _ := ctx.Value(submissionKey{}).(string)
+	return id
 }
 
 // jobHandle is how a job's ID crosses.
@@ -222,7 +277,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := api.JobID(r.PathValue("id"))
-	ctx, cancel := context.WithCancel(r.Context())
+	ctx, cancel := s.streaming(r)
 	defer cancel()
 	lines := make(chan streamLine)
 	ended := make(chan error, 1)

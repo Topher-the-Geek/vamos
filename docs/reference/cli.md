@@ -173,8 +173,14 @@ Beyond `--max-builds` open builds, submissions are refused as busy.
 There is no authentication: run a coordinator on a trusted network alone, where anyone who can reach it
 can build on it and read its cache, and anyone who can reach a pull-through cache reads what its upstream
 credentials can.
-The coordinator keeps its state in memory: a restart fails the builds in flight, which clients report and
-rerun, reusing what finished.
+The coordinator keeps its jobs in `coordinator/` under `--cache-dir`, so a restart that keeps that directory resumes
+them: clients reconnect within `--grace`, warn that the coordinator restarted, and see their builds finish.
+A resumed build runs again from its start: what finished before the restart is cached, and what was running starts
+again on a worker, since workers stop what they ran for a coordinator they lost and register again.
+A push or prune that was running fails, since whether it wrote is unknown, and a cancelled build stays cancelled.
+Two coordinators can't share that directory: the second refuses to start.
+A coordinator started without that directory has none of its jobs: clients report that their builds were lost,
+and rerunning reuses what finished.
 
 ### `worker`
 

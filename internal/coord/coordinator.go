@@ -55,6 +55,11 @@ type Config struct {
 	Isolation string
 	// Images checks whether an image is where a result says it is; nil accepts every registry location.
 	Images ImageChecker
+	// State is the directory the coordinator keeps its jobs in, so that a restart resumes them; "" keeps them in
+	// memory alone, and a restart loses them.
+	State string
+	// Warn is told what goes wrong without failing a job, such as a job's record that can't be written; nil drops it.
+	Warn func(error)
 }
 
 // NoRetries is the Config.Retries that tries no work again when its worker is lost.
@@ -86,8 +91,16 @@ func (cfg Config) withDefaults() Config {
 	if cfg.MaxBuilds == 0 {
 		cfg.MaxBuilds = 64
 	}
+	if cfg.Warn == nil {
+		cfg.Warn = func(error) {}
+	}
 	return cfg
 }
+
+// restartPositions is how many event positions each run of a job may give: a run that a restart resumes gives
+// positions from its number of restarts times this, so that a watcher resuming from an earlier run's position
+// meets a gap that says the coordinator restarted.
+const restartPositions = 1 << 40
 
 // Coordinator runs builds across a pool of workers: it schedules them, shares the actions in flight and their
 // results among builds, and keeps the content and record stores; workers execute, and only they do.
@@ -103,15 +116,18 @@ type Coordinator struct {
 	checker  *checker
 	stop     context.CancelFunc
 	started  time.Time // when this instance started, since a prune is refused for a lease after it
+	journal  *journal  // the jobs on disk; nil without Config.State
 }
 
 var (
-	_ api.Executor   = (*Coordinator)(nil)
-	_ remote.Workers = (*Coordinator)(nil)
+	_ api.Executor         = (*Coordinator)(nil)
+	_ remote.Workers       = (*Coordinator)(nil)
+	_ remote.SubmissionLog = (*Coordinator)(nil)
 )
 
 // New returns a coordinator over the stores content and records, configured by cfg, running until Close.
-func New(content cache.ContentStore, records cache.RecordStore, cfg Config) *Coordinator {
+// With cfg.State, it resumes the jobs that an earlier run kept there, as recover describes.
+func New(content cache.ContentStore, records cache.RecordStore, cfg Config) (*Coordinator, error) {
 	cfg = cfg.withDefaults()
 	var id [8]byte
 	rand.Read(id[:])
@@ -121,6 +137,19 @@ func New(content cache.ContentStore, records cache.RecordStore, cfg Config) *Coo
 		content:  content,
 		records:  records,
 		jobs:     &sched.Jobs{},
+	}
+	var kept []*record
+	if cfg.State != "" {
+		j, instance, recorded, err := openJournal(cfg.State, cfg.Warn)
+		if err != nil {
+			return nil, fmt.Errorf("opening the coordinator's state in %s: %w", cfg.State, err)
+		}
+		c.journal, c.instance, kept = j, instance, recorded
+		c.jobs.OnEvict(func(id api.JobID) {
+			if err := j.evict(id); err != nil {
+				cfg.Warn(fmt.Errorf("recording that the job %s expired: %w", id, err))
+			}
+		})
 	}
 	c.jobs.Limit(cfg.MaxBuilds)
 	c.jobs.Expire(cfg.Grace, cfg.Window)
@@ -132,8 +161,116 @@ func New(content cache.ContentStore, records cache.RecordStore, cfg Config) *Coo
 	ctx, cancel := context.WithCancel(context.Background())
 	c.stop = cancel
 	c.started = time.Now()
-	go c.pool.sweep(ctx, c.jobs.Sweep)
-	return c
+	if err := c.recover(kept); err != nil {
+		c.Close()
+		return nil, fmt.Errorf("resuming the jobs recorded in %s: %w", cfg.State, err)
+	}
+	// The jobs' sweep runs apart from the leases', since its evictions write records, so that no write delays the
+	// loss of a lease; a sweep asked for while one runs is folded into the next.
+	sweep := make(chan struct{}, 1)
+	go c.pool.sweep(ctx, func() {
+		select {
+		case sweep <- struct{}{}:
+		default:
+		}
+	})
+	go func() {
+		for {
+			select {
+			case <-sweep:
+				c.jobs.Sweep()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return c, nil
+}
+
+// recover restores the jobs that an earlier run recorded: a build that hadn't ended runs again, from the start,
+// and what finished before is a cache hit, while what its attempts were running is lost with them; a finished job's
+// outcome is readable again, its terminal event where it was, as if its client had just stopped watching; a
+// tombstone is remembered as expired. A push or a prune that hadn't ended fails, since what it wrote before the
+// restart is unknown, as does a job that was cancelled, which no restart revives, and a build that was released,
+// which no client wants. What recovery changes is recorded before the job runs or is readable, and a failure to
+// record it fails the recovery, so that no restart finds a job other than the last one left it.
+func (c *Coordinator) recover(kept []*record) error {
+	for _, r := range kept {
+		var err error
+		switch {
+		case !r.Evicted.IsZero():
+			c.jobs.RememberEvicted(r.ID)
+		case r.Outcome != nil:
+			err = c.restore(r)
+		case r.Cancelled:
+			err = c.conclude(r, sched.Failed(context.Canceled))
+		case r.Push != nil:
+			outcome := sched.Failed(fmt.Errorf("the coordinator restarted while the push ran, so whether the "+
+				"destination %s was written is unknown; check it, or push again", r.Push.Destination))
+			outcome.Failure.Nodes = []graph.Ref{r.Push.Result.Node}
+			err = c.conclude(r, outcome)
+		case r.Prune:
+			err = c.conclude(r, sched.Failed(errors.New("the coordinator restarted while the prune ran, so the "+
+				"build cache may be pruned in part; prune again")))
+		case r.Released:
+			err = c.conclude(r, sched.Failed(sched.ErrWithdrawn))
+		default:
+			err = c.resume(r)
+		}
+		if err != nil {
+			return fmt.Errorf("the job %s: %w", r.ID, err)
+		}
+	}
+	return nil
+}
+
+// resume runs the build r recorded again, its events past every position its earlier runs gave, once its new number
+// of restarts is recorded, so that a later restart never gives the same positions again; a build the jobs table
+// refuses, as when fewer builds are allowed than before, fails.
+func (c *Coordinator) resume(r *record) error {
+	restarts := r.Restarts + 1
+	spec := sched.Spec{ID: r.ID, Build: true, First: restarts * restartPositions,
+		Resumed: restarts * restartPositions, Ending: c.ending(r.ID)}
+	reserved, err := c.jobs.Reserve(spec)
+	if err != nil {
+		return c.conclude(r, sched.Failed(fmt.Errorf("the coordinator restarted and couldn't resume the build: %w",
+			err)))
+	}
+	if err := c.journal.update(r.ID, func(r *record) { r.Restarts = restarts }); err != nil {
+		reserved.Cancel()
+		return fmt.Errorf("recording that it resumed: %w", err)
+	}
+	_, err = reserved.Start(c.build(*r.Build))
+	return err
+}
+
+// conclude ends the job r recorded with outcome, which the restart decided: recorded first, its terminal event past
+// every position its earlier runs gave, so that a watcher from one of those meets a gap that says the coordinator
+// restarted.
+func (c *Coordinator) conclude(r *record, outcome api.Outcome) error {
+	restarts := r.Restarts + 1
+	done, ended := restarts*restartPositions, time.Now()
+	if err := c.journal.update(r.ID, func(r *record) {
+		r.Restarts, r.Outcome, r.Done, r.Ended = restarts, &outcome, done, ended
+	}); err != nil {
+		return fmt.Errorf("recording how it ended: %w", err)
+	}
+	r.Restarts, r.Outcome, r.Done, r.Ended = restarts, &outcome, done, ended
+	return c.restore(r)
+}
+
+// restore makes the job r recorded, which has ended, readable: its terminal event where it was, and a gap from a
+// position of an earlier run saying that the coordinator restarted.
+func (c *Coordinator) restore(r *record) error {
+	spec := sched.Spec{ID: r.ID, Build: r.Build != nil, First: r.Done, Resumed: r.Restarts * restartPositions}
+	j, err := c.jobs.Restore(spec, *r.Outcome, r.Ended)
+	if err != nil {
+		return err
+	}
+	if r.Released {
+		j.Release()
+	}
+	return nil
 }
 
 // RetainEvents makes the coordinator retain n events of each job for watchers, rather than the default;
@@ -142,8 +279,10 @@ func (c *Coordinator) RetainEvents(n int) {
 	c.jobs.RetainEvents(n)
 }
 
-// Close ends every job and attempt and waits for the jobs to end.
+// Close ends every job and attempt and waits for the jobs to end; a job kept on disk is recorded as it was before,
+// so that the next run resumes it rather than finding it ended by the shutdown.
 func (c *Coordinator) Close() error {
+	c.journal.close()
 	c.stop()
 	c.pool.close()
 	c.jobs.Stop()
@@ -246,7 +385,7 @@ func (c *Coordinator) Submit(ctx context.Context, req api.Request) (api.JobID, e
 		if err := checkResult(req.Push.Result); err != nil {
 			return "", err
 		}
-		return c.submitPush(*req.Push)
+		return c.submitPush(ctx, *req.Push)
 	case req.Export != nil:
 		if err := checkResult(req.Export.Result); err != nil {
 			return "", err
@@ -262,18 +401,74 @@ func (c *Coordinator) Submit(ctx context.Context, req api.Request) (api.JobID, e
 		return "", fmt.Errorf("the graph was configured for an executor on %s, which this coordinator doesn't offer; "+
 			"it offers %v", platforms.Format(platforms.Normalize(g.Platform)), c.platformNames())
 	}
-	return c.jobs.StartBuild(func(ctx context.Context, ev sched.Events) api.Outcome {
+	return c.begin(ctx, record{Build: g}, sched.Spec{Build: true}, c.build(*g))
+}
+
+// build returns the work of a build of g.
+func (c *Coordinator) build(g api.GraphRequest) func(ctx context.Context, ev sched.Events) api.Outcome {
+	return func(ctx context.Context, ev sched.Events) api.Outcome {
 		// The generation is checked once the build is open, since no prune starts then: checked before, a prune
 		// could run between the check and the build's start.
 		if err := c.checkGeneration(ctx, g.Generation); err != nil {
 			return sched.Failed(err)
 		}
-		results, err := c.run(ctx, *g, ev)
+		results, err := c.run(ctx, g, ev)
 		if err != nil {
 			return sched.Failed(err)
 		}
 		return api.Outcome{Results: results}
-	})
+	}
+}
+
+// begin starts a job as spec says, which runs work, with r its record, which the journal writes once the job is
+// admitted and before it starts, so that a job acknowledged is a job that a restart resumes and a job refused is
+// never recorded; the record names the submission that ctx carries.
+func (c *Coordinator) begin(ctx context.Context, r record, spec sched.Spec,
+	work func(ctx context.Context, ev sched.Events) api.Outcome) (api.JobID, error) {
+	spec.ID = sched.NewJobID()
+	spec.Ending = c.ending(spec.ID)
+	reserved, err := c.jobs.Reserve(spec)
+	if err != nil {
+		return "", err
+	}
+	r.ID, r.Submission = spec.ID, remote.Submission(ctx)
+	if err := c.journal.put(&r); err != nil {
+		reserved.Cancel()
+		return "", fmt.Errorf("recording the job: %w", err)
+	}
+	id, err := reserved.Start(work)
+	if err != nil {
+		// Only a shutdown since the reservation refuses the start.
+		if rerr := c.journal.remove(spec.ID); rerr != nil {
+			c.cfg.Warn(fmt.Errorf("forgetting the job %s, which never started: %w", spec.ID, rerr))
+		}
+		return "", err
+	}
+	return id, nil
+}
+
+// ending returns what records the terminal event of the job id, its outcome and position, before any watcher sees
+// it, so that a client that saw the job end finds the same outcome after a restart; nil without a journal.
+// A failure to record it is reported to Warn: the job ends in memory regardless, and a restart then runs a build
+// again, its finished work cached, and ends a push as one whose write is unknown.
+func (c *Coordinator) ending(id api.JobID) func(done api.Event) {
+	if c.journal == nil {
+		return nil
+	}
+	return func(done api.Event) {
+		ended := time.Now()
+		if err := c.journal.update(id, func(r *record) {
+			r.Outcome, r.Done, r.Ended = done.Outcome, done.Position, ended
+		}); err != nil {
+			c.cfg.Warn(fmt.Errorf("recording how the job %s ended: %w", id, err))
+		}
+	}
+}
+
+// Submitted returns the job that the submission id made, if the coordinator holds it, as remote.SubmissionLog asks,
+// so that a client retrying a submission that an earlier run accepted gets the job that run started.
+func (c *Coordinator) Submitted(id string) (api.JobID, bool) {
+	return c.journal.submitted(id)
 }
 
 // checkGeneration refuses a graph captured against a generation other than the current one; zero, from a client
@@ -350,10 +545,15 @@ func (c *Coordinator) Watch(ctx context.Context, id api.JobID, from int64, fn fu
 }
 
 // Cancel asks the job id to stop: its demand is withdrawn, and attempts no build needs are killed.
+// The cancellation is recorded first, so that a restart before the job ends doesn't resume it; a failure to record
+// it is reported to Warn, since the job is cancelled regardless, and a restart then resumes it until it expires.
 func (c *Coordinator) Cancel(_ context.Context, id api.JobID) error {
 	j, err := c.jobs.Lookup(id)
 	if err != nil {
 		return err
+	}
+	if err := c.journal.update(id, func(r *record) { r.Cancelled = true }); err != nil {
+		c.cfg.Warn(fmt.Errorf("recording that the job %s was cancelled: %w", id, err))
 	}
 	j.Cancel()
 	return nil
@@ -362,9 +562,18 @@ func (c *Coordinator) Cancel(_ context.Context, id api.JobID) error {
 // Release lets go of the job id: a finished build is evicted at the next sweep, and a running one's demand is
 // withdrawn.
 func (c *Coordinator) Release(_ context.Context, id api.JobID) error {
+	return c.release(id)
+}
+
+// release releases the job id, recording it, so that a restart evicts it rather than holding it for a window;
+// a failure to record it is reported to Warn, since the job is released regardless.
+func (c *Coordinator) release(id api.JobID) error {
 	j, err := c.jobs.Lookup(id)
 	if err != nil {
 		return err
+	}
+	if err := c.journal.update(id, func(r *record) { r.Released = true }); err != nil {
+		c.cfg.Warn(fmt.Errorf("recording that the job %s was released: %w", id, err))
 	}
 	j.Release()
 	return nil
@@ -385,7 +594,7 @@ func (c *Coordinator) Result(_ context.Context, id api.JobID) (api.Outcome, erro
 // still run an attempt of it until it fences itself.
 // The content goes first and the records after, since clearing the records advances the generation: a client that
 // reads the new generation then uploads to a content store that nothing clears any more.
-func (c *Coordinator) Prune(context.Context) (api.JobID, error) {
+func (c *Coordinator) Prune(ctx context.Context) (api.JobID, error) {
 	if since := time.Since(c.started); since < c.cfg.Lease {
 		return "", fmt.Errorf("%w: the coordinator started %s ago, and an attempt of an earlier instance may run "+
 			"until a lease, %s, has passed", api.ErrSettling, since.Round(time.Second), c.cfg.Lease)
@@ -395,7 +604,8 @@ func (c *Coordinator) Prune(context.Context) (api.JobID, error) {
 	if n := c.pool.liveAttempts(); n > 0 {
 		return "", fmt.Errorf("%w: %d attempts are still live on the workers, or waiting for one", api.ErrSettling, n)
 	}
-	return c.jobs.Start(true, func(ctx context.Context, ev sched.Events) api.Outcome {
+	return c.begin(ctx, record{Prune: true}, sched.Spec{Exclusive: true}, func(ctx context.Context,
+		ev sched.Events) api.Outcome {
 		var pruned api.Pruned
 		var err error
 		if pruned.Blobs, err = c.content.ClearContent(ctx); err != nil {
@@ -418,11 +628,11 @@ func (c *Coordinator) Prune(context.Context) (api.JobID, error) {
 }
 
 // submitPush starts a job that has a worker push req.Result's image or index to req.Destination.
-func (c *Coordinator) submitPush(req api.PushRequest) (api.JobID, error) {
+func (c *Coordinator) submitPush(ctx context.Context, req api.PushRequest) (api.JobID, error) {
 	if _, err := sched.ParseDestination(req.Destination); err != nil {
 		return "", err
 	}
-	return c.jobs.Start(false, func(ctx context.Context, ev sched.Events) api.Outcome {
+	return c.begin(ctx, record{Push: &req}, sched.Spec{}, func(ctx context.Context, ev sched.Events) api.Outcome {
 		ctx, flush := sched.ForCall(ctx, req.Trace, ev)
 		defer flush()
 		ctx, span := tracing.StartTrack(ctx, "push", "push to "+req.Destination)

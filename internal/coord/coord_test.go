@@ -31,11 +31,11 @@ var (
 	arm64 = imgspecv1.Platform{OS: "linux", Architecture: "arm64"}
 )
 
-// fixture is a coordinator served over HTTP, with its stores in memory.
+// fixture is a coordinator served over HTTP, at url, with its stores in memory.
 type fixture struct {
-	c      *Coordinator
-	m      *cache.Memory
-	server *httptest.Server
+	c   *Coordinator
+	m   *cache.Memory
+	url string
 }
 
 // newFixture returns a coordinator configured by cfg, with short leases unless cfg sets them.
@@ -46,11 +46,14 @@ func newFixture(t *testing.T, cfg Config) *fixture {
 		cfg.Heartbeat = 50 * time.Millisecond
 	}
 	m := cache.NewMemory()
-	c := New(m, m, cfg)
+	c, err := New(m, m, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { c.Close() })
 	server := httptest.NewServer((&remote.Server{Executor: c, Content: m, Workers: c.Workers()}).Handler())
 	t.Cleanup(server.Close)
-	return &fixture{c: c, m: m, server: server}
+	return &fixture{c: c, m: m, url: server.URL}
 }
 
 // fakeWorker is a worker that runs attempts with a scripted handler, over the worker-facing API.
@@ -91,7 +94,7 @@ func newWorker(t *testing.T, f *fixture, platform imgspecv1.Platform, capacity i
 	handle func(a *remote.Assignment, killed func() bool) remote.AttemptReport,
 	emulates ...imgspecv1.Platform) *fakeWorker {
 	t.Helper()
-	client, err := remote.NewWorkerClient(f.server.URL)
+	client, err := remote.NewWorkerClient(f.url)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -615,7 +618,7 @@ func TestRequestPlatformMatchesGraph(t *testing.T) {
 // and that an unregistered worker's poll says so.
 func TestWorkerRegistration(t *testing.T) {
 	f := newFixture(t, Config{})
-	client, err := remote.NewWorkerClient(f.server.URL)
+	client, err := remote.NewWorkerClient(f.url)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1097,8 +1100,11 @@ func (g *gatedGeneration) Generation(ctx context.Context) (uint64, error) {
 // while the check runs is refused, so that none can pass between the check and the build.
 func TestGenerationCheckedOnceOpen(t *testing.T) {
 	stores := &gatedGeneration{Memory: cache.NewMemory(), reading: make(chan struct{}, 1), gate: make(chan struct{})}
-	c := New(stores, stores, Config{Lease: 50 * time.Millisecond, Heartbeat: 10 * time.Millisecond,
+	c, err := New(stores, stores, Config{Lease: 50 * time.Millisecond, Heartbeat: 10 * time.Millisecond,
 		Platforms: []imgspecv1.Platform{amd64}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { c.Close() })
 	f := &fixture{c: c, m: stores.Memory}
 	ctx := t.Context()
@@ -1272,7 +1278,10 @@ func (o *orderedStores) ClearResults(ctx context.Context) (int, error) {
 // so that a client that read the new generation uploads to a store that nothing clears any more.
 func TestPruneOrder(t *testing.T) {
 	stores := &orderedStores{Memory: cache.NewMemory()}
-	c := New(stores, stores, Config{Lease: 50 * time.Millisecond, Heartbeat: 20 * time.Millisecond})
+	c, err := New(stores, stores, Config{Lease: 50 * time.Millisecond, Heartbeat: 20 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { c.Close() })
 	ctx := t.Context()
 	time.Sleep(c.cfg.Lease)

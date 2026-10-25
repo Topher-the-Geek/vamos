@@ -21,8 +21,8 @@ fullnameOverride: ""
 
 commonLabels: {}
 
-# The coordinator: one instance, since it keeps its state in memory and a client refuses a coordinator that has
-# restarted under it. Its build cache is on a volume, so a restart fails the builds in flight but keeps what finished.
+# The coordinator: one instance, a StatefulSet, which keeps its build cache and its jobs on a volume claim, so that a
+# restart, or a move to another node, resumes the builds in flight; clients reconnect within the grace period.
 coordinator:
   # Flags the coordinator takes; the chart derives --listen, --cache-dir, --cache-repository, --pull-through and
   # --offer. Unset values keep vamos's defaults.
@@ -49,7 +49,8 @@ coordinator:
     nodePort: null
     annotations: {}
 
-  # The build cache: sources, trees, logs and results.
+  # The build cache, sources, trees, logs and results, and the coordinator's jobs. Disabled, both are on an
+  # emptyDir, which a restart of the container keeps but a move of the pod loses, and with it the builds in flight.
   persistence:
     enabled: true
     size: 20Gi

@@ -48,9 +48,11 @@ type Jobs struct {
 	evicted   map[api.JobID]bool // the jobs evicted, the last evictedRemembered of them
 	evictions []api.JobID        // in order, so that the oldest is forgotten first
 	running   sync.WaitGroup     // the jobs that haven't ended
-	active    int                // how many jobs haven't ended
+	active    int                // how many jobs haven't ended, reservations included
+	reserved  int                // how many jobs are reserved and not yet started
 	exclusive *Job               // the Job that must run alone, a prune, while it runs
 	closed    bool               // stop has been called: no Job starts
+	onEvict   func(api.JobID)    // told of each eviction, outside the lock
 }
 
 // RetainEvents makes the table retain n events of each job for watchers, rather than the default;
@@ -74,6 +76,12 @@ func (t *Jobs) Limit(n int) {
 // raised to grace if shorter; Sweep applies both. A grace of 0 turns both off.
 func (t *Jobs) Expire(grace, window time.Duration) {
 	t.grace, t.window = grace, max(window, grace)
+}
+
+// OnEvict makes the table tell fn of each job it evicts, once the eviction is done, outside its lock;
+// it is for before any job is started.
+func (t *Jobs) OnEvict(fn func(api.JobID)) {
+	t.onEvict = fn
 }
 
 // Active returns how many jobs haven't ended.
@@ -124,6 +132,7 @@ type Job struct {
 	cancel         context.CancelFunc
 	retention      int
 	retentionBytes int
+	resumed        int64         // the position an earlier run's events end before, for a Job resumed; 0 otherwise
 	expires        bool          // a build, whose demand lapses without a watcher
 	withdrawn      chan struct{} // closed once the demand is withdrawn
 	now            func() time.Time
@@ -134,6 +143,7 @@ type Job struct {
 	bytes    int         // the output the retained events hold
 	changed  chan struct{}
 	done     bool
+	sealed   bool        // its work has returned: events are dropped until the terminal event
 	outcome  api.Outcome // once done
 	watchers int         // the watches open now
 	idle     time.Time   // when the last watcher left, or the Job started
@@ -175,68 +185,129 @@ func (j *Job) withdraw() {
 // never overlap on this executor and the bound holds under concurrent starts.
 // A Job started so never expires: it is a push or a prune, which runs to completion unwatched.
 func (t *Jobs) Start(exclusive bool, work func(ctx context.Context, ev Events) api.Outcome) (api.JobID, error) {
-	return t.start(exclusive, false, work)
+	return t.StartAs(Spec{Exclusive: exclusive}, work)
 }
 
 // StartBuild adds a Job as Start does, which expires without a watcher: a build, whose demand its client's
 // attachment carries.
 func (t *Jobs) StartBuild(work func(ctx context.Context, ev Events) api.Outcome) (api.JobID, error) {
-	return t.start(false, true, work)
+	return t.StartAs(Spec{Build: true}, work)
 }
 
-// start adds a Job, as Start and StartBuild describe.
-func (t *Jobs) start(exclusive, expires bool, work func(ctx context.Context, ev Events) api.Outcome) (
-	api.JobID, error) {
+// Spec says how a Job starts, for StartAs, Reserve and Restore.
+type Spec struct {
+	// ID is the Job's ID: one that NewJobID made, which an executor keeping its jobs on disk records before the
+	// start; a fresh one if "".
+	ID api.JobID
+	// Exclusive is a Job that runs alone, a prune; Build one that expires without a watcher.
+	Exclusive, Build bool
+	// First is the position of the Job's first event, and Resumed the position before which every position is an
+	// earlier run's: for a Job resumed after a restart, both are past every position its earlier runs gave, so that a
+	// watcher resuming from one of those meets a gap that says the executor restarted.
+	First, Resumed int64
+	// Ending, if set, is given the Job's terminal event, with its position and outcome, once its work has returned and
+	// before any watcher can see the event, outside the table's lock, so that an executor keeping its jobs on disk
+	// records it first. Events that the work's attempts send after it returned are dropped from then on.
+	Ending func(done api.Event)
+}
+
+// NewJobID returns a fresh job ID.
+func NewJobID() api.JobID {
 	var b [8]byte
 	rand.Read(b[:])
-	id := api.JobID(hex.EncodeToString(b[:]))
-	ctx, cancel := context.WithCancel(context.Background())
-	retention := t.retention
-	if retention <= 0 {
-		retention = defaultRetention
+	return api.JobID(hex.EncodeToString(b[:]))
+}
+
+// StartAs adds a Job as spec says, as Start and StartBuild describe.
+func (t *Jobs) StartAs(spec Spec, work func(ctx context.Context, ev Events) api.Outcome) (api.JobID, error) {
+	r, err := t.Reserve(spec)
+	if err != nil {
+		return "", err
 	}
-	retentionBytes := t.retentionBytes
-	if retentionBytes <= 0 {
-		retentionBytes = defaultRetentionBytes
+	return r.Start(work)
+}
+
+// Reservation is a Job admitted to the table that hasn't started: it holds its place under the limit, and an
+// exclusive one its exclusion, until Start or Cancel, so that an executor can record the Job between its admission
+// and its start, and record none that the table refuses.
+type Reservation struct {
+	t     *Jobs
+	id    api.JobID
+	spec  Spec
+	j     *Job
+	ended bool // started or cancelled
+}
+
+// Reserve admits a Job as spec says, under the rules that Start describes, without starting it.
+func (t *Jobs) Reserve(spec Spec) (*Reservation, error) {
+	id := spec.ID
+	if id == "" {
+		id = NewJobID()
 	}
-	j := &Job{cancel: cancel, retention: retention, retentionBytes: retentionBytes, expires: expires,
-		withdrawn: make(chan struct{}), changed: make(chan struct{}), idle: t.clock(), now: t.clock}
-	ctx = context.WithValue(ctx, jobKey{}, id)
-	ctx = context.WithValue(ctx, withdrawKey{}, j.withdrawn)
+	j := t.newJob(spec)
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	held := 0
-	if exclusive {
+	if spec.Exclusive {
 		held = t.held()
 	}
 	switch {
 	case t.closed:
-		cancel()
-		return "", ErrClosed
+		return nil, ErrClosed
 	case t.exclusive != nil:
-		cancel()
-		return "", ErrPruning
-	case exclusive && held > 0:
-		cancel()
-		return "", fmt.Errorf("%d other jobs are running or held open on this executor; prune when they have ended "+
+		return nil, ErrPruning
+	case spec.Exclusive && held > 0:
+		return nil, fmt.Errorf("%d other jobs are running or held open on this executor; prune when they have ended "+
 			"and their clients have released them", held)
 	case t.limit > 0 && t.active >= t.limit:
-		cancel()
-		return "", ErrBusy
+		return nil, ErrBusy
 	}
+	if spec.Exclusive {
+		t.exclusive = j
+	}
+	t.active++
+	t.reserved++
+	return &Reservation{t: t, id: id, spec: spec, j: j}, nil
+}
+
+// ID returns the ID the Job will have.
+func (r *Reservation) ID() api.JobID {
+	return r.id
+}
+
+// Start starts the Job reserved, which runs work, as Start describes, unless the table has stopped since the
+// reservation, when it fails with ErrClosed, as Cancel would.
+func (r *Reservation) Start(work func(ctx context.Context, ev Events) api.Outcome) (api.JobID, error) {
+	t, j := r.t, r.j
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if r.ended {
+		return "", errors.New("the reservation was used already")
+	}
+	r.ended = true
+	t.reserved--
+	if t.closed {
+		t.unreserve(j)
+		return "", ErrClosed
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = context.WithValue(ctx, jobKey{}, r.id)
+	ctx = context.WithValue(ctx, withdrawKey{}, j.withdrawn)
+	j.cancel = cancel
 	if t.jobs == nil {
 		t.jobs = map[api.JobID]*Job{}
 	}
-	t.jobs[id] = j
-	if exclusive {
-		t.exclusive = j
-	}
+	t.jobs[r.id] = j
 	t.running.Add(1)
-	t.active++
+	ending := r.spec.Ending
 	go func() {
 		defer t.running.Done()
 		defer cancel()
 		outcome := work(ctx, jobEvents{j})
+		done := j.seal(outcome)
+		if ending != nil {
+			ending(done)
+		}
 		t.mu.Lock()
 		j.finish(outcome, t.clock())
 		t.active--
@@ -245,7 +316,70 @@ func (t *Jobs) start(exclusive, expires bool, work func(ctx context.Context, ev 
 		}
 		t.mu.Unlock()
 	}()
-	return id, nil
+	return r.id, nil
+}
+
+// Cancel gives the reservation up, if it hasn't been started.
+func (r *Reservation) Cancel() {
+	t := r.t
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if r.ended {
+		return
+	}
+	r.ended = true
+	t.reserved--
+	t.unreserve(r.j)
+}
+
+// unreserve gives up the place that j, reserved and never started, held; t.mu must be held.
+func (t *Jobs) unreserve(j *Job) {
+	t.active--
+	if t.exclusive == j {
+		t.exclusive = nil
+	}
+}
+
+// newJob returns a Job as spec says, not yet in the table.
+func (t *Jobs) newJob(spec Spec) *Job {
+	retention := t.retention
+	if retention <= 0 {
+		retention = defaultRetention
+	}
+	retentionBytes := t.retentionBytes
+	if retentionBytes <= 0 {
+		retentionBytes = defaultRetentionBytes
+	}
+	return &Job{cancel: func() {}, retention: retention, retentionBytes: retentionBytes, resumed: spec.Resumed,
+		first: spec.First, expires: spec.Build, withdrawn: make(chan struct{}), changed: make(chan struct{}),
+		idle: t.clock(), now: t.clock}
+}
+
+// Restore adds a Job that an earlier run of the executor finished with outcome at ended, as spec says, its terminal
+// event at spec.First, the position it had, so that a watcher past it gets nothing and one before it a gap, then the
+// event: it is readable for the window from now, as if its client had just stopped watching, since the client may
+// have been holding it through delivery when the executor stopped.
+func (t *Jobs) Restore(spec Spec, outcome api.Outcome, ended time.Time) (*Job, error) {
+	j := t.newJob(spec)
+	j.finish(outcome, ended)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		return nil, ErrClosed
+	}
+	if t.jobs == nil {
+		t.jobs = map[api.JobID]*Job{}
+	}
+	t.jobs[spec.ID] = j
+	return j, nil
+}
+
+// RememberEvicted makes the table remember id as a Job evicted, as an earlier run of the executor did, so that a
+// watch of it says it expired; the oldest is given first.
+func (t *Jobs) RememberEvicted(id api.JobID) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.remember(id)
 }
 
 // held returns how many jobs are open: running, watched, or finished builds their clients may still hold, within
@@ -253,7 +387,7 @@ func (t *Jobs) start(exclusive, expires bool, work func(ctx context.Context, ev 
 // it, the order Sweep and finish keep too.
 func (t *Jobs) held() int {
 	now := t.clock()
-	n := 0
+	n := t.reserved
 	for _, j := range t.jobs {
 		if j.open(now, t.grace) {
 			n++
@@ -305,12 +439,19 @@ func (t *Jobs) Sweep() {
 		return
 	}
 	now := t.clock()
+	var evicted []api.JobID
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	for id, j := range t.jobs {
 		if evict := j.sweep(now, t.grace, t.window); evict {
 			delete(t.jobs, id)
 			t.remember(id)
+			evicted = append(evicted, id)
+		}
+	}
+	t.mu.Unlock()
+	if t.onEvict != nil {
+		for _, id := range evicted {
+			t.onEvict(id)
 		}
 	}
 }
@@ -350,15 +491,15 @@ func (j *Job) sweep(now time.Time, grace, window time.Duration) bool {
 func (j *Job) add(e api.Event) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	if j.done || j.sealed {
+		return
+	}
 	j.append(e)
 }
 
 // append appends e under the lock, as add does, dropping the oldest events while the Job retains more than it
 // keeps, by count or by bytes of output.
 func (j *Job) append(e api.Event) {
-	if j.done {
-		return
-	}
 	e.Position = j.first + int64(len(j.events))
 	j.events = append(j.events, e)
 	j.bytes += len(e.Data)
@@ -370,6 +511,15 @@ func (j *Job) append(e api.Event) {
 	}
 	close(j.changed)
 	j.changed = make(chan struct{})
+}
+
+// seal drops the events that arrive from now on, and returns the terminal event that finish will append, with outcome
+// and its position.
+func (j *Job) seal(outcome api.Outcome) api.Event {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.sealed = true
+	return api.Event{Position: j.first + int64(len(j.events)), Kind: api.EventDone, Outcome: &outcome}
 }
 
 // finish ends the Job with outcome, as its terminal event: the event is appended and the Job is done in one step,
@@ -420,7 +570,8 @@ func (j *Job) attach() func() {
 // a position already expired gets a gap event first, and a watcher that falls behind the retained events
 // as it reads is dropped with ErrFellBehind.
 // A watcher that has just been given a gap, and whose first retained position expired meanwhile, gets another gap
-// rather than being dropped: it has read nothing yet.
+// rather than being dropped: it has read nothing yet. A gap from a position an earlier run of a resumed Job gave
+// says that the executor restarted.
 // Each event is a copy, which fn may keep or change.
 // The end of ctx is noticed before each event, not only while waiting for one,
 // so that a watcher behind a Job that has many events stops when asked.
@@ -451,7 +602,8 @@ func (j *Job) Watch(ctx context.Context, from int64, fn func(api.Event) error) e
 			return fmt.Errorf("%w: the events from position %d are no longer retained; the first is %d",
 				api.ErrFellBehind, from, first)
 		case from < first:
-			if err := fn(api.Event{Position: from, Kind: api.EventGap, First: first}); err != nil {
+			gap := api.Event{Position: from, Kind: api.EventGap, First: first, Restarted: from < j.resumed}
+			if err := fn(gap); err != nil {
 				return err
 			}
 			from = first

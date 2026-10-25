@@ -598,14 +598,14 @@ func (inv *invocation) coordinator() error {
 			return err
 		}
 		server, closer = &remote.Server{Executor: local, Content: content, GracePeriod: inv.opts.grace}, local
-	} else {
-		c, err := inv.newCoordinator()
-		if err != nil {
-			return err
-		}
-		server, closer = &remote.Server{Executor: c, Content: c.content, Workers: c.Workers()}, c
+		return inv.serve(server, closer, false)
 	}
-	return inv.serve(server, closer)
+	c, err := inv.newCoordinator()
+	if err != nil {
+		return err
+	}
+	server, closer = &remote.Server{Executor: c, Content: c.content, Workers: c.Workers()}, c
+	return inv.serve(server, closer, true)
 }
 
 // coordinatorStores is a coordinator with the build cache it keeps, closed together.
@@ -667,7 +667,7 @@ func (inv *invocation) newCoordinator() (*coordinatorStores, error) {
 	if err != nil {
 		return nil, fmt.Errorf("--cache-dir %s: %w", inv.opts.cacheDir, err)
 	}
-	c := coord.New(directory, directory, coord.Config{
+	c, err := coord.New(directory, directory, coord.Config{
 		Platforms:       offered,
 		Emulated:        emulated,
 		Lease:           inv.opts.lease,
@@ -680,7 +680,14 @@ func (inv *invocation) newCoordinator() (*coordinatorStores, error) {
 		PullThrough:     pullThrough,
 		Version:         run.Version(),
 		Images:          &coord.Registry{Sys: sys},
+		// The jobs are kept beside the build cache, on the volume that keeps it, which a prune leaves alone.
+		State: filepath.Join(inv.opts.cacheDir, "coordinator"),
+		Warn:  inv.warn,
 	})
+	if err != nil {
+		directory.Close()
+		return nil, fmt.Errorf("--cache-dir %s: %w", inv.opts.cacheDir, err)
+	}
 	return &coordinatorStores{Coordinator: c, directory: directory, content: directory}, nil
 }
 
@@ -711,7 +718,11 @@ func parsePlatforms(flag string, texts []string) ([]imgspecv1.Platform, error) {
 
 // serve serves s at --listen until the command is interrupted, then closes closer, the executor it serves,
 // so that its jobs are cancelled and cleaned up, which ends the watches that clients hold open, and shuts down.
-func (inv *invocation) serve(s *remote.Server, closer executor) error {
+// An executor that resumes its jobs when it starts again, as a coordinator does, has its event streams and
+// assignment polls cut first, so that its clients see a drop, and resume their watches once it is back, rather than
+// being told that their builds were cancelled by the shutdown; what else is in flight, such as an upload or a
+// worker's report, may finish within the shutdown's wait, and the executor is closed only after it.
+func (inv *invocation) serve(s *remote.Server, closer executor, resumes bool) error {
 	server := &http.Server{Handler: s.Handler()}
 	listener, err := net.Listen("tcp", inv.opts.listen)
 	if err != nil {
@@ -730,11 +741,18 @@ func (inv *invocation) serve(s *remote.Server, closer executor) error {
 		return err
 	case <-inv.ctx.Done():
 	}
-	inv.closeExecutor(closer)
 	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	if resumes {
+		s.EndStreams()
+	} else {
+		inv.closeExecutor(closer) // which ends the jobs, and so the watches of them
+	}
 	if err := server.Shutdown(shutdown); err != nil {
 		server.Close() // whatever is still connected is cut off
+	}
+	if resumes {
+		inv.closeExecutor(closer)
 	}
 	return nil
 }
@@ -1291,7 +1309,7 @@ func (p *eventPrinter) record(e api.Event) {
 		p.spans(e.Spans)
 	case api.EventGap:
 		if p.trace != nil {
-			p.trace.addGap(e.Position, e.First)
+			p.trace.addGap(e.Position, e.First, e.Restarted)
 		}
 	}
 }
@@ -1318,6 +1336,11 @@ func (p *eventPrinter) handle(e api.Event) error {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		// A warning that can't be written is dropped, as every warning is: the command's outcome matters more.
+		if e.Restarted {
+			fmt.Fprint(p.stderr, "vamos: warning: the coordinator restarted, so the progress it showed before isn't "+
+				"shown again; a build it resumed runs again, what finished before cached\n")
+			break
+		}
 		fmt.Fprintf(p.stderr, "vamos: warning: the executor no longer had the events from %d to %d, "+
 			"so some progress wasn't shown; the targets' logs are whole\n", e.Position, e.First-1)
 	}

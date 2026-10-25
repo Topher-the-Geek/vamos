@@ -126,6 +126,61 @@ func TestJobsRefusedDuringPrune(t *testing.T) {
 	}
 }
 
+// TestJobsReservation checks that a reservation holds its place until it is started or cancelled: a reserved prune
+// excludes other jobs, a reserved job counts against a prune and the limit, and a cancelled one frees its place;
+// that the terminal event Ending is given is the one watchers see; and that a reservation started after stop is
+// refused.
+func TestJobsReservation(t *testing.T) {
+	var jobs Jobs
+	jobs.Limit(1)
+	prune, err := jobs.Reserve(Spec{Exclusive: true})
+	testenv.Must(t, err)
+	if _, err := jobs.Reserve(Spec{}); !errors.Is(err, ErrPruning) {
+		t.Errorf("a job while a prune is reserved = %v, want %v", err, ErrPruning)
+	}
+	prune.Cancel()
+	build, err := jobs.Reserve(Spec{Build: true})
+	testenv.Must(t, err)
+	if _, err := jobs.Reserve(Spec{Exclusive: true}); err == nil || !strings.Contains(err.Error(), "1 other jobs") {
+		t.Errorf("a prune while a job is reserved = %v, want it refused, counting the reservation", err)
+	}
+	if _, err := jobs.Reserve(Spec{}); !errors.Is(err, ErrBusy) {
+		t.Errorf("a job beyond the limit while one is reserved = %v, want %v", err, ErrBusy)
+	}
+	build.Cancel()
+
+	var ending api.Event
+	spec := Spec{ID: "0123456789abcdef", First: 100, Ending: func(done api.Event) { ending = done }}
+	r, err := jobs.Reserve(spec)
+	testenv.Must(t, err)
+	if r.ID() != spec.ID {
+		t.Errorf("the reservation's ID = %s, want %s", r.ID(), spec.ID)
+	}
+	id, err := r.Start(func(_ context.Context, ev Events) api.Outcome {
+		ev.Status(0, "running")
+		return api.Outcome{Cancelled: true}
+	})
+	testenv.Must(t, err)
+	j, err := jobs.Lookup(id)
+	testenv.Must(t, err)
+	var done api.Event
+	testenv.Must(t, j.Watch(t.Context(), 100, func(e api.Event) error {
+		done = e
+		return nil
+	}))
+	if ending.Position != 101 || done.Position != 101 || done.Kind != api.EventDone || !ending.Outcome.Cancelled {
+		t.Errorf("Ending was given %+v, and watchers saw %+v; want the terminal event at 101 in both", ending, done)
+	}
+
+	late, err := jobs.Reserve(Spec{})
+	testenv.Must(t, err)
+	jobs.Stop()
+	if _, err := late.Start(func(context.Context, Events) api.Outcome { return api.Outcome{} }); !errors.Is(err,
+		ErrClosed) {
+		t.Errorf("a reservation started after stop = %v, want %v", err, ErrClosed)
+	}
+}
+
 // TestJobsLimit checks that the table refuses a job while as many are open as its limit allows, under its lock,
 // and accepts one again once a job has ended.
 func TestJobsLimit(t *testing.T) {

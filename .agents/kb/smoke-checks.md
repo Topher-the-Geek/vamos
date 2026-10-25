@@ -183,6 +183,18 @@ docker compose -f remote/compose.yaml up -d --wait \
       for i in 1 2; do docker compose -f remote/compose.yaml exec --index $i worker ls /sys/fs/cgroup/vamos; done); \
   docker network disconnect remote_default "vamos_$(basename "$WORKSPACE_FOLDER")"; \
   docker compose -f remote/compose.yaml down
+
+# R6. The coordinator restarted mid-build resumes it: expect warnings that the connection dropped and came back and
+# that the coordinator restarted, then the build's success. The slow layer starts again, so the build
+# takes its 45 seconds again after the restart; the workers log that they registered again.
+# Setup runs first, and only the restart's timer in the background, so the build starts once the network is joined.
+docker compose -f remote/compose.yaml up -d --wait \
+  && docker network connect remote_default "vamos_$(basename "$WORKSPACE_FOLDER")" \
+  && { (sleep 15; docker restart remote-coordinator-1) & \
+       ./vamos build slow --rebuild -C "$TMP/slow" --coordinator http://coordinator:8080; wait; }; \
+  docker compose -f remote/compose.yaml logs worker | grep -i "registering again"; \
+  docker network disconnect remote_default "vamos_$(basename "$WORKSPACE_FOLDER")"; \
+  docker compose -f remote/compose.yaml down
 ```
 
 ## Kubernetes
@@ -209,7 +221,19 @@ docker exec vamos-control-plane crictl stop --timeout 0 \
   "$(kubectl -n vamos get $V -o jsonpath='{.status.containerStatuses[0].containerID}' | sed 's|containerd://||')"
 wait $B; grep -o '"retry 1"' "$TMP/k2.json"; sleep 5; kubectl -n vamos logs $V | grep -i "registered\|cleaning up"
 
-# K3. Ctrl-C kills the running attempt, as R5: expect no attempt cgroup left on any worker.
+# K3. The coordinator's pod deleted mid-build, as R6: the StatefulSet starts another on the same volume claim,
+# which resumes the build, and the client, reconnected through a new port-forward, sees it succeed.
+# A port-forward ends with the pod it forwards to, so the check stops the section's, runs its own, and starts it
+# again once the new pod is ready; start the section's again after it.
+pkill -f "port-forward svc/vamos-coordinator"
+kubectl -n vamos port-forward svc/vamos-coordinator 18080:8080 >/dev/null 2>&1 & P=$!
+./vamos build slow --rebuild -C "$TMP/slow" --coordinator http://127.0.0.1:18080 & B=$!
+sleep 15; kubectl -n vamos delete pod vamos-coordinator-0
+kubectl -n vamos wait --for=condition=Ready pod/vamos-coordinator-0 --timeout=120s
+kill $P; kubectl -n vamos port-forward svc/vamos-coordinator 18080:8080 >/dev/null 2>&1 & P=$!
+wait $B; kill $P
+
+# K4. Ctrl-C kills the running attempt, as R5: expect no attempt cgroup left on any worker.
 ./vamos build slow --rebuild -C "$TMP/slow" --coordinator http://127.0.0.1:18080 & B=$!
 sleep 15; kill -INT $B; wait $B; sleep 5
 for p in $(kubectl -n vamos get pods -o name | grep worker); do

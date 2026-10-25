@@ -73,8 +73,9 @@ type Capabilities struct {
 	Isolation     string               `json:"isolation,omitempty"` // how it runs commands, such as "chroot"
 	Version       string               `json:"version,omitempty"`   // of vamos
 	Clock         time.Time            `json:"clock"`               // the time by its clock, when it answered
-	// Instance identifies this run of the executor, new each time it starts, so that a client whose connection
-	// dropped can tell a restart, which lost its jobs, from a drop alone.
+	// Instance identifies the executor's jobs: new each time it starts without those of an earlier run, so that a
+	// client whose connection dropped can tell a restart that lost its jobs from a drop alone. A coordinator keeps
+	// its jobs on disk, and its instance with them, so that a restart that keeps its disk keeps its instance too.
 	Instance string `json:"instance,omitempty"`
 	// GracePeriod is how long a build whose client has gone is kept before its demand is withdrawn,
 	// and so how long a client may take to come back; zero if the executor doesn't withdraw builds.
@@ -172,14 +173,17 @@ type Event struct {
 	Kind     EventKind `json:"kind"`
 	// Nodes are the nodes of the job that the event concerns, and Action the key of the action serving them,
 	// once actions have keys; an event about the job as a whole names neither.
-	Nodes   []graph.Ref    `json:"nodes,omitempty"`
-	Action  digest.Digest  `json:"action,omitempty"`
-	Status  string         `json:"status,omitempty"`  // status
-	Stream  byte           `json:"stream,omitempty"`  // output: cache.StreamStdout or cache.StreamStderr
-	Data    []byte         `json:"data,omitempty"`    // output
-	Spans   []tracing.Span `json:"spans,omitempty"`   // spans
-	First   int64          `json:"first,omitempty"`   // gap: the first position retained; Position is the one asked for
-	Outcome *Outcome       `json:"outcome,omitempty"` // done
+	Nodes  []graph.Ref    `json:"nodes,omitempty"`
+	Action digest.Digest  `json:"action,omitempty"`
+	Status string         `json:"status,omitempty"` // status
+	Stream byte           `json:"stream,omitempty"` // output: cache.StreamStdout or cache.StreamStderr
+	Data   []byte         `json:"data,omitempty"`   // output
+	Spans  []tracing.Span `json:"spans,omitempty"`  // spans
+	First  int64          `json:"first,omitempty"`  // gap: the first position retained; Position is the one asked for
+	// Restarted says of a gap that the executor restarted since Position: the events from First on are of the job's
+	// run since, which reports again what finished before as cached, or its outcome alone, if the restart ended it.
+	Restarted bool     `json:"restarted,omitempty"`
+	Outcome   *Outcome `json:"outcome,omitempty"` // done
 }
 
 // Outcome is how a job ended.
