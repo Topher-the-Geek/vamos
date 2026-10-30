@@ -94,8 +94,20 @@ func TestSecrets_EachStepGetsItsOwn(t *testing.T) {
 	})
 }
 
-// TestSecrets_ValuesNeverEnterTheImage specifies that a secret's value never enters an image.
-func TestSecrets_ValuesNeverEnterTheImage(t *testing.T) {
+// TestSecrets_ValuesNeverEnterTheImageOrTheTrace specifies that a secret's value never enters an image, nor a trace.
+func TestSecrets_ValuesNeverEnterTheImageOrTheTrace(t *testing.T) {
+	t.Run("The trace holds neither secret's value, though it records each step's command", func(t *testing.T) {
+		w := newSecretWorld(t)
+		w.GivenTheBuildFileDeclares(stepWithSecrets(testenv.NewNonce()))
+		w.GivenTheEnvironmentSets("VAMOS_TEST_TOKEN", "env-value")
+		w.GivenAFileOutsideTheProjectHolds("key", "file-value")
+		w.WhenISave("app", withSecrets("id=token,env=VAMOS_TEST_TOKEN", "id=key,src=<outside>/key"), traced())
+		w.ThenItSucceeds()
+		w.ThenTheTargetsWere(statuses{layer("app"): ran})
+		w.ThenTheStepsObserved(secretsSeen()) // so that the step had the values that the trace mustn't hold
+		w.ThenTheTraceDoesNotContain("env-value", "file-value")
+	})
+
 	t.Run("The image holds neither the secrets' values nor their file", func(t *testing.T) {
 		w := newSecretWorld(t)
 		w.GivenTheBuildFileDeclares(stepWithSecrets(testenv.NewNonce()))

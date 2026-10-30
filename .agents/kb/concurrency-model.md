@@ -80,5 +80,6 @@ Tracing should do no trace-only computation when disabled; guard argument prepar
 Track nesting, flow endpoints and timestamp encoding are owned by [tracing](../../internal/tracing/doc.go).
 `blobTracker` in [transfer.go](../../internal/transfer/transfer.go) adapts incomplete library progress events;
 those events are not a reliable byte-level network audit (a config may be reported copied even when already present).
-`TestTracePerfetto` in [trace_test.go](../../internal/cli/trace_test.go) verifies the importer's view,
+The trace feature's `ThenPerfettoReadsTheTraceAsVamosMeansIt`, in
+[steps_trace_test.go](../../internal/features/steps_trace_test.go), verifies the importer's view,
 beyond checking the JSON ourselves.

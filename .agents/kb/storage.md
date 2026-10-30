@@ -61,8 +61,8 @@ Values travel only in `api.GraphRequest.Secrets` and `sched.Request.Secrets`, wh
 so no record, trace, graph or transport holds one, and `--secret` is refused with `--coordinator`;
 the runner writes each value to a file only its process reads, for buildah's secret mount, and removes it after the
 step. The secrets feature, [secrets_test.go](../../internal/features/secrets_test.go),
-checks the steps, the image and reuse,
-`TestSecretsNotInTrace` the trace, and `TestRequestSecretsNotEncoded` the encoding.
+checks the steps, the image, the trace and reuse,
+and `TestRequestSecretsNotEncoded` the encoding.
 
 Reproducible layer metadata spans both stores: trees omit times, but action results carry an epoch.
 Review `Scheduler.epoch`, `commitLayer` and `sched.Step.Epoch` together.

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Topher-the-Geek/vamos/internal/cli"
+	"github.com/Topher-the-Geek/vamos/internal/graph"
 	"github.com/Topher-the-Geek/vamos/internal/testenv"
 	"github.com/google/go-containerregistry/pkg/authn"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -85,6 +86,11 @@ type world struct {
 	dockerHost   string            // the host's Docker daemon, as vamos finds it, if the scenario loads into it
 	loadedBefore int               // how many images the scenario's own daemon had loaded before the last command
 	loadRan      bool              // whether the last command loaded into Docker, or tried to
+	traceTo      string            // where the command running is to write its trace, if traced() asked it to
+	traceAt      string            // where tracedTo asked the command running to write its trace, with placeholders
+	tracePath    string            // where the last command wrote its trace, if traced() asked it to
+	trace        *trace            // the trace there, once a step has read it
+	graph        *graph.Graph      // the graph that WhenIShowTheGraph showed last
 	ran          bool              // whether any command has run
 	ownStores    bool              // whether the scenario's stores are its own, rather than the suite's
 	other        func()            // releases what another vamos holds of the build cache, if one does
@@ -138,6 +144,10 @@ func (w *world) runIn(fsys afero.Fs, args ...string) {
 			w.t.Fatalf("the project has no directory %s to work in", w.dir)
 		}
 	}
+	if w.traceAt != "" { // now that the When step has made the destination it may name
+		args = append(slices.Clone(args), "--trace", w.atPlaceholders(w.traceAt))
+		w.traceAt = ""
+	}
 	w.execute(fsys, append([]string{"-C", dir}, args...))
 }
 
@@ -145,7 +155,8 @@ func (w *world) runIn(fsys afero.Fs, args ...string) {
 func (w *world) execute(fsys afero.Fs, args []string) {
 	w.t.Helper()
 	w.image, w.index, w.archive, w.entries, w.exported, w.sentAs = nil, nil, "", nil, "", ""
-	w.loadRan = false
+	w.loadRan, w.trace = false, nil
+	w.tracePath, w.traceTo = w.traceTo, ""
 	cmd := cli.NewRootCommand(cli.Config{Fs: fsys, Store: &w.stores.Options})
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)

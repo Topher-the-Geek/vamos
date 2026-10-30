@@ -17,12 +17,6 @@ import (
 	"github.com/Topher-the-Geek/vamos/internal/run"
 
 	"github.com/containerd/platforms"
-	"github.com/google/go-containerregistry/pkg/name"
-	v1 "github.com/google/go-containerregistry/pkg/v1"
-	"github.com/google/go-containerregistry/pkg/v1/empty"
-	"github.com/google/go-containerregistry/pkg/v1/mutate"
-	"github.com/google/go-containerregistry/pkg/v1/random"
-	"github.com/google/go-containerregistry/pkg/v1/remote"
 	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
@@ -104,39 +98,6 @@ func TestExecPlatformChoice(t *testing.T) {
 		t.Errorf("execPlatform of an older coordinator = %s, %v; want this machine's, %s", platforms.Format(got),
 			err, native)
 	}
-}
-
-// pushIndex pushes to ref an index of a random image for each of platforms, returning them by platform.
-func pushIndex(t *testing.T, ref string, platformNames ...string) map[string]v1.Image {
-	t.Helper()
-	r, err := name.ParseReference(ref, name.Insecure)
-	must(t, err)
-	images := map[string]v1.Image{}
-	var index v1.ImageIndex = empty.Index
-	for _, platform := range platformNames {
-		os, arch, _ := strings.Cut(platform, "/")
-		img := randomImage(t, platform)
-		images[platform] = img
-		index = mutate.AppendManifests(index, mutate.IndexAddendum{
-			Add:        img,
-			Descriptor: v1.Descriptor{Platform: &v1.Platform{OS: os, Architecture: arch}},
-		})
-	}
-	must(t, remote.WriteIndex(r, index))
-	return images
-}
-
-// randomImage returns an image of random files for platform.
-func randomImage(t *testing.T, platform string) v1.Image {
-	t.Helper()
-	img, err := random.Image(256, 1)
-	must(t, err)
-	config, err := img.ConfigFile()
-	must(t, err)
-	config.OS, config.Architecture, _ = strings.Cut(platform, "/")
-	img, err = mutate.ConfigFile(img, config)
-	must(t, err)
-	return img
 }
 
 // requireEmulation skips the test if r failed because the platform it built for needs an emulator that isn't

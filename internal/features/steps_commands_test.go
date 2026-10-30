@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/Topher-the-Geek/vamos/internal/graph"
 	"github.com/Topher-the-Geek/vamos/internal/testenv"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
@@ -417,6 +418,22 @@ func (w *world) WhenIBuild(target string, options ...option) {
 	w.sendsNothing("WhenIBuild")
 	args := append([]string{"build", target}, c.targets...)
 	w.run(append(args, c.flags...)...)
+}
+
+// WhenIShowTheGraph shows the graph that target configures, which the scenario keeps, for Then steps that compare
+// what other commands do with it.
+func (w *world) WhenIShowTheGraph(target string) {
+	w.t.Helper()
+	w.sendsNothing("WhenIShowTheGraph")
+	w.run("graph", target)
+	if w.err != nil {
+		return
+	}
+	g, err := graph.Decode([]byte(w.stdout))
+	if err != nil {
+		w.t.Fatalf("reading the graph: %v", err)
+	}
+	w.graph = g
 }
 
 // WhenIRun runs vamos with args as they are, after -C, for a command line that the other When steps don't give:

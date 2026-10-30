@@ -65,10 +65,12 @@ Delete this file when every box is ticked.
   store a program embedding vamos gives it, and `TestDefaultStore`, which needs a process of its own since
   containers/storage reads its defaults once, are decided below; `TestPruneHandlerWithoutRoot` moves with write
   failures.
-- [ ] **Traces.**
-  `TestTraceBuild`, `TestTracePush`, `TestTracePull`, `TestTraceFailure`, `TestTraceDestinations`, `TestFinishTrace`,
-  `TestTraceMistakes`, `TestTracePerfetto`, `TestSecretsNotInTrace`.
-  A trace feature that reads the file `--trace` writes; Perfetto import still skips without `trace_processor_shell`.
+- [x] **Traces.**
+  `TestTraceBuild`, `TestTracePush`, `TestTracePull`, `TestTraceFailure`, `TestTraceDestinations`,
+  `TestTraceMistakes` and `TestTracePerfetto` are scenarios of the trace feature, which reads the file `--trace`
+  writes; Perfetto's import still skips without `trace_processor_shell`.
+  `TestSecretsNotInTrace` is a scenario of the secrets feature.
+  `TestFinishTrace`, of a trace whose folder goes while the command runs, is decided below.
 - [ ] **Interruption and failure logs.**
   `TestInterrupted`, `TestCancelLoad`, `TestCancelConfigure`, `TestFailedStepLog`, `TestFailedOutputLog`.
   A feature for interrupting a build and for what a failure reports.
@@ -103,6 +105,7 @@ Delete this file when every box is ticked.
   `internal/sched` (action keys, sharing, job limits, the scheduler's reuse and regeneration),
   `internal/fileset` (patterns, tree walks, edits during capture), `internal/cache` (logs, locks, generations),
   `internal/cli`'s `TestGraphConfigurations`, of the graph an index of two platforms configures,
+  `TestFinishTrace`, of which error a command reports when its trace can't be written after all,
   `TestExplicitStoreRoots` and `TestDefaultStore`, of the container store vamos opens,
   `TestResultProvenance` and `TestPlatforms`, of the provenance a result records,
   and `TestImageIdentityRoundTrip`, of the names a pull gives an image in the store,
