@@ -41,9 +41,15 @@ func (w *world) GivenTheBuildFileChanges(old, new string) {
 }
 
 // GivenThePackageDeclares appends build, dedented, to the BUILD file of the package in dir, "." for the project's.
+// A blank build appends nothing, though the package then has its BUILD file, empty if it had none.
 func (w *world) GivenThePackageDeclares(dir, build string) {
 	w.t.Helper()
-	w.files[path.Join(dir, "BUILD")] += dedent(build)
+	file := path.Join(dir, "BUILD")
+	if strings.TrimSpace(build) == "" {
+		w.files[file] += ""
+		return
+	}
+	w.files[file] += dedent(build)
 }
 
 // GivenIWorkIn makes later commands run in dir, within the project, "." for the project itself,

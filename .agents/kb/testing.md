@@ -104,9 +104,9 @@ Trace importer coverage skips without `trace_processor_shell`.
 
 ## Behavior specifications
 
-[features](../../internal/features/) specifies the behavior of pulls, globs, layers, tasks, their steps and secrets,
-workspaces, modules, parameters, platforms, the cache, and the save and export commands
-as features, rules and scenarios, in Go:
+[features](../../internal/features/) specifies the behavior of BUILD files and their targets, pulls, globs, layers,
+tasks, their steps, variables and secrets, workspaces, modules, parameters, platforms, the cache,
+and the save and export commands as features, rules and scenarios, in Go:
 a feature is a file, such as `task_test.go`, and each of its rules is a test named `TestFeature_Rule`,
 such as `TestTask_WithoutOutputIsACheck`,
 whose doc comment states the rule's sentence, in the words of the [BUILD reference](../../docs/reference/build.md),
@@ -116,7 +116,9 @@ A rule's scenarios are its subtests, named by their sentences,
 and each starts from its feature's background, such as `newTaskWorld`,
 which skips it where buildah can't build, through `newBuildingWorld`.
 Scenarios that fail before anything builds, such as the mistakes found as a glob is read,
-start from a background that needs no buildah, such as `newGlobMistakeWorld`, so that `-short` runs them too.
+start from a background that needs no buildah, such as `newGlobMistakeWorld`, so that `-short` runs them too;
+a mistake that loading a BUILD file catches is checked with `ThenItFailsWith`, its position and all,
+`ThenNoTargetRan`, and `ThenNothingIsSaved` or `ThenNothingIsExported` for the command that sends.
 Scenarios run the command line in process, through `cli.NewRootCommand`, on the suite's stores and a project
 held in memory, or on disk once `GivenTheProjectLinks` gives it symbolic links
 or `WhenISave` saves into it with `intoTheProject`.

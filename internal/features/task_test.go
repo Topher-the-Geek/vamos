@@ -20,6 +20,16 @@ func newTaskWorld(t *testing.T) *world {
 	return w
 }
 
+// newTaskMistakeWorld starts a scenario of the task feature whose task is declared wrongly,
+// which loading catches before anything runs, so that it needs no buildah.
+// Its project pulls busybox.
+func newTaskMistakeWorld(t *testing.T) *world {
+	t.Helper()
+	w := newWorld(t)
+	w.GivenAProjectThatPullsBusybox()
+	return w
+}
+
 // TestTask_OutputIsSelectedBeneathSource specifies that a task's output is the files it selects beneath its source.
 func TestTask_OutputIsSelectedBeneathSource(t *testing.T) {
 	t.Run("Only selected files are output, at their paths relative to the source", func(t *testing.T) {
@@ -315,6 +325,101 @@ func TestTask_UnselectableOutputFails(t *testing.T) {
 			w.ThenItFailsWith(example.errors...)
 			w.ThenNothingIsSaved()
 			w.ThenNoImageIsLeftBehind()
+		})
+	}
+}
+
+// TestTask_SourceAndIncludeGoTogether specifies that a task gives source and include together, or omits both
+// for a task that only runs checks, and that selection options require output to be declared.
+func TestTask_SourceAndIncludeGoTogether(t *testing.T) {
+	for _, example := range []struct {
+		name  string
+		task  string // its arguments after name and base
+		error string // after the task's position
+	}{
+		{
+			name:  "Include without source fails",
+			task:  `include=["app"]`,
+			error: "include needs source, the directory it is relative to",
+		},
+		{
+			name:  "Source without include fails",
+			task:  `source="/out"`,
+			error: "source needs include, the files to collect from it",
+		},
+		{
+			name:  "Exclude without output fails",
+			task:  `exclude=["*.map"]`,
+			error: "exclude needs source and include, the files to collect",
+		},
+		{
+			name:  "A limit without output fails",
+			task:  `max_file_size=1`,
+			error: "max_file_size needs source and include",
+		},
+	} {
+		t.Run(example.name, func(t *testing.T) {
+			w := newTaskMistakeWorld(t)
+			w.GivenTheBuildFileDeclares(`task(name="make", base="busybox", ` + example.task + `)`)
+			w.WhenIExport("make")
+			w.ThenItFailsWith("/project/BUILD:2:5: task: " + example.error)
+			w.ThenNoTargetRan()
+			w.ThenNothingIsExported()
+		})
+	}
+}
+
+// TestTask_OutputPatternsStayBeneathAnAbsoluteSource specifies that a task's source is an absolute container
+// directory, and that its patterns, relative to source, cannot be empty or resolve outside it.
+func TestTask_OutputPatternsStayBeneathAnAbsoluteSource(t *testing.T) {
+	for _, example := range []struct {
+		name  string
+		task  string // its arguments after name and base
+		error string // after the task's position
+	}{
+		{
+			name:  "A relative source fails",
+			task:  `source="out", include=["app"]`,
+			error: `source "out" must be an absolute path`,
+		},
+		{
+			name:  "An empty include fails, saying to use . for the whole directory",
+			task:  `source="/out", include=[""]`,
+			error: `include[0] is empty; use "." for the whole directory`,
+		},
+		{
+			name:  "An include outside the source fails",
+			task:  `source="/out", include=["../etc"]`,
+			error: `include "../etc" is outside /out`,
+		},
+		{
+			name:  "An exclude that doesn't parse fails",
+			task:  `source="/out", include=["."], exclude=["[x"]`,
+			error: `exclude "[x": syntax error in pattern`,
+		},
+	} {
+		t.Run(example.name, func(t *testing.T) {
+			w := newTaskMistakeWorld(t)
+			w.GivenTheBuildFileDeclares(`task(name="make", base="busybox", ` + example.task + `)`)
+			w.WhenIExport("make")
+			w.ThenItFailsWith("/project/BUILD:2:5: task: " + example.error)
+			w.ThenNoTargetRan()
+			w.ThenNothingIsExported()
+		})
+	}
+}
+
+// TestTask_OutputLimitsArePositive specifies that the limits of a task's output selection must be positive.
+func TestTask_OutputLimitsArePositive(t *testing.T) {
+	for _, limit := range []string{"max_file_count", "max_file_size", "max_total_size"} {
+		t.Run("A "+limit+" of zero fails", func(t *testing.T) {
+			w := newTaskMistakeWorld(t)
+			w.GivenTheBuildFileDeclares(`task(name="make", base="busybox", source="/out", include=["."], ` +
+				limit + `=0)`)
+			w.WhenIExport("make")
+			w.ThenItFailsWith("/project/BUILD:2:5: task: " + limit + " must be positive, not 0")
+			w.ThenNoTargetRan()
+			w.ThenNothingIsExported()
 		})
 	}
 }

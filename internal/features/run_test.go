@@ -19,6 +19,16 @@ func newRunWorld(t *testing.T) *world {
 	return w
 }
 
+// newRunMistakeWorld starts a scenario of the run feature whose run() is given wrongly,
+// which loading catches before anything runs, so that it needs no buildah.
+// Its project pulls busybox.
+func newRunMistakeWorld(t *testing.T) *world {
+	t.Helper()
+	w := newWorld(t)
+	w.GivenAProjectThatPullsBusybox()
+	return w
+}
+
 // TestRun_CommandRunsInTheContainer specifies that run() runs a nonempty list of command arguments
 // in the container's current working directory, whose changes the layer keeps, and whose output reaches the user.
 func TestRun_CommandRunsInTheContainer(t *testing.T) {
@@ -34,6 +44,15 @@ func TestRun_CommandRunsInTheContainer(t *testing.T) {
 		w.ThenTheOutputIncludes("compiling")
 		w.ThenTheErrorOutputIncludes("a warning")
 		w.ThenTheImageHoldsAtLeast(files{"/built.txt": "built!\n"})
+	})
+
+	t.Run("An empty list of arguments fails as the BUILD file loads", func(t *testing.T) {
+		w := newRunMistakeWorld(t)
+		w.GivenTheBuildFileDeclares(`layer(name="app", base="busybox", steps=[run([])])`)
+		w.WhenISave("app")
+		w.ThenItFailsWith("/project/BUILD:2:45: run: argv must not be empty")
+		w.ThenNoTargetRan()
+		w.ThenNothingIsSaved()
 	})
 }
 

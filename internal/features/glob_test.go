@@ -160,6 +160,33 @@ func TestGlob_PatternsSelectFiles(t *testing.T) {
 			"/app/lib/node_modules_notes/a.txt": "kept",
 		})
 	})
+
+	for _, example := range []struct {
+		name    string
+		include string
+		error   string // after the glob's position
+	}{
+		{
+			name:    "A ** within a name fails, saying to make it a whole part of the path",
+			include: "src/**.ts",
+			error:   `include "src/**.ts": "**" must be a whole part of the path, as in "src/**/*.ts"`,
+		},
+		{
+			name:    "A pattern that doesn't parse fails",
+			include: "src/[a",
+			error:   `include "src/[a": syntax error in pattern`,
+		},
+	} {
+		t.Run(example.name, func(t *testing.T) {
+			w := newGlobMistakeWorld(t)
+			w.GivenTheBuildFileDeclares(fmt.Sprintf(`glob(name="code", include=[%q])`, example.include))
+			w.GivenTheBuildFileDeclares(`layer(name="app", base="busybox", steps=[add("code", "/app")])`)
+			w.WhenISave("app")
+			w.ThenItFailsWith("/project/BUILD:2:5: glob: " + example.error)
+			w.ThenNoTargetRan()
+			w.ThenNothingIsSaved()
+		})
+	}
 }
 
 // TestGlob_ModeMaskRetainsPermissionBits specifies that a glob's mode_mask masks its files' and directories'
@@ -331,10 +358,23 @@ func TestGlob_IncludesMustNotBeLinks(t *testing.T) {
 				w.GivenTheProjectLinks(example.links)
 				w.WhenISave("app")
 				w.ThenItFailsWith("/project/BUILD:2:5: glob: " + example.error)
+				w.ThenNoTargetRan()
 				w.ThenNothingIsSaved()
 			})
 		}
 	}
+
+	t.Run("A missing file fails", func(t *testing.T) {
+		w := newGlobMistakeWorld(t)
+		w.GivenTheBuildFileDeclares(`
+			glob(name="code", include=["app.sh"])
+			layer(name="app", base="busybox", steps=[add("code", "/app")])
+		`)
+		w.WhenISave("app")
+		w.ThenItFailsWith(`/project/BUILD:2:5: glob: include "app.sh" not found in /project`)
+		w.ThenNoTargetRan()
+		w.ThenNothingIsSaved()
+	})
 
 	t.Run("A missing include fails, even allowing no files", func(t *testing.T) {
 		w := newGlobMistakeWorld(t)
@@ -344,6 +384,7 @@ func TestGlob_IncludesMustNotBeLinks(t *testing.T) {
 		`)
 		w.WhenISave("app")
 		w.ThenItFailsWith(`/project/BUILD:2:5: glob: include "src/*.go": "src" not found in /project`)
+		w.ThenNoTargetRan()
 		w.ThenNothingIsSaved()
 	})
 }
@@ -396,6 +437,7 @@ func TestGlob_SelectionIsBounded(t *testing.T) {
 			w.GivenTheProjectHolds(files{"app.sh": "echo hi", "lib.sh": "echo lib"})
 			w.WhenISave("app")
 			w.ThenItFailsWith("/project/BUILD:2:5: glob: " + example.error)
+			w.ThenNoTargetRan()
 			w.ThenNothingIsSaved()
 		})
 	}
@@ -425,6 +467,7 @@ func TestGlob_ReadBeforeExecution(t *testing.T) {
 		`, testenv.NewNonce()))
 		w.WhenISave("app")
 		w.ThenItFailsWith(`/project/BUILD:3:5: glob: no files in /project match include "*.go"`)
+		w.ThenNoTargetRan()
 		w.ThenNothingIsSaved()
 		w.ThenNoImageIsLeftBehind()
 	})
@@ -445,6 +488,21 @@ func TestGlob_ReadBeforeExecution(t *testing.T) {
 		w.ThenTheImageHolds(under("/app"), files{"/app/input.txt": nonce + " as read"})
 	})
 
+	t.Run("Only the mistake of a glob that a requested target uses is reported", func(t *testing.T) {
+		w := newGlobMistakeWorld(t)
+		w.GivenTheBuildFileDeclares(`
+			glob(name="docs", include=["README"])
+			glob(name="code", include=["app.sh"])
+			layer(name="docs-layer", base="busybox", steps=[add("docs", "/docs")])
+			layer(name="app", base="busybox", steps=[add("code", "/app")])
+		`)
+		w.WhenISave("app")
+		w.ThenItFailsWith(`/project/BUILD:3:5: glob: include "app.sh" not found in /project`)
+		w.ThenTheCommandDoesNotSay("README")
+		w.ThenNoTargetRan()
+		w.ThenNothingIsSaved()
+	})
+
 	t.Run("A glob that no requested target uses is not read", func(t *testing.T) {
 		w := newGlobWorld(t)
 		w.GivenTheBuildFileDeclares(`
@@ -457,4 +515,153 @@ func TestGlob_ReadBeforeExecution(t *testing.T) {
 		w.ThenItSucceeds()
 		w.ThenTheImageHolds(under("/app"), files{"/app/app.sh": "echo hi"})
 	})
+}
+
+// TestGlob_NameAndANonemptyIncludeAreRequired specifies that a glob's name and a nonempty include list are required.
+func TestGlob_NameAndANonemptyIncludeAreRequired(t *testing.T) {
+	for _, example := range []struct {
+		name  string
+		glob  string
+		error string // after the glob's position
+	}{
+		{
+			name:  "A glob without include fails",
+			glob:  `glob(name="code")`,
+			error: "missing argument for include",
+		},
+		{
+			name:  "A glob with an empty include fails",
+			glob:  `glob(name="code", include=[])`,
+			error: "include must not be empty",
+		},
+	} {
+		t.Run(example.name, func(t *testing.T) {
+			w := newGlobMistakeWorld(t)
+			w.GivenTheBuildFileDeclares(example.glob)
+			w.GivenTheBuildFileDeclares(`layer(name="app", base="busybox", steps=[add("code", "/app")])`)
+			w.WhenISave("app")
+			w.ThenItFailsWith("/project/BUILD:2:5: glob: " + example.error)
+			w.ThenNoTargetRan()
+			w.ThenNothingIsSaved()
+		})
+	}
+}
+
+// TestGlob_PatternsStayWithinTheRoot specifies that patterns cannot be empty or resolve outside the selection root,
+// the BUILD file's directory for a glob, after normalizing . and .. components: use . to select the whole directory.
+func TestGlob_PatternsStayWithinTheRoot(t *testing.T) {
+	for _, example := range []struct {
+		name  string
+		glob  string
+		error string // after the glob's position
+	}{
+		{
+			name:  "An empty include fails, saying to use . for the whole directory",
+			glob:  `glob(name="code", include=["app.sh", ""])`,
+			error: `include[1] is empty; use "." for the whole directory`,
+		},
+		{
+			name:  "An empty exclude fails",
+			glob:  `glob(name="code", include=["."], exclude=[""])`,
+			error: "exclude[0] is empty",
+		},
+		{
+			name:  "An absolute include fails",
+			glob:  `glob(name="code", include=["/etc/passwd"])`,
+			error: `include "/etc/passwd" must be a path relative to /project`,
+		},
+		{
+			name:  "An include outside the project fails",
+			glob:  `glob(name="code", include=["../secret"])`,
+			error: `include "../secret" is outside /project`,
+		},
+		{
+			name:  "An include that leaves the project and comes back fails",
+			glob:  `glob(name="code", include=["../project/app.sh"])`,
+			error: `include "../project/app.sh" is outside /project`,
+		},
+		{
+			name:  "An exclude outside the project fails",
+			glob:  `glob(name="code", include=["."], exclude=["../secret"])`,
+			error: `exclude "../secret" is outside /project`,
+		},
+	} {
+		t.Run(example.name, func(t *testing.T) {
+			w := newGlobMistakeWorld(t)
+			w.GivenTheBuildFileDeclares(example.glob)
+			w.GivenTheBuildFileDeclares(`layer(name="app", base="busybox", steps=[add("code", "/app")])`)
+			w.GivenTheProjectHolds(files{"app.sh": "echo hi"})
+			w.WhenISave("app")
+			w.ThenItFailsWith("/project/BUILD:2:5: glob: " + example.error)
+			w.ThenNoTargetRan()
+			w.ThenNothingIsSaved()
+		})
+	}
+}
+
+// TestGlob_LimitsArePositive specifies that a selection's limits must be positive.
+func TestGlob_LimitsArePositive(t *testing.T) {
+	for _, example := range []struct {
+		name  string
+		glob  string
+		error string // after the glob's position
+	}{
+		{
+			name:  "A max_file_count of zero fails",
+			glob:  `glob(name="code", include=["."], max_file_count=0)`,
+			error: "max_file_count must be positive, not 0",
+		},
+		{
+			name:  "A negative max_file_size fails",
+			glob:  `glob(name="code", include=["."], max_file_size=-1)`,
+			error: "max_file_size must be positive, not -1",
+		},
+		{
+			name:  "A max_total_size of zero fails",
+			glob:  `glob(name="code", include=["."], max_total_size=0)`,
+			error: "max_total_size must be positive, not 0",
+		},
+	} {
+		t.Run(example.name, func(t *testing.T) {
+			w := newGlobMistakeWorld(t)
+			w.GivenTheBuildFileDeclares(example.glob)
+			w.GivenTheBuildFileDeclares(`layer(name="app", base="busybox", steps=[add("code", "/app")])`)
+			w.GivenTheProjectHolds(files{"app.sh": "echo hi"})
+			w.WhenISave("app")
+			w.ThenItFailsWith("/project/BUILD:2:5: glob: " + example.error)
+			w.ThenNoTargetRan()
+			w.ThenNothingIsSaved()
+		})
+	}
+}
+
+// TestGlob_ModeMaskIsWithinThePermissionBits specifies that mode_mask must be between 0 and 0o7777.
+func TestGlob_ModeMaskIsWithinThePermissionBits(t *testing.T) {
+	for _, example := range []struct {
+		name     string
+		modeMask string
+		error    string // after the glob's position
+	}{
+		{
+			name:     "A mask above 0o7777 fails",
+			modeMask: "0o10000",
+			error:    "mode_mask 0o10000 must be between 0 and 0o7777",
+		},
+		{
+			name:     "A negative mask fails",
+			modeMask: "-1",
+			error:    "mode_mask -0o1 must be between 0 and 0o7777",
+		},
+	} {
+		t.Run(example.name, func(t *testing.T) {
+			w := newGlobMistakeWorld(t)
+			w.GivenTheBuildFileDeclares(`glob(name="code", include=["."], mode_mask=` + example.modeMask + `)`)
+			w.GivenTheBuildFileDeclares(`layer(name="app", base="busybox", steps=[add("code", "/app")])`)
+			w.GivenTheProjectHolds(files{"app.sh": "echo hi"})
+			w.WhenISave("app")
+			w.ThenItFailsWith("/project/BUILD:2:5: glob: " + example.error)
+			w.ThenNoTargetRan()
+			w.ThenNothingIsSaved()
+		})
+	}
 }

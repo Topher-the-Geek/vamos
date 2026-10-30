@@ -2,6 +2,8 @@
 
 Run `vamos --help` or `vamos <command> --help` for command-line help.
 Targets are names in the current directory's `BUILD` file, or [workspace labels](configuration.md#workspaces).
+Any other name fails before anything runs,
+suggesting the name that was meant where one is close, and otherwise naming the targets there are.
 `-C <dir>` chooses the directory whose targets can be named without a label.
 It does not change the process's working directory: local output paths remain relative to where you run vamos.
 

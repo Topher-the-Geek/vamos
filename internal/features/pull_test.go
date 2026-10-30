@@ -1,6 +1,7 @@
 package features
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -8,6 +9,16 @@ import (
 func newPullWorld(t *testing.T) *world {
 	t.Helper()
 	w := newBuildingWorld(t)
+	w.GivenAProjectThatPullsBusybox()
+	return w
+}
+
+// newPullMistakeWorld starts a scenario of the pull feature whose pull is declared wrongly,
+// which loading catches before anything runs, so that it needs no buildah.
+// Its project pulls busybox.
+func newPullMistakeWorld(t *testing.T) *world {
+	t.Helper()
+	w := newWorld(t)
 	w.GivenAProjectThatPullsBusybox()
 	return w
 }
@@ -56,4 +67,55 @@ func TestPull_FailureSaysWhy(t *testing.T) {
 			w.ThenTheCommandDoesNotSay("check the name")
 			w.ThenNothingIsSaved()
 		})
+}
+
+// TestPull_ImageIsARepositoryWithoutATagOrDigest specifies that a pull's image is a repository name,
+// without a tag or digest: an image's tag belongs in tag, rather than inside image.
+func TestPull_ImageIsARepositoryWithoutATagOrDigest(t *testing.T) {
+	for _, example := range []struct {
+		name  string
+		pull  string // on line 2, after the pull of busybox
+		error string
+	}{
+		{
+			name:  "A pull without an image fails",
+			pull:  `pull(name="app")`,
+			error: "/project/BUILD:2:5: pull: missing argument for image",
+		},
+		{
+			name:  "A pull with an empty image fails",
+			pull:  `pull(name="app", image="")`,
+			error: "/project/BUILD:2:5: pull: image must not be empty",
+		},
+		{
+			name:  "A pull with an image that isn't a repository name fails",
+			pull:  `pull(name="app", image="Busy Box")`,
+			error: `/project/BUILD:2:5: pull: invalid image "Busy Box"`,
+		},
+		{
+			name:  "A pull with a tag in its image fails, saying to give it as tag",
+			pull:  `pull(name="app", image="busybox:1.36")`,
+			error: `/project/BUILD:2:5: pull: image "busybox:1.36" must not include a tag; use tag="1.36"`,
+		},
+		{
+			name: "A pull with a digest in its image fails",
+			pull: `pull(name="app", image="busybox@sha256:` + strings.Repeat("0", 64) + `")`,
+			error: `/project/BUILD:2:5: pull: image "busybox@sha256:` + strings.Repeat("0", 64) +
+				`" must not include a digest`,
+		},
+		{
+			name:  "A pull with a tag that isn't one fails",
+			pull:  `pull(name="app", image="busybox", tag="1 36")`,
+			error: `/project/BUILD:2:5: pull: invalid tag "1 36"`,
+		},
+	} {
+		t.Run(example.name, func(t *testing.T) {
+			w := newPullMistakeWorld(t)
+			w.GivenTheBuildFileDeclares(example.pull)
+			w.WhenISave("app")
+			w.ThenItFailsWith(example.error)
+			w.ThenNoTargetRan()
+			w.ThenNothingIsSaved()
+		})
+	}
 }

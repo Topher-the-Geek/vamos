@@ -225,3 +225,135 @@ func TestSecrets_VariableMustBeSet(t *testing.T) {
 		w.ThenTheStepsObserved(observations{"token": "set, 0 bytes"})
 	})
 }
+
+// TestSecrets_EachGivesAVariableOrAFile specifies that each secret gives exactly one of env and file.
+func TestSecrets_EachGivesAVariableOrAFile(t *testing.T) {
+	for _, example := range []struct {
+		name   string
+		secret string
+	}{
+		{
+			name:   "A secret given neither way fails",
+			secret: `secret("token")`,
+		},
+		{
+			name:   "A secret given both ways fails",
+			secret: `secret("token", env="TOKEN", file="/run/secrets/token")`,
+		},
+		{
+			name:   "A secret given an empty variable is given neither way, and fails",
+			secret: `secret("token", env="")`,
+		},
+	} {
+		t.Run(example.name, func(t *testing.T) {
+			w := newSecretMistakeWorld(t)
+			w.GivenTheBuildFileDeclares(`layer(name="app", base="busybox", steps=[run(["true"], secrets=[` +
+				example.secret + `])])`)
+			w.WhenISave("app")
+			w.ThenItFailsWith(`/project/BUILD:2:71: secret: secret "token" must give env or file, but not both`)
+			w.ThenNoTargetRan()
+			w.ThenNothingIsSaved()
+		})
+	}
+}
+
+// TestSecrets_IDsAndFilesAreWellFormed specifies that a secret's ID is letters, digits, "_", "." or "-",
+// starting with a letter or digit, and that its file is a clean absolute path.
+func TestSecrets_IDsAndFilesAreWellFormed(t *testing.T) {
+	for _, example := range []struct {
+		name   string
+		secret string
+		error  string // after the secret's position
+	}{
+		{
+			name:   "An ID with a comma fails",
+			secret: `secret("a,b", env="TOKEN")`,
+			error:  `secret id "a,b" must be letters, digits, "_", "." or "-", starting with a letter or digit`,
+		},
+		{
+			name:   "An empty ID fails",
+			secret: `secret("", env="TOKEN")`,
+			error:  `secret id "" must be letters, digits, "_", "." or "-", starting with a letter or digit`,
+		},
+		{
+			name:   "A relative file fails",
+			secret: `secret("token", file="run/token")`,
+			error:  `secret "token": file "run/token" must be a clean absolute path, such as /run/secrets/token`,
+		},
+		{
+			name:   "A file that isn't a clean path fails",
+			secret: `secret("token", file="/run/../token")`,
+			error:  `secret "token": file "/run/../token" must be a clean absolute path, such as /run/secrets/token`,
+		},
+	} {
+		t.Run(example.name, func(t *testing.T) {
+			w := newSecretMistakeWorld(t)
+			w.GivenTheBuildFileDeclares(`layer(name="app", base="busybox", steps=[run(["true"], secrets=[` +
+				example.secret + `])])`)
+			w.WhenISave("app")
+			w.ThenItFailsWith("/project/BUILD:2:71: secret: " + example.error)
+			w.ThenNoTargetRan()
+			w.ThenNothingIsSaved()
+		})
+	}
+}
+
+// TestSecrets_AStepGivesEachVariableAndFileOnce specifies that no two secrets of a step give the same variable,
+// or the same file.
+func TestSecrets_AStepGivesEachVariableAndFileOnce(t *testing.T) {
+	for _, example := range []struct {
+		name    string
+		secrets string
+		error   string // after the step's position
+	}{
+		{
+			name:    "Two secrets in one variable fail",
+			secrets: `secret("a", env="T"), secret("b", env="T")`,
+			error:   "run: two secrets give env T",
+		},
+		{
+			name:    "Two secrets in one file fail",
+			secrets: `secret("a", file="/run/t"), secret("b", file="/run/t")`,
+			error:   "run: two secrets give file /run/t",
+		},
+	} {
+		t.Run(example.name, func(t *testing.T) {
+			w := newSecretMistakeWorld(t)
+			w.GivenTheBuildFileDeclares(`layer(name="app", base="busybox", steps=[run(["true"], secrets=[` +
+				example.secrets + `])])`)
+			w.WhenISave("app")
+			w.ThenItFailsWith("/project/BUILD:2:45: " + example.error)
+			w.ThenNoTargetRan()
+			w.ThenNothingIsSaved()
+		})
+	}
+}
+
+// TestSecrets_AReachedStepsMissingSecretFailsAsTheFileLoads specifies that a build that reaches a step whose secret
+// the command line doesn't give fails when the BUILD file loads, before anything runs.
+func TestSecrets_AReachedStepsMissingSecretFailsAsTheFileLoads(t *testing.T) {
+	t.Run("A step's secret that no --secret gives fails, saying how to give it", func(t *testing.T) {
+		w := newSecretMistakeWorld(t)
+		w.GivenTheBuildFileDeclares(`
+			layer(name="deps", base="busybox", steps=[run(["true"])])
+			layer(name="app", base="deps", steps=[run(["true"], secrets=[secret("t", env="T")])])
+		`)
+		w.WhenISave("app")
+		w.ThenItFailsWith(`/project/BUILD:3:6: layer "app": run(["true"], secrets=[secret("t", env="T")]) ` +
+			`needs secret "t", which no --secret gives; give it with --secret id=t,env=VARIABLE or ` +
+			`--secret id=t,src=FILE`)
+		w.ThenNoTargetRan()
+		w.ThenNothingIsSaved()
+	})
+
+	t.Run("A step that the build doesn't reach needs no secret", func(t *testing.T) {
+		w := newSecretWorld(t)
+		w.GivenTheBuildFileDeclares(`
+			layer(name="publish", base="busybox", steps=[run(["true"], secrets=[secret("t", env="T")])])
+			layer(name="app", base="busybox", steps=[run(["true"])])
+		`)
+		w.WhenIBuild("app")
+		w.ThenItSucceeds()
+		w.ThenTheTargetsWere(statuses{layer("publish"): notBuilt})
+	})
+}

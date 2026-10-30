@@ -14,6 +14,16 @@ func newAddWorld(t *testing.T) *world {
 	return w
 }
 
+// newAddMistakeWorld starts a scenario of the add feature whose add() or workdir() is given wrongly,
+// which loading catches before anything runs, so that it needs no buildah.
+// Its project pulls busybox.
+func newAddMistakeWorld(t *testing.T) *world {
+	t.Helper()
+	w := newWorld(t)
+	w.GivenAProjectThatPullsBusybox()
+	return w
+}
+
 // TestAdd_FilesAreOwnedByRootUnlessOverridden specifies that added files are owned by root unless owner or group
 // overrides ownership, naming users and groups in the image: with only owner, the group is that user's group,
 // and with only group, the owner remains root. New parent directories receive the selected ownership too.
@@ -178,6 +188,109 @@ func TestAdd_DestinationMustBeAbsolute(t *testing.T) {
 			w.ThenItFailsWith(`layer "app": ` + example.error)
 			w.ThenNothingIsSaved()
 			w.ThenNoImageIsLeftBehind()
+		})
+	}
+
+	for _, example := range []struct {
+		name    string
+		sources string // the BUILD text that declares what step adds, if anything
+		step    string
+		error   string
+	}{
+		{
+			name:    "An add() destination that is relative as written fails as the BUILD file loads",
+			sources: `glob(name="code", include=["app.sh"])`,
+			step:    `add("code", "app")`,
+			error:   `/project/BUILD:3:45: add: dest "app" must be an absolute path`,
+		},
+		{
+			name:  "A workdir() path that is relative as written fails as the BUILD file loads",
+			step:  `workdir("app")`,
+			error: `/project/BUILD:2:49: workdir: path "app" must be an absolute path`,
+		},
+		{
+			name:  "A workdir() path relative before its variable fails as the BUILD file loads",
+			step:  `workdir("app/$DIR")`,
+			error: `/project/BUILD:2:49: workdir: path "app/$DIR" must be an absolute path`,
+		},
+		{
+			name:  "An empty workdir() path fails as the BUILD file loads",
+			step:  `workdir("")`,
+			error: `/project/BUILD:2:49: workdir: path "" must be an absolute path`,
+		},
+	} {
+		t.Run(example.name, func(t *testing.T) {
+			w := newAddMistakeWorld(t)
+			w.GivenTheBuildFileDeclares(example.sources)
+			w.GivenTheBuildFileDeclares(`layer(name="app", base="busybox", steps=[` + example.step + `])`)
+			w.WhenISave("app")
+			w.ThenItFailsWith(example.error)
+			w.ThenNoTargetRan()
+			w.ThenNothingIsSaved()
+		})
+	}
+}
+
+// TestAdd_OwnerAndGroupAreStrings specifies that owner and group require strings, including numeric IDs
+// such as owner = "1000".
+func TestAdd_OwnerAndGroupAreStrings(t *testing.T) {
+	for _, example := range []struct {
+		name  string
+		args  string // add()'s arguments after its source and destination
+		error string
+	}{
+		{
+			name:  "A numeric owner that isn't a string fails",
+			args:  `owner=1000`,
+			error: `/project/BUILD:3:45: add: for parameter "owner": got int, want string`,
+		},
+		{
+			name:  "A numeric group that isn't a string fails",
+			args:  `group=2000`,
+			error: `/project/BUILD:3:45: add: for parameter "group": got int, want string`,
+		},
+	} {
+		t.Run(example.name, func(t *testing.T) {
+			w := newAddMistakeWorld(t)
+			w.GivenTheBuildFileDeclares(`glob(name="code", include=["app.sh"])`)
+			w.GivenTheBuildFileDeclares(`layer(name="app", base="busybox", steps=[add("code", "/app", ` +
+				example.args + `)])`)
+			w.WhenISave("app")
+			w.ThenItFailsWith(example.error)
+			w.ThenNoTargetRan()
+			w.ThenNothingIsSaved()
+		})
+	}
+}
+
+// TestAdd_OwnerAndGroupAreGivenApart specifies that owner names a user and group a group,
+// so neither holds the other, as "user:group" would.
+func TestAdd_OwnerAndGroupAreGivenApart(t *testing.T) {
+	for _, example := range []struct {
+		name  string
+		args  string // add()'s arguments after its source and destination
+		error string
+	}{
+		{
+			name:  "An owner with a group fails, saying to give them apart",
+			args:  `owner="app:app"`,
+			error: `/project/BUILD:3:45: add: owner "app:app" must not contain ":"; give owner and group apart`,
+		},
+		{
+			name:  "A group with a colon fails, saying to give them apart",
+			args:  `group="app:app"`,
+			error: `/project/BUILD:3:45: add: group "app:app" must not contain ":"; give owner and group apart`,
+		},
+	} {
+		t.Run(example.name, func(t *testing.T) {
+			w := newAddMistakeWorld(t)
+			w.GivenTheBuildFileDeclares(`glob(name="code", include=["app.sh"])`)
+			w.GivenTheBuildFileDeclares(`layer(name="app", base="busybox", steps=[add("code", "/app", ` +
+				example.args + `)])`)
+			w.WhenISave("app")
+			w.ThenItFailsWith(example.error)
+			w.ThenNoTargetRan()
+			w.ThenNothingIsSaved()
 		})
 	}
 }

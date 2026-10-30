@@ -328,6 +328,16 @@ func (w *world) statusLines(label string) []string {
 	return lines
 }
 
+// ThenNoTargetRan checks that the command wrote nothing to its standard output, where it shows targets' statuses
+// and steps' output, nor to its standard error, where steps' errors go: it stopped before anything ran,
+// as a mistake that loading the BUILD file catches stops it.
+func (w *world) ThenNoTargetRan() {
+	w.t.Helper()
+	if w.stdout != "" || w.stderr != "" {
+		w.t.Errorf("wrote output, want none, since nothing ran\n%s", w.outputs())
+	}
+}
+
 // ThenTheTargetWasBuiltInOneConfiguration checks that the command showed statuses of the target that label names
 // in one configuration alone, whatever its arguments. It fails the scenario at once if label names a configuration.
 func (w *world) ThenTheTargetWasBuiltInOneConfiguration(label string) {

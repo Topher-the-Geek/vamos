@@ -6,6 +6,12 @@ see [workspaces](configuration.md#workspaces).
 Use lists, dictionaries, functions, and comprehensions to compose declarations.
 Commands run inside build containers through `run()` steps.
 
+A mistake in how a `BUILD` file declares its targets, such as a misspelled argument or a value of the wrong type,
+fails the command as the file loads, before anything runs,
+with an error that names the file, line and column of the call that made it.
+No string given to a target or step, such as a name, an argument, a path, an owner or a variable,
+may hold a NUL byte, which can't reach a container.
+
 ## Target names and references
 
 Every target has a unique, nonempty `name` within its `BUILD` file.
@@ -176,7 +182,7 @@ An index cannot contain another index.
 
 ## Steps
 
-Put steps in the `steps` list of a task or layer.
+Put steps in the `steps` list of a task or layer; a step made anywhere else is an error.
 They execute in order, and later steps see earlier changes.
 
 ### `add(source, dest, owner = "", group = "")`
@@ -194,7 +200,8 @@ add("compile", "/app", owner = "node", group = "staff")
 Later additions replace earlier files at the same paths.
 Files are owned by root unless `owner` or `group` overrides ownership.
 Names refer to users and groups in the image.
-Both arguments require strings, including numeric IDs such as `owner = "1000"`.
+Both arguments require strings, including numeric IDs such as `owner = "1000"`,
+and neither holds `:`, as `owner = "user:group"` would; give the group as `group`.
 With only `owner`, the group is that user's group; with only `group`, the owner remains root.
 New parent directories receive the selected ownership too.
 Directories the image already has keep their modes and owners,
@@ -243,7 +250,8 @@ run(["sh", "-c", "npm ci"], secrets = [secret("npmrc", file = "/root/.npmrc")])
 
 `secret(id, env = ...)` sets the variable `env` for that step alone,
 and `secret(id, file = ...)` mounts a read-only file, owned by root, at that absolute path for that step alone.
-Each secret gives exactly one of them.
+Each secret gives exactly one of them, and no two secrets of a step give the same variable or file.
+An ID is letters, digits, `_`, `.` or `-`, starting with a letter or digit, and a file is a clean absolute path.
 The value comes from the command line, `--secret id=sentry,env=SENTRY_AUTH_TOKEN` or `--secret id=npmrc,src=.npmrc`;
 see [the CLI reference](cli.md#secrets).
 A build that reaches a step whose secret the command line doesn't give fails when the BUILD file loads,
@@ -268,7 +276,7 @@ env(**{"NAME-WITH-DASHES": "value"})
 Both set string-valued variables for later steps in the target.
 `env()` also records them in the resulting image and makes them available to targets using that image.
 `build_env()` applies only within the current target and does not persist its assignments in the image.
-Each call needs at least one variable.
+Each call needs at least one variable, given by a nonempty name that holds no `=`, once in a call.
 Names such as `NAME-WITH-DASHES` can be set, but cannot be referenced by vamos's variable expansion.
 
 Values expand `$NAME` and `${NAME}` using the environment before that call.
