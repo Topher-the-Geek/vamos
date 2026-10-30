@@ -32,8 +32,9 @@ Anything that changes the store can move a name, so `locateImage` checks that th
 and that its layers are those its config lists, then uses it by the store's ID it found;
 a cached result whose name doesn't check out is a miss.
 The layer check refuses images that storage.conf's `insecure_allow_unpredictable_image_contents` lets a partial
-pull keep unverified, whose config wouldn't identify their files; `TestUnverifiedLayers` and `TestMovedCacheName`
-hold both checks, and `TestImageStoreIDs` holds store IDs that differ from image IDs.
+pull keep unverified, whose config wouldn't identify their files;
+the cache feature's `TestCache_CachedLayersAreFoundByTheirImageIDs` holds both checks,
+and store IDs that differ from image IDs.
 A resolve validates what a tag resolved to before anything uses it: the store's image is the manifest chosen,
 and it is for the platform asked.
 Each layer's and task's result records a `cache.Provenance`, the executor's platform, isolation, capabilities,

@@ -283,6 +283,7 @@ func (w *world) saveIn(fsys afero.Fs, command, target, path string, flags ...str
 		if w.first == nil {
 			w.first = img
 		}
+		w.saved = append(w.saved, img)
 	}
 }
 

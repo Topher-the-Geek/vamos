@@ -109,10 +109,19 @@ func (w *world) fails(usage bool, wants []string) {
 }
 
 // atPlaceholders returns s with each <destination> replaced by the folder that the last command sent to,
-// each <working directory> by the test's, and each <registry> by the host of the scenario's registry.
+// each <working directory> by the test's, each <registry> by the host of the scenario's registry,
+// and each <saved image N> by the short ID of the Nth image the scenario saved, as vamos shows one.
 func (w *world) atPlaceholders(s string) string {
 	w.t.Helper()
 	s = w.atRegistry(s)
+	for i, img := range w.saved {
+		if placeholder := fmt.Sprintf("<saved image %d>", i+1); strings.Contains(s, placeholder) {
+			s = strings.ReplaceAll(s, placeholder, w.imageID(img)[:12])
+		}
+	}
+	if strings.Contains(s, "<saved image ") {
+		w.t.Fatalf("%q names a saved image that the scenario hasn't saved", s)
+	}
 	if strings.Contains(s, "<working directory>") {
 		wd, err := os.Getwd()
 		if err != nil {
@@ -145,7 +154,7 @@ func (w *world) outputs() string {
 }
 
 // ThenTheOutputIncludes checks the command's standard output, where it shows its targets' statuses and steps' output.
-// In want, <destination> stands for the folder that the command sent to.
+// In want, placeholders stand for what atPlaceholders says, such as <destination> for the folder the command sent to.
 func (w *world) ThenTheOutputIncludes(want string) {
 	w.t.Helper()
 	if want = w.atPlaceholders(want); !strings.Contains(w.stdout, want) {
@@ -405,12 +414,18 @@ func (w *world) ThenNoTargetRan() {
 }
 
 // ThenTheTargetWasShownAs checks that the command showed exactly the statuses of the target that label names,
-// in order, each starting with the one that shown gives, such as "rebuilding" or "building again, since".
+// in order, each starting with the one that shown gives, such as "rebuilding" or "building again, since",
+// in which placeholders stand for what atPlaceholders says.
 func (w *world) ThenTheTargetWasShownAs(label string, shown ...string) {
 	w.t.Helper()
 	if len(shown) == 0 {
 		w.t.Fatal("no statuses to expect")
 	}
+	expanded := make([]string, len(shown))
+	for i := range shown {
+		expanded[i] = w.atPlaceholders(shown[i])
+	}
+	shown = expanded
 	got := w.shownStatuses(label)
 	matches := len(got) == len(shown)
 	for i := 0; matches && i < len(got); i++ {

@@ -1,16 +1,18 @@
 package features
 
 import (
+	"archive/tar"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/Topher-the-Geek/vamos/internal/cache"
 	"github.com/Topher-the-Geek/vamos/internal/run"
 	"github.com/opencontainers/go-digest"
+	imagemanifest "go.podman.io/image/v5/manifest"
 	"go.podman.io/storage"
 )
 
@@ -52,9 +54,7 @@ func (w *world) cached() cached {
 	err = w.stores.WithStore(func(store storage.Store) error {
 		all, err := store.Images()
 		for _, img := range all {
-			if slices.ContainsFunc(img.Names, func(name string) bool {
-				return strings.HasPrefix(name, run.CacheRepository+":")
-			}) {
+			if _, named := cacheName(img); named {
 				images[img.ID] = true
 			}
 		}
@@ -234,4 +234,145 @@ func (w *world) GivenTheImagesTheLastCommandCachedAreRemoved() {
 	if err != nil {
 		w.t.Fatal(err)
 	}
+}
+
+// GivenTheFirstSavedImagesCacheNameNamesTheLast moves the name in the build cache's repository of the first image
+// that the scenario saved to the last, as `podman tag` can.
+func (w *world) GivenTheFirstSavedImagesCacheNameNamesTheLast() {
+	w.t.Helper()
+	w.requireOwnStores()
+	if len(w.saved) < 2 {
+		w.t.Fatal("the scenario has saved no second image to give the first's name")
+	}
+	first, last := w.imageID(w.saved[0]), w.imageID(w.saved[len(w.saved)-1])
+	if first == last {
+		w.t.Fatal("the last image saved is the first")
+	}
+	err := w.stores.WithStore(func(store storage.Store) error {
+		img, err := store.Image(run.CacheRepository + ":" + last)
+		if err != nil {
+			return err
+		}
+		return store.AddNames(img.ID, []string{run.CacheRepository + ":" + first})
+	})
+	if err != nil {
+		w.t.Fatal(err)
+	}
+}
+
+// GivenTheLastSavedImageHasOtherLayersInTheStore gives the name that the build cache has for the image last saved to
+// another image in the container store, with its config but other layers, holding app.sh, as a partial pull can leave
+// with storage.conf's insecure_allow_unpredictable_image_contents, leaving the image it named in the store unnamed.
+func (w *world) GivenTheLastSavedImageHasOtherLayersInTheStore() {
+	w.t.Helper()
+	w.requireOwnStores()
+	if len(w.saved) == 0 {
+		w.t.Fatal("the scenario has saved no image")
+	}
+	id := w.imageID(w.saved[len(w.saved)-1])
+	err := w.stores.WithStore(func(store storage.Store) error {
+		img, err := store.Image(run.CacheRepository + ":" + id)
+		if err != nil {
+			return err
+		}
+		var other bytes.Buffer
+		tw := tar.NewWriter(&other)
+		content := []byte("echo bye\n")
+		if err := tw.WriteHeader(&tar.Header{Name: "app.sh", Mode: 0o755, Size: int64(len(content))}); err != nil {
+			return err
+		}
+		if _, err := tw.Write(content); err != nil {
+			return err
+		}
+		if err := tw.Close(); err != nil {
+			return err
+		}
+		layer, _, err := store.PutLayer("", "", nil, "", false, nil, &other)
+		if err != nil {
+			return err
+		}
+		unverified, err := store.CreateImage("", nil, layer.ID, "",
+			&storage.ImageOptions{CreationDate: img.Created, Digest: img.Digest})
+		if err != nil {
+			return err
+		}
+		if err := copyImageData(store, img, unverified.ID); err != nil {
+			return err
+		}
+		return store.AddNames(unverified.ID, []string{run.CacheRepository + ":" + id})
+	})
+	if err != nil {
+		w.t.Fatal(err)
+	}
+}
+
+// GivenTheStoreHoldsTheCachedImagesUnderOtherIDs recreates each image that the build cache names in the container
+// store under a random store ID, with its layers, data, digests and names, as a store can hold an image whose store
+// ID isn't its config's digest.
+func (w *world) GivenTheStoreHoldsTheCachedImagesUnderOtherIDs() {
+	w.t.Helper()
+	w.requireOwnStores()
+	rekeyed := 0
+	err := w.stores.WithStore(func(store storage.Store) error {
+		images, err := store.Images()
+		if err != nil {
+			return err
+		}
+		for _, img := range images {
+			id, named := cacheName(img)
+			if !named {
+				continue
+			}
+			rekeyed++
+			copied, err := store.CreateImage("", nil, img.TopLayer, img.Metadata,
+				&storage.ImageOptions{CreationDate: img.Created, Digest: img.Digest})
+			if err != nil {
+				return err
+			}
+			if copied.ID == id {
+				return fmt.Errorf("image %s would be held under its image ID still", id)
+			}
+			if err := copyImageData(store, &img, copied.ID); err != nil {
+				return err
+			}
+			// The copy keeps the layers in use as the original is deleted.
+			if _, err := store.DeleteImage(img.ID, true); err != nil {
+				return err
+			}
+			if err := store.AddNames(copied.ID, img.Names); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	if rekeyed == 0 {
+		w.t.Fatal("the build cache names no image in the container store to hold under another ID")
+	}
+}
+
+// cacheName returns the image ID that the build cache's repository names img by, if it names it.
+func cacheName(img storage.Image) (string, bool) {
+	for _, name := range img.Names {
+		if id, ok := strings.CutPrefix(name, run.CacheRepository+":"); ok {
+			return id, true
+		}
+	}
+	return "", false
+}
+
+// copyImageData copies img's data, its manifests and config, to the image with store ID to in store.
+func copyImageData(store storage.Store, img *storage.Image, to string) error {
+	for _, key := range img.BigDataNames {
+		data, err := store.ImageBigData(img.ID, key)
+		if err != nil {
+			return err
+		}
+		if err := store.SetImageBigData(to, key, data, imagemanifest.Digest); err != nil {
+			return err
+		}
+	}
+	return nil
 }

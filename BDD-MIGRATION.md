@@ -46,7 +46,7 @@ Delete this file when every box is ticked.
   `TestPullTag` and `TestPullTagMistakes` are scenarios of the pull feature, from a registry of the scenario's own.
 - [x] **Platforms and emulation.**
   `TestPlatformMistakes`, `TestPlatformFailures` and what `TestPlatforms` builds are scenarios of the platforms
-  feature. `TestPlatforms` itself stays, for the provenance it reads from the cache's files, until the cache moves;
+  feature. `TestPlatforms` itself stays, for the provenance it reads from the cache's files, as decided below;
   `TestExecPlatformChoice`, a choice among a coordinator's platforms, moves with remote work.
 - [x] **Steps and task outputs.**
   `TestIncludeProject`, `TestSteps`, `TestWorkdirUser` and `TestTaskOutputLinks` are scenarios of the glob, env,
@@ -55,13 +55,11 @@ Delete this file when every box is ticked.
   `TestExportLinks`, `TestExportOwners`, `TestExportSetuid`, `TestExportReplace` and `TestExportIntoEmptyFolder`
   are scenarios of the export feature; the rest of `internal/finish`'s export tests, which inject faults or races,
   are decided below.
-- [ ] **The cache as a user sees it.**
-  `TestCacheCorruption` and `TestCacheEntryRemoved` are scenarios of the cache feature. Left:
-  `TestMovedCacheName`, `TestUnverifiedLayers`,
-  `TestResultProvenance`, including whether a result's commands ran under emulation, `TestExportRepairsCorruptBlob`,
-  and the store's names in `TestImageIdentityRoundTrip`,
-  whose reported ID the push feature checks.
-  The cache feature: a Given step damages the cache, and the scenario sees it rebuild or recover.
+- [x] **The cache as a user sees it.**
+  `TestCacheCorruption`, `TestCacheEntryRemoved`, `TestMovedCacheName`, `TestUnverifiedLayers` and
+  `TestImageStoreIDs` are scenarios of the cache feature. What no user sees is decided below:
+  the provenance that `TestResultProvenance` and `TestPlatforms` read from results,
+  the names a pull gives in the store that `TestImageIdentityRoundTrip` reads, and `TestExportRepairsCorruptBlob`.
 - [ ] **Prune and store roots.**
   `TestPrune`, `TestPruneRefusedWhileInUse`, `TestExplicitStoreRoots`, `TestDefaultStore`,
   `TestPruneHandlerWithoutRoot`.
@@ -104,6 +102,9 @@ Delete this file when every box is ticked.
   `internal/sched` (action keys, sharing, job limits, the scheduler's reuse and regeneration),
   `internal/fileset` (patterns, tree walks, edits during capture), `internal/cache` (logs, locks, generations),
   `internal/cli`'s `TestGraphConfigurations`, of the graph an index of two platforms configures,
+  `TestResultProvenance` and `TestPlatforms`, of the provenance a result records,
+  and `TestImageIdentityRoundTrip`, of the names a pull gives an image in the store,
+  `internal/run`'s `TestExportRepairsCorruptBlob`,
   `internal/finish`'s delivery from separate stores, and its export tests that inject a fault or race:
   `TestExportFolderFilledDuringBuild`, `TestExportReplacesOnlyFolders`, `TestExportCleanupFails`,
   `TestExportPutBackFails` and `TestExportReplaceWithoutExchange`,

@@ -52,6 +52,15 @@ func depsSizeAndApp(nonce string) string {
 	`, nonce)
 }
 
+// aLayerOnScratch declares the layer "app" on scratch, which adds app.sh and runs nothing, so that it builds for any
+// platform. Its command names nonce.
+func aLayerOnScratch(nonce string) string {
+	return fmt.Sprintf(`
+		glob(name="code", include=["app.sh"])
+		layer(name="app", base="scratch", steps=[add("code", "/")], command=["/app.sh", %q])
+	`, nonce)
+}
+
 // TestCache_UnchangedInputsAreReused specifies that vamos reuses target results while their effective inputs are
 // unchanged, and that the CLI reports reuse and replays a cached target's previous output.
 func TestCache_UnchangedInputsAreReused(t *testing.T) {
@@ -652,5 +661,88 @@ func TestCache_ResultsThatCantBeUsedAreBuiltAgain(t *testing.T) {
 			"its output can't be used from the cache: blob sha256:")
 		w.ThenTheOutputIncludes(`task "size": building, since the cached result can't be used: ` +
 			"its files can't be used from the cache: tree sha256:")
+	})
+}
+
+// TestCache_CachedLayersAreFoundByTheirImageIDs specifies that cached layers are container-store images named
+// localhost/vamos-cache:<id>, by their image ID, whatever their store ID, and that an image is used through its name
+// only if what has the name is that image, with the layers its config lists.
+// Scenarios change the container store, so each has stores of its own.
+func TestCache_CachedLayersAreFoundByTheirImageIDs(t *testing.T) {
+	t.Run("A layer whose name another image has taken is built again, and gets its name back", func(t *testing.T) {
+		w := newCacheWorld(t)
+		w.GivenStoresOfTheScenariosOwn()
+		nonce := testenv.NewNonce()
+		w.GivenTheBuildFileDeclares(aLayerOnScratch(nonce + "a"))
+		w.GivenTheProjectHolds(files{"app.sh": "echo a"})
+		w.WhenISave("app")
+		w.ThenItSucceeds()
+		w.GivenTheBuildFileChanges(nonce+"a", nonce+"b")
+		w.WhenISave("app")
+		w.ThenItSucceeds()
+		w.GivenTheFirstSavedImagesCacheNameNamesTheLast()
+		w.GivenTheBuildFileChanges(nonce+"b", nonce+"a")
+		w.WhenIBuild("app")
+		w.ThenItSucceeds()
+		w.ThenTheTargetWasShownAs(layer("app"), "building, since the cached result can't be used: "+
+			"its image <saved image 1> in the container store: the image named for it isn't that image: "+
+			"it is image <saved image 2>")
+		w.WhenISave("app")
+		w.ThenItSucceeds()
+		w.ThenTheTargetsWere(statuses{layer("app"): reused})
+		w.ThenTheImageIsTheOneSavedFirst()
+	})
+
+	t.Run("A layer whose image in the store has other layers than its config lists is built again, saying why",
+		func(t *testing.T) {
+			w := newCacheWorld(t)
+			w.GivenStoresOfTheScenariosOwn()
+			w.GivenTheBuildFileDeclares(aLayerOnScratch(testenv.NewNonce()))
+			w.GivenTheProjectHolds(files{"app.sh": "echo hi"})
+			w.WhenISave("app")
+			w.ThenItSucceeds()
+			w.GivenTheLastSavedImageHasOtherLayersInTheStore()
+			w.WhenIBuild("app")
+			w.ThenItSucceeds()
+			w.ThenTheTargetWasShownAs(layer("app"), "building, since the cached result can't be used: "+
+				"its image <saved image 1> in the container store: the image named for it isn't that image: "+
+				"the image's layers in the container store aren't those its config lists, as when storage.conf's "+
+				"insecure_allow_unpredictable_image_contents lets a partial pull skip checking them")
+			w.WhenISave("app")
+			w.ThenItSucceeds()
+			w.ThenTheImageIsTheOneSavedFirst()
+			w.ThenTheImageHolds(everywhere, files{"/app.sh": "echo hi"})
+		})
+
+	t.Run("Layers whose store IDs aren't their image IDs are reused, built on and sent", func(t *testing.T) {
+		w := newCacheWorld(t)
+		w.GivenStoresOfTheScenariosOwn()
+		w.GivenARegistry()
+		w.GivenTheBuildFileDeclares(aLayerOnScratch(testenv.NewNonce()))
+		w.GivenTheBuildFileDeclares(fmt.Sprintf(`
+			index(name="server", layer="app", platforms=[%q, %q])
+			glob(name="more", include=["more.txt"])
+			layer(name="next", base="app", steps=[add("more", "/more")])
+		`, thisPlatform(), anotherPlatform()))
+		w.GivenTheProjectHolds(files{"app.sh": "echo hi", "more.txt": "more\n"})
+		w.WhenISave("app")
+		w.ThenItSucceeds()
+		w.WhenIBuild("server")
+		w.ThenItSucceeds()
+		w.GivenTheStoreHoldsTheCachedImagesUnderOtherIDs()
+		w.WhenIBuild("app")
+		w.ThenItSucceeds()
+		w.ThenTheTargetsWere(statuses{layer("app"): reused})
+		w.WhenIBuild("server")
+		w.ThenItSucceeds()
+		w.ThenTheTargetsWere(statuses{layer("app"): reused, layer("app", "platform="+anotherPlatform()): reused})
+		w.WhenIBuild("next")
+		w.ThenItSucceeds()
+		w.ThenTheTargetsWere(statuses{layer("app"): reused, layer("next"): ran})
+		w.WhenIPush("app", "<registry>/app:v1")
+		w.ThenItSucceeds()
+		w.ThenTheImageIsTheOneSavedFirst()
+		w.WhenIPush("server", "<registry>/server:v1")
+		w.ThenItSucceeds()
 	})
 }

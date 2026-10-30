@@ -60,7 +60,8 @@ vamos build lint test --rebuild
 
 ## Storage and pruning
 
-Cached layers are container-store images named `localhost/vamos-cache:<id>`, by their image ID;
+Cached layers are container-store images named `localhost/vamos-cache:<id>`, by their image ID, whatever their
+store ID, and used through that name only if what has it is that image, with the layers its config lists;
 pulled images carry that name too, beside the name of the digest they were pulled by.
 Other cached data is beside the container store, normally in `/var/lib/containers/vamos`.
 A volume on `/var/lib/containers` preserves both when vamos runs in a disposable container.

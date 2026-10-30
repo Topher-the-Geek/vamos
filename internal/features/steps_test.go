@@ -92,6 +92,7 @@ type world struct {
 	emulating    string           // the platform whose programs the scenario runs under emulation, if any
 	askedDuring  int64            // the requests that the scenario's registry served as the last command ran
 	first        v1.Image         // the first image that the scenario saved
+	saved        []v1.Image       // the images that the scenario saved, in order
 	entries      map[string]entry // the image's files, once a step has read them
 	exported     string           // the folder that the last command exported to, if it exported
 }
