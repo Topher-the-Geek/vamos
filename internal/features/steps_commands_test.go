@@ -7,8 +7,11 @@ import (
 	"strings"
 
 	"github.com/Topher-the-Geek/vamos/internal/testenv"
+	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	"github.com/spf13/afero"
+	"go.podman.io/image/v5/docker/reference"
 )
 
 // When steps run the command line, as a user would: one step for each command, which takes the target it names
@@ -37,14 +40,15 @@ type commandLine struct {
 	name    string   // where save or export sends, if an option gives it, relative to the folder it sends to
 	project bool     // whether name is relative to the directory that commands run in, in the project, instead
 	sentBy  string   // the option that gave name
+	tlsBy   string   // the option that gave --tls-verify, if one has
 	flags   []string
 }
 
-// sendingCommands are the commands that send what they build.
+// sendingCommands are the commands that send what they build to a folder.
 var sendingCommands = []string{"save", "export"}
 
 // everyCommand are the commands that When steps run with options.
-var everyCommand = []string{"save", "export", "build"}
+var everyCommand = []string{"save", "export", "build", "push"}
 
 // to sends to the path name, relative to the folder that the command sends to,
 // rather than to the target's name, with .tar for save. Save and export take it.
@@ -81,14 +85,14 @@ func tagged(tag string) option {
 	}}
 }
 
-// stampedAt gives --timestamp stamp, a time as RFC 3339 or Unix seconds give it. Save, export and build take it.
+// stampedAt gives --timestamp stamp, a time as RFC 3339 or Unix seconds give it. Every command takes it.
 func stampedAt(stamp string) option {
 	return option{"stampedAt", everyCommand, func(_ *world, c *commandLine) {
 		c.flags = append(c.flags, "--timestamp", stamp)
 	}}
 }
 
-// setting gives --set for each of sets, such as "mode=debug". Save, export and build take it.
+// setting gives --set for each of sets, such as "mode=debug". Every command takes it.
 func setting(sets ...string) option {
 	return option{"setting", everyCommand, func(_ *world, c *commandLine) {
 		for _, set := range sets {
@@ -98,7 +102,7 @@ func setting(sets ...string) option {
 }
 
 // withSecrets gives --secret for each of secrets, such as "id=token,env=TOKEN",
-// in which <outside> stands for the folder of GivenAFileOutsideTheProjectHolds. Save, export and build take it.
+// in which <outside> stands for the folder of GivenAFileOutsideTheProjectHolds. Every command takes it.
 func withSecrets(secrets ...string) option {
 	return option{"withSecrets", everyCommand, func(w *world, c *commandLine) {
 		w.t.Helper()
@@ -108,11 +112,44 @@ func withSecrets(secrets ...string) option {
 	}}
 }
 
-// forPlatform builds for platform, such as linux/arm64, with --platform. Save, export and build take it.
+// forPlatform builds for platform, such as linux/arm64, with --platform. Every command takes it.
 func forPlatform(platform string) option {
 	return option{"forPlatform", everyCommand, func(_ *world, c *commandLine) {
 		c.flags = append(c.flags, "--platform", platform)
 	}}
+}
+
+// fromTheClient pushes from the client, with --push-from=client, rather than from the executor. Push takes it.
+func fromTheClient() option {
+	return option{"fromTheClient", []string{"push"}, func(_ *world, c *commandLine) {
+		c.flags = append(c.flags, "--push-from=client")
+	}}
+}
+
+// withoutTLSVerification lets vamos itself reach a registry over plain HTTP, with --tls-verify=false.
+// Every command takes it.
+func withoutTLSVerification() option {
+	return option{"withoutTLSVerification", everyCommand, func(w *world, c *commandLine) {
+		c.verifyTLS(w, "withoutTLSVerification")
+		c.flags = append(c.flags, "--tls-verify=false")
+	}}
+}
+
+// withTLSVerification gives --tls-verify alone, which means true. Every command takes it.
+func withTLSVerification() option {
+	return option{"withTLSVerification", everyCommand, func(w *world, c *commandLine) {
+		c.verifyTLS(w, "withTLSVerification")
+		c.flags = append(c.flags, "--tls-verify")
+	}}
+}
+
+// verifyTLS records that the option by gives --tls-verify, failing the scenario if another option has already.
+func (c *commandLine) verifyTLS(w *world, by string) {
+	w.t.Helper()
+	if c.tlsBy != "" {
+		w.t.Fatalf("both %s() and %s() give --tls-verify", c.tlsBy, by)
+	}
+	c.tlsBy = by
 }
 
 // replacing replaces what the folder exported to holds, with --replace. Export takes it.
@@ -139,7 +176,7 @@ func alongWith(targets ...string) option {
 // withFlags gives flags as they are: for an example table whose rows are themselves flags,
 // or a flag that one feature alone passes, which gets an option of its own once a second passes it too.
 // It fails the scenario at once given a flag that an option names, so that the option's checks apply.
-// Save, export and build take it.
+// Every command takes it.
 func withFlags(flags ...string) option {
 	return option{"withFlags", everyCommand, func(w *world, c *commandLine) {
 		w.t.Helper()
@@ -158,16 +195,18 @@ func withFlags(flags ...string) option {
 
 // namedFlags are the options that give flags, by flag, and the step that gives -C.
 var namedFlags = map[string]string{
-	"--tag":       "tagged",
-	"-t":          "tagged",
-	"--timestamp": "stampedAt",
-	"--set":       "setting",
-	"--secret":    "withSecrets",
-	"--platform":  "forPlatform",
-	"--replace":   "replacing",
-	"--rebuild":   "rebuilding",
-	"-C":          "GivenIWorkIn",
-	"--dir":       "GivenIWorkIn",
+	"--tag":        "tagged",
+	"-t":           "tagged",
+	"--timestamp":  "stampedAt",
+	"--set":        "setting",
+	"--secret":     "withSecrets",
+	"--platform":   "forPlatform",
+	"--replace":    "replacing",
+	"--rebuild":    "rebuilding",
+	"--push-from":  "fromTheClient",
+	"--tls-verify": "withTLSVerification or withoutTLSVerification",
+	"-C":           "GivenIWorkIn",
+	"--dir":        "GivenIWorkIn",
 }
 
 // apply applies options to the command line of command, failing the scenario if command doesn't take one.
@@ -233,6 +272,50 @@ func (w *world) saveIn(fsys afero.Fs, command, target, path string, flags ...str
 		if w.first == nil {
 			w.first = img
 		}
+	}
+}
+
+// WhenIPush pushes target to the image name image, in which <registry> stands for the scenario's registry,
+// with :latest if it gives no tag,
+// and reads back what it pushed, an image or an index, for the steps about the image or the index to check.
+// It fails the scenario if a push that succeeds pushed nothing that can be read.
+func (w *world) WhenIPush(target, image string, options ...option) {
+	w.t.Helper()
+	c := w.apply("push", options)
+	w.sendsNothing("WhenIPush")
+	image = w.atRegistry(image)
+	w.sent = " built! " // "Image built!" or "Index built!", once what was pushed says which
+	w.run(append([]string{"push", target, image}, c.flags...)...)
+	named, err := reference.ParseNormalizedNamed(image)
+	if err != nil {
+		if w.err == nil {
+			w.t.Fatalf("pushed to %s, which isn't an image name: %v", image, err)
+		}
+		return // a name that push refused, rightly, for a scenario to check
+	}
+	// As push names it, with the tag that it gives a name without one.
+	w.pushedTo = reference.FamiliarString(reference.TagNameOnly(named))
+	if w.err != nil {
+		w.sent = ""
+		return
+	}
+	ref, err := name.ParseReference(image, name.Insecure)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	desc, err := remote.Get(ref, w.readingTheRegistry()...)
+	if err != nil {
+		w.t.Fatalf("reading what was pushed: %v", err)
+	}
+	if desc.MediaType.IsIndex() {
+		w.index, err = desc.ImageIndex()
+		w.sent = "Index built! "
+	} else {
+		w.image, err = desc.Image()
+		w.sent = imageBuilt
+	}
+	if err != nil {
+		w.t.Fatalf("reading what was pushed: %v", err)
 	}
 }
 

@@ -14,7 +14,8 @@ import (
 // the others report their failure and let the scenario go on.
 
 // ThenItSucceeds checks that the command succeeded and reported sending its image or files if it sends any,
-// and nothing sent if it doesn't, and that a save reported the saved image's ID.
+// and nothing sent if it doesn't, that a save or a push reported the image's ID, or an index's digest,
+// and that a push named the image it pushed to.
 // It stops the scenario if the command failed or reported sending wrongly.
 func (w *world) ThenItSucceeds() {
 	w.t.Helper()
@@ -25,15 +26,28 @@ func (w *world) ThenItSucceeds() {
 		if slices.ContainsFunc(sentReports, w.reported) {
 			w.t.Fatalf("reported something sent, want nothing\n%s", w.outputs())
 		}
-	} else if !strings.Contains(w.stdout, w.sent) {
-		w.t.Fatalf("stdout = %q, want it to report %q", w.stdout, w.sent)
+	} else if !strings.HasPrefix(lastLine(w.stdout), w.sent) {
+		w.t.Fatalf("stdout = %q, want its last line to report %q", w.stdout, w.sent)
 	}
-	if w.image != nil {
-		// The ID reported is the one the image has where it was sent, as `docker images` shows it.
-		id := w.imageID(w.image)
-		if fields := strings.Fields(lastLine(w.stdout)); len(fields) == 0 || fields[len(fields)-1] != id {
-			w.t.Errorf("stdout = %q, want it to report the saved image's ID, %s", w.stdout, id)
+	var id string
+	switch {
+	case w.index != nil:
+		// An index is reported by its digest, as a registry names it.
+		digest, err := w.index.Digest()
+		if err != nil {
+			w.t.Fatal(err)
 		}
+		id = digest.String()
+	case w.image != nil:
+		// The ID reported is the one the image has where it was sent, as `docker images` shows it.
+		id = w.imageID(w.image)
+	}
+	fields := strings.Fields(lastLine(w.stdout))
+	if id != "" && (len(fields) == 0 || fields[len(fields)-1] != id) {
+		w.t.Errorf("stdout = %q, want it to report the sent image's ID, %s", w.stdout, id)
+	}
+	if w.pushedTo != "" && (len(fields) < 2 || fields[len(fields)-2] != w.pushedTo) {
+		w.t.Errorf("stdout = %q, want it to name the image pushed to, %s", w.stdout, w.pushedTo)
 	}
 }
 
@@ -45,7 +59,8 @@ func lastLine(s string) string {
 
 // ThenItFailsWith checks that the command failed, at run time, with an error that contains each of wants,
 // printed no usage, and reported sending nothing. In wants, <destination> stands for the folder that the command
-// sent to, and <working directory> for the test's. It stops the scenario if any of these doesn't hold.
+// sent to, <working directory> for the test's, and <registry> for the host of the scenario's registry.
+// It stops the scenario if any of these doesn't hold.
 func (w *world) ThenItFailsWith(wants ...string) {
 	w.t.Helper()
 	w.fails(false, wants)
@@ -89,9 +104,10 @@ func (w *world) fails(usage bool, wants []string) {
 }
 
 // atPlaceholders returns s with each <destination> replaced by the folder that the last command sent to,
-// and each <working directory> by the test's.
+// each <working directory> by the test's, and each <registry> by the host of the scenario's registry.
 func (w *world) atPlaceholders(s string) string {
 	w.t.Helper()
+	s = w.atRegistry(s)
 	if strings.Contains(s, "<working directory>") {
 		wd, err := os.Getwd()
 		if err != nil {

@@ -62,7 +62,7 @@ func TestPull_FailureSaysWhy(t *testing.T) {
 		func(t *testing.T) {
 			w := newPullWorld(t)
 			w.GivenTheBuildFileDeclares(`pull(name="base", image="127.0.0.1:1/app")`)
-			w.WhenISave("base", withFlags("--tls-verify=false"))
+			w.WhenISave("base", withoutTLSVerification())
 			w.ThenItFailsWith(`pull "base": image "127.0.0.1:1/app:latest"`, "connection refused")
 			w.ThenTheCommandDoesNotSay("check the name")
 			w.ThenNothingIsSaved()

@@ -14,6 +14,7 @@ import (
 
 	"github.com/Topher-the-Geek/vamos/internal/cli"
 	"github.com/Topher-the-Geek/vamos/internal/testenv"
+	"github.com/google/go-containerregistry/pkg/authn"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/spf13/afero"
 )
@@ -55,8 +56,10 @@ type world struct {
 	root    string          // the folder that holds the project, if it is on disk
 	before  map[string]bool // the store's unnamed images when the scenario began, if it builds
 
-	prepared string // the folder that the next command sends to, if Given steps have put something there
-	outside  string // a folder outside the project, for files that commands read, such as secrets
+	prepared string              // the folder that the next command sends to, if Given steps have put something there
+	outside  string              // a folder outside the project, for files that commands read, such as secrets
+	registry string              // the host of the scenario's registry, <registry>, once a Given step starts it
+	login    authn.Authenticator // that the scenario's registry needs, which steps that read from it use
 
 	stdout    string
 	stderr    string
@@ -65,7 +68,9 @@ type world struct {
 	inProject bool             // whether the last command saved into the project, whose other files it didn't send
 	archive   string           // the archive that the last command saved, if it saved one
 	sent      string           // what the last command reports once it has sent its image or files, if it sends any
-	image     v1.Image         // the image that the last command saved, if it saved one
+	image     v1.Image         // the image that the last command saved or pushed, if it sent one
+	index     v1.ImageIndex    // the index that the last command pushed, if it pushed one
+	pushedTo  string           // the image name that the last command pushed to, if it pushed
 	first     v1.Image         // the first image that the scenario saved
 	entries   map[string]entry // the image's files, once a step has read them
 	exported  string           // the folder that the last command exported to, if it exported
@@ -115,7 +120,7 @@ func (w *world) runIn(fsys afero.Fs, args ...string) {
 // execute runs the vamos command line with exactly args, none for none, in the project fsys, as main does.
 func (w *world) execute(fsys afero.Fs, args []string) {
 	w.t.Helper()
-	w.image, w.archive, w.entries, w.exported = nil, "", nil, ""
+	w.image, w.index, w.archive, w.entries, w.exported, w.pushedTo = nil, nil, "", nil, "", ""
 	cmd := cli.NewRootCommand(cli.Config{Fs: fsys, Store: &w.stores.Options})
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)

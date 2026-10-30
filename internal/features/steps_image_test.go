@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net/http"
 	"os"
 	"path"
 	"runtime"
@@ -16,7 +17,10 @@ import (
 
 	"github.com/Topher-the-Geek/vamos/internal/testenv"
 	"github.com/containerd/platforms"
+	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
 )
@@ -300,10 +304,7 @@ func anotherPlatform() string {
 func (w *world) ThenTheImageIsFor(want string) {
 	w.t.Helper()
 	config := w.imageConfig()
-	got := platforms.Format(platforms.Normalize(imgspecv1.Platform{
-		OS: config.OS, Architecture: config.Architecture, Variant: config.Variant,
-	}))
-	if got != want {
+	if got := platformAsWanted(config.OS, config.Architecture, config.Variant, want); got != want {
 		w.t.Errorf("the image is for %s, want %s", got, want)
 	}
 }
@@ -489,4 +490,114 @@ func (w *world) config(img v1.Image) *v1.ConfigFile {
 		w.t.Fatal(err)
 	}
 	return config
+}
+
+// ThenNothingIsPushed checks that the registry has nothing at the image name that the last command pushed to.
+func (w *world) ThenNothingIsPushed() {
+	w.t.Helper()
+	if w.pushedTo == "" {
+		w.t.Fatal("no command has run that pushes to an image name")
+	}
+	ref, err := name.ParseReference(w.pushedTo, name.Insecure)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	desc, err := remote.Head(ref, w.readingTheRegistry()...)
+	var terr *transport.Error
+	switch {
+	case err == nil:
+		w.t.Errorf("the registry has %s at %s, want nothing", desc.Digest, w.pushedTo)
+	case !errors.As(err, &terr) || terr.StatusCode != http.StatusNotFound:
+		w.t.Fatalf("asking the registry for %s: %v, want it not found", w.pushedTo, err)
+	}
+}
+
+// readingTheRegistry returns the options that read from the scenario's registry, logged in if it needs it.
+func (w *world) readingTheRegistry() []remote.Option {
+	if w.login == nil {
+		return nil
+	}
+	return []remote.Option{remote.WithAuth(w.login)}
+}
+
+// platformName returns the platform of os, arch and variant as os/arch[/variant], normalized as this machine's is,
+// so that linux/arm64/v8 is linux/arm64.
+func platformName(os, arch, variant string) string {
+	return platforms.Format(platforms.Normalize(imgspecv1.Platform{OS: os, Architecture: arch, Variant: variant}))
+}
+
+// platformAsWanted returns the platform of os, arch and variant as os/arch[/variant], to compare with want:
+// as it is if want names a variant, so that a variant that is lost or wrong shows,
+// and otherwise normalized, as this machine's is, so that linux/arm64/v8 is linux/arm64.
+func platformAsWanted(os, arch, variant, want string) string {
+	if strings.Count(want, "/") == 2 {
+		return platforms.Format(imgspecv1.Platform{OS: os, Architecture: arch, Variant: variant})
+	}
+	return platformName(os, arch, variant)
+}
+
+// manifest is what to expect of one manifest of an index: the platform it is for, as os/arch[/variant],
+// its image's command, and, if not nil, every regular file of its image, which is on scratch.
+type manifest struct {
+	platform string
+	command  []string
+	files    files
+}
+
+// ThenTheIndexManifestsAre checks that the index pushed lists exactly want, in order: each manifest for its
+// platform, as both the index and the manifest's image say, with its command, and its files if want gives them.
+// It stops the scenario if no index was pushed, or it can't be read.
+func (w *world) ThenTheIndexManifestsAre(want ...manifest) {
+	w.t.Helper()
+	if w.index == nil {
+		w.t.Fatal("no index was pushed")
+	}
+	listed, err := w.index.IndexManifest()
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	var got, wantPlatforms []string
+	for i, m := range listed.Manifests {
+		if m.Platform == nil {
+			w.t.Fatalf("the index lists %s for no platform", m.Digest)
+		}
+		var wanted string
+		if i < len(want) {
+			wanted = want[i].platform
+		}
+		got = append(got, platformAsWanted(m.Platform.OS, m.Platform.Architecture, m.Platform.Variant, wanted))
+	}
+	for _, m := range want {
+		wantPlatforms = append(wantPlatforms, m.platform)
+	}
+	if !slices.Equal(got, wantPlatforms) {
+		w.t.Errorf("the index lists manifests for %q, want %q, in order", got, wantPlatforms)
+		return
+	}
+	var errs []error
+	for i, m := range listed.Manifests {
+		img, err := w.index.Image(m.Digest)
+		if err != nil {
+			w.t.Fatal(err)
+		}
+		config := w.config(img)
+		got := platformAsWanted(config.OS, config.Architecture, config.Variant, want[i].platform)
+		if got != want[i].platform {
+			errs = append(errs, fmt.Errorf("%s: the image is for %s", want[i].platform, got))
+		}
+		if !slices.Equal(config.Config.Cmd, want[i].command) {
+			errs = append(errs, fmt.Errorf("%s: command = %q, want %q", want[i].platform, config.Config.Cmd,
+				want[i].command))
+		}
+		if want[i].files != nil {
+			entries, err := readImage(img)
+			if err != nil {
+				w.t.Fatal(err)
+			}
+			if err := matchFiles(entries, want[i].files, true); err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", want[i].platform, err))
+			}
+		}
+	}
+	w.check(errors.Join(errs...))
 }

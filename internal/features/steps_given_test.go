@@ -1,13 +1,20 @@
 package features
 
 import (
+	"encoding/base64"
+	"io"
+	"log"
 	"maps"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
 
 	"github.com/Topher-the-Geek/vamos/internal/testenv"
+	"github.com/google/go-containerregistry/pkg/authn"
+	"github.com/google/go-containerregistry/pkg/registry"
 )
 
 // Given steps set up a scenario's project.
@@ -166,4 +173,80 @@ func (w *world) GivenAFileOutsideTheProjectHolds(name, content string) {
 func (w *world) GivenTheProjectFileCannotBeChecked(path string) {
 	w.t.Helper()
 	w.denied = append(w.denied, path)
+}
+
+// GivenARegistry starts a registry of the scenario's own, which <registry> stands for in image names and errors.
+// It serves plain HTTP, and registries.conf marks it insecure, as the executor needs, which pushes and pulls
+// with its settings; the client follows --tls-verify, if it is given, and otherwise registries.conf too.
+func (w *world) GivenARegistry() {
+	w.t.Helper()
+	w.startRegistry(nil, true)
+}
+
+// GivenARegistryThatRegistriesConfDoesNotMarkInsecure starts a registry as GivenARegistry does,
+// which serves plain HTTP, but which registries.conf doesn't mark insecure, so that the executor expects HTTPS.
+func (w *world) GivenARegistryThatRegistriesConfDoesNotMarkInsecure() {
+	w.t.Helper()
+	w.startRegistry(nil, false)
+}
+
+// GivenARegistryThatNeedsALogin starts a registry as GivenARegistry does, which refuses any request that doesn't
+// log in as user with password.
+func (w *world) GivenARegistryThatNeedsALogin(user, password string) {
+	w.t.Helper()
+	reg := newRegistry()
+	w.login = &authn.Basic{Username: user, Password: password}
+	w.startRegistry(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if u, p, ok := r.BasicAuth(); !ok || u != user || p != password {
+			rw.Header().Set("WWW-Authenticate", `Basic realm="vamos"`)
+			http.Error(rw, `{"errors":[{"code":"UNAUTHORIZED","message":"log in"}]}`, http.StatusUnauthorized)
+			return
+		}
+		reg.ServeHTTP(rw, r)
+	}), true)
+}
+
+// newRegistry returns an empty registry that logs nothing.
+func newRegistry() http.Handler {
+	return registry.New(registry.Logger(log.New(io.Discard, "", 0)))
+}
+
+// startRegistry serves handler, or an empty registry, as the scenario's registry, marked insecure if insecure.
+func (w *world) startRegistry(handler http.Handler, insecure bool) {
+	w.t.Helper()
+	if w.registry != "" {
+		w.t.Fatal("the scenario has a registry already")
+	}
+	if handler == nil {
+		handler = newRegistry()
+	}
+	server := httptest.NewServer(handler)
+	w.t.Cleanup(server.Close)
+	w.registry = strings.TrimPrefix(server.URL, "http://")
+	if insecure {
+		testenv.InsecureRegistry(w.t, w.registry)
+	}
+}
+
+// atRegistry returns s with each <registry> replaced by the host of the scenario's registry,
+// failing the scenario if s names it but no Given step started one.
+func (w *world) atRegistry(s string) string {
+	w.t.Helper()
+	if strings.Contains(s, "<registry>") && w.registry == "" {
+		w.t.Fatalf("%q names <registry>, but no Given step started one", s)
+	}
+	return strings.ReplaceAll(s, "<registry>", w.registry)
+}
+
+// GivenTheAuthFileLogsIn makes REGISTRY_AUTH_FILE, for the rest of the scenario, a file that logs in to the
+// scenario's registry as user with password.
+func (w *world) GivenTheAuthFileLogsIn(user, password string) {
+	w.t.Helper()
+	auth := base64.StdEncoding.EncodeToString([]byte(user + ":" + password))
+	file := filepath.Join(w.t.TempDir(), "auth.json")
+	content := `{"auths": {"` + w.atRegistry("<registry>") + `": {"auth": "` + auth + `"}}}`
+	if err := os.WriteFile(file, []byte(content), 0o600); err != nil {
+		w.t.Fatal(err)
+	}
+	w.GivenTheEnvironmentSets("REGISTRY_AUTH_FILE", file)
 }

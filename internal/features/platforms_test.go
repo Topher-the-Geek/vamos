@@ -216,6 +216,24 @@ func TestPlatforms_SavingAnIndexSavesThisMachinesImage(t *testing.T) {
 			w.ThenTheTargetWasBuiltInOneConfiguration(layer("app"))
 		})
 	}
+
+	t.Run("Saving an index configures only this machine's target, so another's mistake fails only a build of all",
+		func(t *testing.T) {
+			w := newPlatformWorld(t)
+			nonce := testenv.NewNonce()
+			w.GivenTheBuildFileDeclares(fmt.Sprintf(`
+				layer(name="app", base="scratch", command=["app", %q])
+				layer(name="broken", base=lambda ctx: fail("configured broken for " + ctx.platform))
+				index(name="all", layer={%q: "broken", %q: "app"})
+			`, nonce, anotherPlatform(), thisPlatform()))
+			w.WhenISave("all")
+			w.ThenItSucceeds()
+			w.ThenTheImageCommandIs("app", nonce)
+			w.ThenTheTargetsWere(statuses{layer("broken"): notBuilt})
+			w.ThenTheOutputDoesNotInclude("broken")
+			w.WhenIBuild("all")
+			w.ThenItFailsWith("configured broken for " + anotherPlatform())
+		})
 }
 
 // TestPlatforms_APlatformIsOsArchAndVariant specifies that a platform is os/arch or os/arch/variant,
@@ -275,4 +293,20 @@ func TestPlatforms_GlobsAreSharedAcrossPlatforms(t *testing.T) {
 			w.ThenNothingIsSaved()
 		})
 	}
+}
+
+// TestPlatforms_VariantsReachTheImage specifies that a platform's variant, as in linux/arm/v7, reaches functions of ctx
+// and the image built for it.
+func TestPlatforms_VariantsReachTheImage(t *testing.T) {
+	t.Run("A layer saved for a variant is for it, and its functions read it", func(t *testing.T) {
+		w := newPlatformWorld(t)
+		nonce := testenv.NewNonce()
+		w.GivenTheBuildFileDeclares(fmt.Sprintf(`
+			layer(name="app", base="scratch", command=lambda ctx: ["app", %q, ctx.variant])
+		`, nonce))
+		w.WhenISave("app", forPlatform("linux/arm/v7"))
+		w.ThenItSucceeds()
+		w.ThenTheImageIsFor("linux/arm/v7")
+		w.ThenTheImageCommandIs("app", nonce, "v7")
+	})
 }

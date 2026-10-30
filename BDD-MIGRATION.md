@@ -35,14 +35,13 @@ Delete this file when every box is ticked.
   `TestWorkspaceRoot`, `TestLabelsInOwnPackage`, `TestWorkspaceSearchError`, `TestPackageLinks`, `TestBuildVms`,
   `TestPackagesNamingEachOther`.
   The workspaces feature, observed through what builds rather than the graph.
-- [ ] **Push and index push.**
+- [x] **Push and index push.**
   `TestPush`, `TestPushWithAuthFile`, `TestTLSVerifyIsTheClients`, `TestPushFailures`, `TestMissingAuthFile`,
-  that `--tls-verify` given alone means true, `TestIndex`,
-  `TestIndexByPlatform`, `TestIndexChoosesManifest`, `TestPlatformVariants`, `TestIndexMistakes`,
-  and `TestImageIdentityRoundTrip`'s reported ID.
-  A push feature; the in-process registry goes behind Given and destination steps.
+  `TestIndexMistakes`, `TestIndexByPlatform`, and the push and save parts of `TestIndex`, `TestIndexChoosesManifest`
+  and `TestPlatformVariants` are scenarios of the push, index and platforms features.
 - [ ] **Load into Docker.**
-  `TestLoad`, `TestLoadRejected`, `TestLoadWithoutDocker`, `TestLoadIntoDocker`, and load refusing a task,
+  `TestLoad`, `TestLoadRejected`, `TestLoadWithoutDocker`, `TestLoadIntoDocker`, the load parts of `TestIndex`,
+  `TestIndexChoosesManifest` and `TestPlatformVariants`, and load refusing a task,
   which `TestWorkspaceTargetMistakes` checked.
   A load feature; the fake daemon goes behind steps, and the real one skips where there is none.
 - [ ] **Pulls by tag.**
@@ -60,7 +59,8 @@ Delete this file when every box is ticked.
   The export feature; owners skip where the host can't `chown`.
 - [ ] **The cache as a user sees it.**
   `TestCacheCorruption`, `TestCacheEntryRemoved`, `TestMovedCacheName`, `TestUnverifiedLayers`,
-  `TestResultProvenance`, `TestExportRepairsCorruptBlob`.
+  `TestResultProvenance`, `TestExportRepairsCorruptBlob`, and the store's names in `TestImageIdentityRoundTrip`,
+  whose reported ID the push feature checks.
   The cache feature: a Given step damages the cache, and the scenario sees it rebuild or recover.
 - [ ] **Prune and store roots.**
   `TestPrune`, `TestPruneRefusedWhileInUse`, `TestExplicitStoreRoots`, `TestDefaultStore`,

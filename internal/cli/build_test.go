@@ -4,12 +4,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
-	"encoding/base64"
 	"fmt"
 	"io"
-	"log"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,7 +16,6 @@ import (
 	"github.com/Topher-the-Geek/vamos/internal/testenv"
 
 	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/google/go-containerregistry/pkg/registry"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
@@ -237,96 +232,6 @@ layer(name="app", base="busybox", steps=[add("make", "/app")])
 	if got := imageFile(t, img, "/app/file.txt"); got != "inside\n" {
 		t.Errorf("/app/file.txt = %q, want the file from the container", got)
 	}
-}
-
-func TestPush(t *testing.T) {
-	requireBuildah(t)
-	// The executor pushes by default; the client pushes with --push-from=client.
-	// Locally both are this process.
-	for _, from := range []string{"executor", "client"} {
-		t.Run(from, func(t *testing.T) {
-			_, host := insecureRegistry(t, nil)
-			image := host + "/team/app:v1"
-
-			r := vamos(t, project(t, helloBuild), "push", "app", image, "--push-from", from, "--tls-verify=false",
-				"-C", projectDir).succeeds(t)
-			if !strings.Contains(r.stdout, image) {
-				t.Errorf("stdout = %q, want it to name %s", r.stdout, image)
-			}
-
-			ref, err := name.ParseReference(image, name.Insecure)
-			if err != nil {
-				t.Fatal(err)
-			}
-			img, err := remote.Image(ref)
-			if err != nil {
-				t.Fatalf("pulling pushed image: %v", err)
-			}
-			if got, want := imageCmd(t, img), []string{"echo", "hello from vamos"}; !slices.Equal(got, want) {
-				t.Errorf("command = %q, want %q", got, want)
-			}
-			if got := imageFile(t, img, "/data/hello.txt"); got != "hello, file\n" {
-				t.Errorf("/data/hello.txt = %q, want the source file", got)
-			}
-		})
-	}
-}
-
-// TestTLSVerifyIsTheClients checks that --tls-verify applies to the client's own registry access alone:
-// against a registry over plain HTTP that registries.conf doesn't mark insecure, a push from the client
-// with --tls-verify=false succeeds, while the executor's push fails whatever the flag says.
-func TestTLSVerifyIsTheClients(t *testing.T) {
-	requireBuildah(t)
-	server := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))
-	t.Cleanup(server.Close)
-	host := strings.TrimPrefix(server.URL, "http://")
-	fsys := project(t, helloBuild)
-	vamos(t, fsys, "push", "app", host+"/app", "--tls-verify=false", "-C", projectDir).
-		failsWith(t, false, "pushing to "+host+"/app:latest", "HTTP response to HTTPS client")
-	vamos(t, fsys, "push", "app", host+"/app", "--tls-verify=false", "--push-from=client", "-C", projectDir).
-		succeeds(t)
-}
-
-func TestPushWithAuthFile(t *testing.T) {
-	requireBuildah(t)
-	reg := registry.New(registry.Logger(log.New(io.Discard, "", 0)))
-	_, host := insecureRegistry(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if user, password, ok := r.BasicAuth(); !ok || user != "vamos" || password != "secret" {
-			w.Header().Set("WWW-Authenticate", `Basic realm="test"`)
-			http.Error(w, `{"errors":[{"code":"UNAUTHORIZED","message":"log in"}]}`, http.StatusUnauthorized)
-			return
-		}
-		reg.ServeHTTP(w, r)
-	}))
-	t.Setenv("REGISTRY_AUTH_FILE", filepath.Join(t.TempDir(), "auth.json"))
-	auth := base64.StdEncoding.EncodeToString([]byte("vamos:secret"))
-	content := `{"auths": {"` + host + `": {"auth": "` + auth + `"}}}`
-	if err := os.WriteFile(os.Getenv("REGISTRY_AUTH_FILE"), []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	vamos(t, project(t, helloBuild), "push", "app", host+"/app", "--tls-verify=false", "-C", projectDir).succeeds(t)
-}
-
-func TestPushFailures(t *testing.T) {
-	requireBuildah(t)
-	// A registry over plain HTTP that registries.conf doesn't mark insecure.
-	server := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))
-	t.Cleanup(server.Close)
-	host := strings.TrimPrefix(server.URL, "http://")
-
-	t.Run("registry over HTTP not marked insecure", func(t *testing.T) {
-		vamos(t, project(t, helloBuild), "push", "app", host+"/app", "-C", projectDir).
-			failsWith(t, false, "pushing to "+host+"/app:latest", "HTTP response to HTTPS client")
-	})
-	t.Run("registry over HTTP, from the client without --tls-verify=false", func(t *testing.T) {
-		vamos(t, project(t, helloBuild), "push", "app", host+"/app", "--push-from=client", "-C", projectDir).
-			failsWith(t, false, "pushing to "+host+"/app:latest", "HTTP response to HTTPS client")
-	})
-	t.Run("registry not running", func(t *testing.T) {
-		vamos(t, project(t, helloBuild), "push", "app", "127.0.0.1:1/app", "--tls-verify=false", "-C", projectDir).
-			failsWith(t, false, "pushing to 127.0.0.1:1/app:latest", "connection refused")
-	})
 }
 
 func TestLoad(t *testing.T) {
