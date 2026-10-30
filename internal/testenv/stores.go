@@ -143,6 +143,19 @@ func (s *Stores) ImageIDs(keep func(storage.Image) bool) (map[string]bool, error
 	return ids, err
 }
 
+// ContainerIDs returns the IDs of the containers in the container store, such as one that a step runs in.
+func (s *Stores) ContainerIDs() (map[string]bool, error) {
+	ids := map[string]bool{}
+	err := s.WithStore(func(store storage.Store) error {
+		containers, err := store.Containers()
+		for _, c := range containers {
+			ids[c.ID] = true
+		}
+		return err
+	})
+	return ids, err
+}
+
 // WithStore calls use with the container store, open only until use returns,
 // since each vamos run opens and shuts it too.
 func (s *Stores) WithStore(use func(storage.Store) error) error {

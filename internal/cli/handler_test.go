@@ -195,3 +195,8 @@ func TestWatchJobWriteFailure(t *testing.T) {
 		})
 	}
 }
+
+// writerFunc is an io.Writer that calls itself.
+type writerFunc func(p []byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }

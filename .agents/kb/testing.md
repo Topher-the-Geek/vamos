@@ -192,6 +192,7 @@ and its steps' observations;
 [steps_destination_test.go](../../internal/features/steps_destination_test.go) the folder a command sends to;
 [steps_trace_test.go](../../internal/features/steps_trace_test.go) the trace that `--trace` writes, read as Perfetto
 reads it;
+[steps_interrupt_test.go](../../internal/features/steps_interrupt_test.go) interrupting a command, as Ctrl-C does;
 and [steps_cache_test.go](../../internal/features/steps_cache_test.go) the build cache and the container store as
 other programs see them: steps that damage or hold them, as something outside vamos might, and see what they hold,
 on stores of the scenario's own.

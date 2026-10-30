@@ -612,3 +612,22 @@ func (w *world) ThenTheSuitesStoresHoldWhatTheyDid() {
 		w.t.Errorf("the suite's stores held %v, and now %v, want them as they were", w.suiteBefore, now)
 	}
 }
+
+// ThenTheCommandLeavesNoContainer checks that the container store holds no container that it didn't when the
+// scenario started: that the commands removed those that their steps ran in.
+// It stops the scenario if the scenario doesn't build, and so noted none.
+func (w *world) ThenTheCommandLeavesNoContainer() {
+	w.t.Helper()
+	if w.containers == nil {
+		w.t.Fatal("the scenario doesn't build, so it noted no containers when it started")
+	}
+	now, err := w.stores.ContainerIDs()
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	for id := range now {
+		if !w.containers[id] {
+			w.t.Errorf("the container store holds the container %s, which the command left", id)
+		}
+	}
+}

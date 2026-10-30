@@ -2,6 +2,7 @@ package features
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -21,6 +22,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/authn"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/spf13/afero"
+	"go.podman.io/storage"
 )
 
 // The steps are split by subject, in files that sort together:
@@ -28,7 +30,9 @@ import (
 // steps_given_test.go the project's Given steps; steps_commands_test.go the When steps and their options;
 // steps_output_test.go what a command reported, its targets' statuses and its steps' observations;
 // steps_image_test.go the image saved;
-// and steps_destination_test.go the folder a command sends to, and the files exported there.
+// steps_destination_test.go the folder a command sends to, and the files exported there;
+// steps_trace_test.go the trace that --trace writes; steps_interrupt_test.go interrupting a command;
+// and steps_cache_test.go the build cache and the container store as other programs see them.
 
 // files are regular files' contents, by path: what a project holds, or what to expect of an image or a folder.
 type files map[string]string
@@ -88,6 +92,10 @@ type world struct {
 	loadRan      bool              // whether the last command loaded into Docker, or tried to
 	traceTo      string            // where the command running is to write its trace, if traced() asked it to
 	traceAt      string            // where tracedTo asked the command running to write its trace, with placeholders
+	interruptOn  string            // what the command running prints that interruptedOnceItPrints waits for
+	interruptIn  time.Duration     // how long interruptedAfter lets the command running run
+	containers   map[string]bool   // the containers in the store when the scenario started, if it builds
+	took         time.Duration     // how long the last command ran
 	tracePath    string            // where the last command wrote its trace, if traced() asked it to
 	trace        *trace            // the trace there, once a step has read it
 	graph        *graph.Graph      // the graph that WhenIShowTheGraph showed last
@@ -107,16 +115,33 @@ type world struct {
 }
 
 // newBuildingWorld starts a scenario that builds, which it skips where buildah can't,
-// noting the store's images so that ThenNoImageIsLeftBehind can tell those the scenario leaves.
+// noting the store's images and containers, so that ThenNoImageIsLeftBehind and ThenTheCommandLeavesNoContainer
+// can tell those the scenario leaves.
 func newBuildingWorld(t *testing.T) *world {
 	t.Helper()
 	testenv.RequireBuildah(t)
 	w := newWorld(t)
-	before, err := w.stores.UnnamedImages()
+	err := w.stores.WithStore(func(store storage.Store) error {
+		images, err := store.Images()
+		if err != nil {
+			return err
+		}
+		w.before = map[string]bool{}
+		for _, img := range images {
+			if len(img.Names) == 0 {
+				w.before[img.ID] = true
+			}
+		}
+		containers, err := store.Containers()
+		w.containers = map[string]bool{}
+		for _, c := range containers {
+			w.containers[c.ID] = true
+		}
+		return err
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	w.before = before
 	return w
 }
 
@@ -159,7 +184,15 @@ func (w *world) execute(fsys afero.Fs, args []string) {
 	w.tracePath, w.traceTo = w.traceTo, ""
 	cmd := cli.NewRootCommand(cli.Config{Fs: fsys, Store: &w.stores.Options})
 	var stdout, stderr bytes.Buffer
-	cmd.SetOut(&stdout)
+	ctx, cancel := context.WithCancel(w.t.Context())
+	defer cancel()
+	if w.interruptOn != "" {
+		cmd.SetOut(&interrupter{out: &stdout, text: []byte(w.interruptOn), cancel: cancel})
+	} else {
+		cmd.SetOut(&stdout)
+	}
+	interruptIn := w.interruptIn
+	w.interruptOn, w.interruptIn = "", 0 // for this command alone
 	cmd.SetErr(&stderr)
 	cmd.SetArgs(append([]string{}, args...)) // never nil, which would make Cobra read the test's own arguments
 	w.ran = true
@@ -167,7 +200,13 @@ func (w *world) execute(fsys afero.Fs, args []string) {
 		w.cachedBefore = w.cached()
 	}
 	asked := w.asked.Load()
-	w.err = cmd.ExecuteContext(w.t.Context())
+	if interruptIn > 0 { // as the command starts, after anything slow beforehand
+		timer := time.AfterFunc(interruptIn, cancel)
+		defer timer.Stop()
+	}
+	start := time.Now()
+	w.err = cmd.ExecuteContext(ctx)
+	w.took = time.Since(start)
 	w.askedDuring = w.asked.Load() - asked
 	if w.ownStores {
 		w.cachedAfter = w.cached()

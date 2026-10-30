@@ -71,9 +71,12 @@ Delete this file when every box is ticked.
   writes; Perfetto's import still skips without `trace_processor_shell`.
   `TestSecretsNotInTrace` is a scenario of the secrets feature.
   `TestFinishTrace`, of a trace whose folder goes while the command runs, is decided below.
-- [ ] **Interruption and failure logs.**
-  `TestInterrupted`, `TestCancelLoad`, `TestCancelConfigure`, `TestFailedStepLog`, `TestFailedOutputLog`.
-  A feature for interrupting a build and for what a failure reports.
+- [x] **Interruption and failure logs.**
+  `TestInterrupted`, `TestCancelLoad` and `TestCancelConfigure` are scenarios of the interrupt feature;
+  `TestDeadlineInBuildFile` keeps their deadline, decided below.
+  `TestFailedStepLog` and `TestFailedOutputLog`, of the log that an executor's `api.Failure` names, which the command
+  line never prints, and which a coordinator replays to jobs that share a failed attempt, are internal contracts,
+  below.
 - [ ] **Failures to write output.**
   `TestOutputWriteFailure`, `TestBuildHandlerWithoutRoot`, `TestWatchJobWriteFailure`, `TestPruneHandlerWithoutRoot`.
   Scenarios with a step that makes standard output fail.
@@ -93,6 +96,7 @@ Delete this file when every box is ticked.
   `cachetest.Content` and `cachetest.Records` (`TestContentStore`, `TestRecordStore`, `TestContentStoreContract`),
   `apitest.Contract` (`TestContract`, `TestContractJSON`, `TestContractHTTP`), `TestErrorsCross`,
   `TestFailureCrosses`, `TestWorkerFailureCrosses`, `TestReleaseCrosses`, `TestGraphValidate`, `TestGraphRoundTrip`,
+  `TestFailedStepLog`, `TestFailedOutputLog`,
   `TestGraphExamples` and `internal/api`.
 - [ ] **The test harness.**
   `internal/testenv`, and the features package's own tests of its matchers and image reader.
@@ -107,6 +111,7 @@ Delete this file when every box is ticked.
   `internal/cli`'s `TestGraphConfigurations`, of the graph an index of two platforms configures,
   `TestFinishTrace`, of which error a command reports when its trace can't be written after all,
   `TestExplicitStoreRoots` and `TestDefaultStore`, of the container store vamos opens,
+  `TestDeadlineInBuildFile`, of a deadline that a program embedding vamos sets, which a user's interrupt never is,
   `TestResultProvenance` and `TestPlatforms`, of the provenance a result records,
   and `TestImageIdentityRoundTrip`, of the names a pull gives an image in the store,
   `internal/run`'s `TestExportRepairsCorruptBlob`,

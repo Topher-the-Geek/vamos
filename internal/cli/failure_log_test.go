@@ -3,10 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
-	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/Topher-the-Geek/vamos/internal/api"
 	"github.com/Topher-the-Geek/vamos/internal/cache"
@@ -18,42 +16,6 @@ import (
 
 	"github.com/spf13/afero"
 )
-
-// TestCancelLoad checks that interrupting a build while a BUILD file runs stops it promptly,
-// even one that would never end, and reports the interruption rather than a mistake in the file.
-func TestCancelLoad(t *testing.T) {
-	// Starlark has no while loop, and loops only within functions; a range this long runs for days.
-	fsys := project(t, map[string]string{"BUILD": pullBusybox +
-		"def spin():\n    for i in range(1 << 40):\n        pass\nspin()\n"})
-	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
-	defer cancel()
-	start := time.Now()
-	r := vamosWithOutput(t, fsys, ctx, nil, "build", "busybox", "-C", projectDir)
-	if !errors.Is(r.err, context.DeadlineExceeded) {
-		t.Errorf("vamos = %v, want the context's %v", r.err, context.DeadlineExceeded)
-	}
-	if took := time.Since(start); took > 5*time.Second {
-		t.Errorf("the interrupted load took %s", took)
-	}
-}
-
-// TestCancelConfigure checks that interrupting a target's configuration, a function of ctx that never ends,
-// stops it promptly and reports the interruption rather than a mistake in the file.
-func TestCancelConfigure(t *testing.T) {
-	fsys := project(t, map[string]string{"BUILD": pullBusybox +
-		"def spin(ctx):\n    for i in range(1 << 40):\n        pass\n" +
-		`layer(name="app", base="busybox", steps=spin)` + "\n"})
-	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
-	defer cancel()
-	start := time.Now()
-	r := vamosWithOutput(t, fsys, ctx, nil, "build", "app", "-C", projectDir)
-	if !errors.Is(r.err, context.DeadlineExceeded) {
-		t.Errorf("vamos = %v, want the context's %v", r.err, context.DeadlineExceeded)
-	}
-	if took := time.Since(start); took > 5*time.Second {
-		t.Errorf("the interrupted configuration took %s", took)
-	}
-}
 
 // TestFailedStepLog checks that what a failed step printed is kept as a log blob that the failure names,
 // readable after the job has ended.

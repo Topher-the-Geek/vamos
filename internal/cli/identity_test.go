@@ -120,3 +120,17 @@ layer(
 )
 `, name, nonce)
 }
+
+// helloBuild copies a source file into busybox and sets a command that echoes.
+var helloBuild = map[string]string{
+	"BUILD": pullBusybox + `
+glob(name="hello", include=["hello.txt"])
+layer(
+    name="app",
+    base="busybox",
+    steps=[add("hello", "/data")],
+    command=["echo", "hello from vamos"],
+)
+`,
+	"hello.txt": "hello, file\n",
+}
