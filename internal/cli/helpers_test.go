@@ -207,19 +207,6 @@ func imageFile(t *testing.T, img v1.Image, path string) string {
 	return content
 }
 
-// imagePaths returns the paths of the files in img's filesystem under dir.
-func imagePaths(t *testing.T, img v1.Image, dir string) []string {
-	t.Helper()
-	var paths []string
-	walkImage(t, img, func(hdr *tar.Header, r io.Reader) bool {
-		if path := imagePath(hdr); strings.HasPrefix(path, dir+"/") {
-			paths = append(paths, path)
-		}
-		return false
-	})
-	return paths
-}
-
 // walkImage calls visit with each entry in img's flattened filesystem, until it returns true.
 // It reports whether visit did so.
 func walkImage(t *testing.T, img v1.Image, visit func(*tar.Header, io.Reader) bool) bool {

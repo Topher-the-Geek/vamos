@@ -290,6 +290,8 @@ For runtime or shell expansion, put the expression inside a command passed to `r
 ### `workdir(path)`
 
 Create an absolute directory and use it for later commands and the resulting image's working directory.
+As a Dockerfile's `WORKDIR` does, it makes the directory for the image's user, so that later commands, which run as
+that user, can write to it.
 The path can refer to environment variables, for example `workdir("$HOME/app")`.
 Both `workdir()` paths and `add()` destinations must be absolute after expansion.
 
@@ -345,6 +347,7 @@ In each include, every path component before the first wildcard must exist and m
 even when `allow_no_files = True`.
 For an include without wildcards, this applies to the entire path, including a literal file such as `main.go`.
 For example, `include = ["link"]` rejects a symbolic link.
+The project's own directory may be reached through a link, as a shell's `$PWD` can be.
 Links matched by wildcards or found within an included directory are copied as links and never followed.
 A task's `source` may itself traverse links, resolved within its container.
 

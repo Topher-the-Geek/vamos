@@ -3,6 +3,8 @@ package features
 import (
 	"fmt"
 	"testing"
+
+	"github.com/Topher-the-Geek/vamos/internal/testenv"
 )
 
 // newLayerWorld starts a scenario of the layer feature, from its background.
@@ -184,6 +186,37 @@ func TestLayer_StepsApplyInOrder(t *testing.T) {
 		w.ThenTheImageHasTheDirectory("/data")
 		w.ThenTheImageHoldsNothing(under("/data"))
 		w.ThenTheImageWorkingDirectoryIs("/data")
+	})
+
+	t.Run("A layer works in its base's working directory", func(t *testing.T) {
+		w := newLayerWorld(t)
+		w.GivenTheBuildFileDeclares(`
+			layer(name="base", base="busybox", steps=[workdir("/srv/app")])
+			layer(name="app", base="base", steps=[run(["sh", "-c", "pwd > /where.txt"])])
+		`)
+		w.WhenISave("app")
+		w.ThenItSucceeds()
+		w.ThenTheImageHoldsAtLeast(files{"/where.txt": "/srv/app\n"})
+		w.ThenTheImageWorkingDirectoryIs("/srv/app")
+	})
+
+	t.Run("workdir() makes its directory for the image's user, who can write to it", func(t *testing.T) {
+		w := newLayerWorld(t)
+		w.GivenARegistry()
+		w.WhenIPush("busybox", "<registry>/nonroot:v1") // a pull can be sent as it is
+		w.ThenItSucceeds()
+		w.GivenTheRegistrysImageRunsAs("<registry>/nonroot:v1", "1000:1000")
+		w.GivenTheBuildFileDeclares(fmt.Sprintf(`
+			pull(name="nonroot", image="<registry>/nonroot", tag="v1")
+			layer(name="app", base="nonroot", steps=[workdir("/work/dir"), run(["sh", "-c", "echo %s > made.txt"])])
+		`, testenv.NewNonce()))
+		w.WhenISave("app")
+		w.ThenItSucceeds()
+		w.ThenTheImageOwnersAre(owners{
+			"/work":              "1000:1000",
+			"/work/dir":          "1000:1000",
+			"/work/dir/made.txt": "1000:1000",
+		})
 	})
 }
 

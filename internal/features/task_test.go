@@ -129,6 +129,24 @@ func TestTask_OutputIsSelectedBeneathSource(t *testing.T) {
 		w.ThenItSucceeds()
 		w.ThenTheExportHolds(files{})
 	})
+
+	t.Run("A source that is a link is resolved within the container", func(t *testing.T) {
+		w := newTaskWorld(t)
+		marker := "/vamos-test-" + testenv.NewNonce() // which only the container has
+		w.GivenTheBuildFileDeclares(fmt.Sprintf(`
+			task(
+			    name="make",
+			    base="busybox",
+			    steps=[run(["sh", "-c", "mkdir -p %[1]s && echo inside > %[1]s/file.txt && ln -s %[1]s /out"])],
+			    source="/out",
+			    include=["file.txt"],
+			)
+			layer(name="app", base="busybox", steps=[add("make", "/app")])
+		`, marker))
+		w.WhenISave("app")
+		w.ThenItSucceeds()
+		w.ThenTheImageHolds(under("/app"), files{"/app/file.txt": "inside\n"})
+	})
 }
 
 // TestTask_ContainerIsDiscarded specifies that a task's container is discarded.

@@ -4,6 +4,15 @@ import (
 	"testing"
 )
 
+// newEnvWorld starts a scenario of the env feature that builds, from its background, which it skips where buildah
+// can't. Its project pulls busybox.
+func newEnvWorld(t *testing.T) *world {
+	t.Helper()
+	w := newBuildingWorld(t)
+	w.GivenAProjectThatPullsBusybox()
+	return w
+}
+
 // newEnvMistakeWorld starts a scenario of the env feature whose env() or build_env() is given wrongly,
 // which loading catches before anything runs, so that it needs no buildah.
 // env() and build_env() set string-valued variables, given by name, for later steps in the target,
@@ -135,4 +144,86 @@ func TestEnv_DollarIsFollowedByANameOrBraces(t *testing.T) {
 			w.ThenNothingIsSaved()
 		})
 	}
+}
+
+// TestEnv_ValuesExpandTheVariablesBeforeTheCall specifies that values expand $NAME and ${NAME} using the environment
+// before that call, that unset variables expand to an empty string, and that $$ produces a literal dollar sign;
+// add() destinations and workdir() paths expand them too.
+func TestEnv_ValuesExpandTheVariablesBeforeTheCall(t *testing.T) {
+	t.Run("Each value sees the variables as they were before its call", func(t *testing.T) {
+		w := newEnvWorld(t)
+		w.GivenTheBuildFileDeclares(`
+			layer(
+			    name="app",
+			    base="busybox",
+			    steps=[
+			        env(MODE="image"),
+			        build_env(MODE="build", TOOL="cc"),
+			        run(["sh", "-c", "echo $MODE $TOOL > /during.txt"]),
+			        env(MODE="final"),
+			        env(PATH="/app/bin:$PATH", MODE="${MODE}2", LABEL="$MODE-$TOOL-$UNSET-$$5"),
+			        run(["sh", "-c", "echo $PATH $MODE $LABEL > /expanded.txt"]),
+			    ],
+			)
+		`)
+		w.WhenISave("app")
+		w.ThenItSucceeds()
+		w.ThenTheImageHoldsAtLeast(files{
+			"/during.txt": "build cc\n",
+			"/expanded.txt": "/app/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin " +
+				"final2 final-cc--$5\n",
+		})
+		w.ThenTheImageEnvironmentSets(environment{"MODE": "final2", "LABEL": "final-cc--$5"})
+		w.ThenTheImageEnvironmentDoesNotSet("TOOL")
+	})
+
+	t.Run("Variables given as a dict, by names it can't give as arguments, are set too", func(t *testing.T) {
+		w := newEnvWorld(t)
+		w.GivenTheBuildFileDeclares(`
+			layer(
+			    name="app",
+			    base="busybox",
+			    steps=[
+			        env(GREETING="hello", **{"NAME-WITH-DASHES": "value"}),
+			        run(["sh", "-c", "printenv NAME-WITH-DASHES > /dashes.txt"]),
+			    ],
+			)
+		`)
+		w.WhenISave("app")
+		w.ThenItSucceeds()
+		w.ThenTheImageHoldsAtLeast(files{"/dashes.txt": "value\n"})
+		w.ThenTheImageEnvironmentSets(environment{"GREETING": "hello", "NAME-WITH-DASHES": "value"})
+	})
+
+	t.Run("An add() destination and a workdir() path expand variables", func(t *testing.T) {
+		w := newEnvWorld(t)
+		w.GivenTheBuildFileDeclares(`
+			glob(name="conf", include=["app.conf"])
+			task(
+			    name="generated",
+			    base="busybox",
+			    steps=[run(["sh", "-c", "mkdir /out && echo generated > /out/app.conf"])],
+			    source="/out",
+			    include=["app.conf"],
+			)
+			layer(
+			    name="app",
+			    base="busybox",
+			    steps=[
+			        run(["test", "!", "-e", "/etc/app"]),  # so that what is there, add() put there
+			        build_env(CONF="/etc", ROOT="/srv/"),
+			        add("conf", "${CONF}/app"),
+			        add("generated", "${CONF}/app"),
+			        workdir("$ROOT/app/"),
+			        run(["sh", "-c", "pwd > where.txt"]),
+			    ],
+			)
+		`)
+		w.GivenTheProjectHolds(files{"app.conf": "from the project\n"})
+		w.WhenISave("app")
+		w.ThenItSucceeds()
+		w.ThenTheImageHolds(under("/etc/app"), files{"/etc/app/app.conf": "generated\n"})
+		w.ThenTheImageHolds(under("/srv"), files{"/srv/app/where.txt": "/srv/app\n"})
+		w.ThenTheImageWorkingDirectoryIs("/srv/app")
+	})
 }

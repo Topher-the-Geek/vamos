@@ -307,6 +307,21 @@ func TestGlob_LinksAreCopiedAsLinks(t *testing.T) {
 		w.ThenTheImageHoldsAtLeast(files{"/app/README.md": "# app"})
 		w.ThenTheImageLinks(links{"/app/INDEX.md": "README.md"})
 	})
+
+	t.Run("A project reached through a link is read where it is, once for each file", func(t *testing.T) {
+		// "-vendor" sorts before ".", which holds it too: its link is copied once, as copying it twice would fail.
+		w := newGlobWorld(t)
+		w.GivenTheProjectIsReachedThroughALink()
+		w.GivenTheBuildFileDeclares(`
+			glob(name="all", include=["-vendor", "."])
+			layer(name="app", base="busybox", steps=[add("all", "/app")])
+		`)
+		w.GivenTheProjectLinks(links{"-vendor/link": "../BUILD"})
+		w.WhenISave("app")
+		w.ThenItSucceeds()
+		w.ThenTheImagePathsAre(under("/app"), "/app/-vendor", "/app/-vendor/link", "/app/BUILD")
+		w.ThenTheImageLinks(links{"/app/-vendor/link": "../BUILD"})
+	})
 }
 
 // TestGlob_IncludesMustNotBeLinks specifies that in each include, every path component before the first wildcard

@@ -356,16 +356,9 @@ func (w *world) GivenTheRegistryHoldsAnIndex(image, label string, platformNames 
 	w.t.Helper()
 	var index v1.ImageIndex = empty.Index
 	for _, platform := range platformNames {
-		img := w.heldImage(label, platform)
-		p, err := platforms.Parse(platform)
-		if err != nil {
-			w.t.Fatal(err)
-		}
 		index = mutate.AppendManifests(index, mutate.IndexAddendum{
-			Add: img,
-			Descriptor: v1.Descriptor{
-				Platform: &v1.Platform{OS: p.OS, Architecture: p.Architecture, Variant: p.Variant},
-			},
+			Add:        w.heldImage(label, platform),
+			Descriptor: v1.Descriptor{Platform: w.parsedPlatform(platform)},
 		})
 	}
 	if err := remote.WriteIndex(w.registryRef(image), index, w.readingTheRegistry()...); err != nil {
@@ -410,6 +403,16 @@ func (w *world) heldImage(label, platform string) v1.Image {
 	}
 	w.held[key] = img
 	return img
+}
+
+// parsedPlatform returns platform, as os/arch[/variant] names it, failing the scenario if it isn't one.
+func (w *world) parsedPlatform(platform string) *v1.Platform {
+	w.t.Helper()
+	p, err := platforms.Parse(platform)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	return &v1.Platform{OS: p.OS, Architecture: p.Architecture, Variant: p.Variant}
 }
 
 // heldKey returns the key of the image that label names for platform, normalized, among those that Given steps
@@ -458,5 +461,36 @@ func (w *world) GivenStoresOfTheScenariosOwn() {
 			w.t.Fatal(err)
 		}
 		w.before = before
+	}
+}
+
+// GivenTheProjectIsReachedThroughALink keeps the project on disk in a directory, project-real beside it, that
+// /project, the directory that commands run in, is a symbolic link to, as a shell's $PWD can be.
+func (w *world) GivenTheProjectIsReachedThroughALink() {
+	w.t.Helper()
+	w.linked = true
+}
+
+// GivenTheRegistrysImageRunsAs replaces the image at the image name image, in which <registry> stands for the
+// scenario's registry, with one that runs as user, such as "1000:1000", rather than as it did.
+// If the name names an index, the new image is this machine's image from it, and the name names it alone.
+func (w *world) GivenTheRegistrysImageRunsAs(image, user string) {
+	w.t.Helper()
+	ref := w.registryRef(image)
+	img, err := remote.Image(ref, append(w.readingTheRegistry(),
+		remote.WithPlatform(*w.parsedPlatform(thisPlatform())))...)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	config, err := img.ConfigFile()
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	config.Config.User = user
+	if img, err = mutate.ConfigFile(img, config); err != nil {
+		w.t.Fatal(err)
+	}
+	if err := remote.Write(ref, img, w.readingTheRegistry()...); err != nil {
+		w.t.Fatal(err)
 	}
 }

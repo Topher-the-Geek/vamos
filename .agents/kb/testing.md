@@ -122,7 +122,8 @@ a mistake that loading a BUILD file catches is checked with `ThenItFailsWith`, i
 Scenarios run the command line in process, through `cli.NewRootCommand`,
 on the suite's stores, or, for one that prunes them with `WhenIPrune`, stores of its own that
 `GivenStoresOfTheScenariosOwn` gives it, and on a project held in memory,
-or on disk once `GivenTheProjectLinks` gives it symbolic links or `WhenISave` saves into it with `intoTheProject`.
+or on disk once `GivenTheProjectLinks` gives it symbolic links, `GivenTheProjectIsReachedThroughALink` makes its
+directory one, or `WhenISave` saves into it with `intoTheProject`.
 They observe only what a user can:
 the command's standard output, where its statuses and steps' output go, its error,
 the image it saved, the folder it exported and the images left in the store.

@@ -48,9 +48,9 @@ Delete this file when every box is ticked.
   `TestPlatformMistakes`, `TestPlatformFailures` and what `TestPlatforms` builds are scenarios of the platforms
   feature. `TestPlatforms` itself stays, for the provenance it reads from the cache's files, until the cache moves;
   `TestExecPlatformChoice`, a choice among a coordinator's platforms, moves with remote work.
-- [ ] **Steps and task outputs.**
-  `TestIncludeProject`, `TestSteps`, `TestWorkdirUser`, `TestTaskOutputLinks`.
-  Tables of examples in the run, add and task features; rows that don't build run without buildah.
+- [x] **Steps and task outputs.**
+  `TestIncludeProject`, `TestSteps`, `TestWorkdirUser` and `TestTaskOutputLinks` are scenarios of the glob, env,
+  layer and task features.
 - [ ] **Export details.**
   `internal/finish`: `TestExportLinks`, `TestExportOwners`, `TestExportSetuid`, `TestExportReplace`,
   `TestExportReplacesOnlyFolders`, `TestExportIntoEmptyFolder`, `TestExportFolderFilledDuringBuild`.

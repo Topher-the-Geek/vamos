@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"maps"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -55,6 +56,7 @@ type world struct {
 	dir     string          // the directory within the project that commands run in, with -C
 	cDir    string          // the directory that -C names as given, rather than dir, if a step says
 	onDisk  bool            // whether the project is kept on disk, under root, even without links
+	linked  bool            // whether the project's directory is a symbolic link to project-real beside it
 	root    string          // the folder that holds the project, if it is on disk
 	before  map[string]bool // the store's unnamed images when the scenario began, if it builds
 
@@ -153,12 +155,21 @@ func (w *world) execute(fsys afero.Fs, args []string) {
 func (w *world) project() afero.Fs {
 	w.t.Helper()
 	var fsys afero.Fs
-	if len(w.links) > 0 || w.onDisk {
+	if len(w.links) > 0 || w.onDisk || w.linked {
 		links := links{}
 		for path, target := range w.links {
 			links[path] = w.atOutside(target)
 		}
 		fsys, w.root = testenv.DiskProject(w.t, w.files, links)
+		if w.linked {
+			project := filepath.Join(w.root, testenv.ProjectDir)
+			if err := os.Rename(project, project+"-real"); err != nil {
+				w.t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Base(project)+"-real", project); err != nil {
+				w.t.Fatal(err)
+			}
+		}
 	} else {
 		fsys = testenv.Project(w.t, w.files)
 	}
