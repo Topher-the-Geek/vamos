@@ -129,6 +129,17 @@ func TestTargets_LocalDependenciesAreDeclaredFirst(t *testing.T) {
 				`or an earlier pull() or layer(); earlier targets are "busybox"`,
 		},
 		{
+			name:  "A base that dep() names, declared later, fails",
+			build: "layer(name=\"app\", base=dep(\"deps\"))\nlayer(name=\"deps\", base=\"busybox\")",
+			error: `/project/BUILD:2:6: layer: base "deps" is not "scratch" or an earlier pull() or layer()`,
+		},
+		{
+			name: "A base declared later fails, even beside a function of ctx",
+			build: "layer(name=\"app\", base=\"deps\", command=lambda ctx: [])\n" +
+				"layer(name=\"deps\", base=\"busybox\")",
+			error: `/project/BUILD:2:6: layer: base "deps" is not "scratch" or an earlier pull() or layer()`,
+		},
+		{
 			name: "A misspelled add() source fails, naming the earlier globs and tasks",
 			build: "glob(name=\"code\", include=[\"app.sh\"])\n" +
 				`layer(name="app", base="busybox", steps=[add("cod", "/app")])`,
@@ -188,6 +199,17 @@ func TestTargets_KindsHaveTheirUses(t *testing.T) {
 			name:  "A pull as an add() source fails",
 			build: `layer(name="app", base="busybox", steps=[add("busybox", "/app")])`,
 			error: `/project/BUILD:2:45: add: source "busybox" is a pull(), not a glob() or task()`,
+		},
+		{
+			name:  "A glob that dep() names as a base fails",
+			build: "glob(name=\"code\", include=[\"app.sh\"])\n" + `layer(name="app", base=dep("code"))`,
+			error: `/project/BUILD:3:6: layer: base "code" is a glob(), not a pull() or layer()`,
+		},
+		{
+			name: "A task without output as an add() source fails, even with its source given by a function",
+			build: `task(name="make", params={"out": ""}, base="busybox", source=lambda ctx: ctx.out)` + "\n" +
+				`layer(name="app", base="busybox", steps=[add("make", "/app")])`,
+			error: `/project/BUILD:3:45: add: source "make" is a task() without output; give it source and include`,
 		},
 		{
 			name: "A task without output as an add() source fails",
@@ -264,4 +286,74 @@ func TestTargets_GlobsAreNotNamedByCommands(t *testing.T) {
 		w.ThenItFailsWith(`"code" is a glob(), whose files are read by the targets that add them`)
 		w.ThenNoTargetRan()
 	})
+}
+
+// newTargetWorld starts a scenario of the targets feature that builds, which it skips where buildah can't.
+// Its project pulls busybox.
+func newTargetWorld(t *testing.T) *world {
+	t.Helper()
+	w := newBuildingWorld(t)
+	w.GivenAProjectThatPullsBusybox()
+	return w
+}
+
+// TestTargets_CyclesAreErrors specifies that references produced by a function of ctx can name later targets,
+// and that dependency cycles are errors, reported at the declaration of the target whose reference closes the cycle,
+// and the configuration that a function of ctx made it in.
+func TestTargets_CyclesAreErrors(t *testing.T) {
+	t.Run("A function of ctx names a target declared after it", func(t *testing.T) {
+		w := newTargetWorld(t)
+		w.GivenTheBuildFileDeclares(`
+			layer(name="app", base=lambda ctx: "later")
+			layer(name="later", base="busybox")
+		`)
+		w.WhenIBuild("app")
+		w.ThenItSucceeds()
+		w.ThenTheTargetsWere(statuses{layer("later"): ranOrReused, layer("app"): ranOrReused})
+	})
+
+	for _, example := range []struct {
+		name  string
+		build string // after the pull of busybox, on line 2
+		error string
+	}{
+		{
+			name: "Targets that use each other through a function fail, naming the cycle",
+			build: `
+				layer(name="a", base=lambda ctx: "b")
+				layer(name="b", base="a")
+				layer(name="app", base="b")
+			`,
+			error: `/project/BUILD:2:6: layer: base "b": targets use each other in a cycle: b -> a -> b ` +
+				"(configuring //:a)",
+		},
+		{
+			name: "Targets that use each other through another configuration fail, naming the cycle",
+			build: `
+				layer(name="a", params={"mode": "release"}, base=lambda ctx: dep("b", mode="debug"))
+				layer(name="b", params={"mode": "release"}, base=dep("a", mode=arg("mode")))
+				layer(name="app", base="a")
+			`,
+			error: `/project/BUILD:3:6: layer: base "a": targets use each other in a cycle: a -> b -> a`,
+		},
+		{
+			name: "Tasks that add each other's output through a function fail, naming the cycle",
+			build: `
+				task(name="a", base="busybox", steps=lambda ctx: [add("b", "/b")], source="/a", include=["."])
+				task(name="b", base="busybox", steps=[add("a", "/a")], source="/b", include=["."])
+				layer(name="app", base="busybox", steps=[add("b", "/app")])
+			`,
+			error: `/project/BUILD:2:5: task: add: source "b": targets use each other in a cycle: b -> a -> b ` +
+				"(configuring //:a)",
+		},
+	} {
+		t.Run(example.name, func(t *testing.T) {
+			w := newTargetMistakeWorld(t)
+			w.GivenTheBuildFileDeclares(example.build)
+			w.WhenISave("app")
+			w.ThenItFailsWith(example.error)
+			w.ThenNoTargetRan()
+			w.ThenNothingIsSaved()
+		})
+	}
 }

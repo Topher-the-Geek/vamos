@@ -16,8 +16,9 @@ Delete this file when every box is ticked.
 - [x] **Mistakes in a BUILD file's targets and steps, and in the targets a command names.**
   `TestBuildFileMistakes` and `TestBuildTargetMistakes` are scenarios of the BUILD file, targets, pull, glob, task,
   add, run, env and secrets features.
-- [ ] **Mistakes in parameters, `--set`, `dep()` and `arg()`.**
-  `TestParamMistakes`, `TestSetMistakes`, `TestDepMistakes`: scenarios of the parameters and targets features.
+- [x] **Mistakes in parameters, `--set`, `dep()` and `arg()`.**
+  `TestParamMistakes`, `TestSetMistakes`, `TestDepMistakes`: scenarios of the parameters, targets, platforms
+  and pull features.
 - [ ] **Mistakes in `load()` and `.star` files.**
   `TestLoadMistakes`: scenarios of the modules feature.
 - [ ] **Mistakes in workspaces.**

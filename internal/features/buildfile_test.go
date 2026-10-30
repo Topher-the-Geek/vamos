@@ -48,6 +48,11 @@ func TestBuildFile_MistakesFailAsItLoads(t *testing.T) {
 			error: `/project/BUILD:3:6: layer: unexpected keyword argument "comand"`,
 		},
 		{
+			name:  "A misspelled argument is unexpected beside a function of ctx",
+			build: `layer(name="app", base="busybox", comand=lambda ctx: [])`,
+			error: `/project/BUILD:3:6: layer: unexpected keyword argument "comand"`,
+		},
+		{
 			name:  "An argument that layer() no longer takes is unexpected",
 			build: `layer(name="app", base="busybox", sources=["code"], destination="/app")`,
 			error: `/project/BUILD:3:6: layer: unexpected keyword argument "sources"`,

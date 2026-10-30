@@ -990,10 +990,42 @@ func (cr *configurer) enter(l string) error {
 		for _, p := range append(slices.Clone(cr.path[i:]), l) {
 			cycle = append(cycle, cr.w.display(p))
 		}
-		return fmt.Errorf("targets use each other in a cycle: %s", strings.Join(cycle, " -> "))
+		return &cycleError{cycle: cycle}
 	}
 	cr.path = append(cr.path, l)
 	return nil
+}
+
+// cycleError reports targets that use each other in a cycle, found as they are configured.
+type cycleError struct {
+	cycle []string // the targets' labels, as displayed, the first again at the end
+	// The declaration of the target whose reference closes the cycle, and the reference, such as base "b",
+	// once that target has said; and its configuration, if a function of ctx made the reference.
+	at, configuring string
+}
+
+func (e *cycleError) Error() string {
+	msg := "targets use each other in a cycle: " + strings.Join(e.cycle, " -> ")
+	if e.at != "" {
+		msg = e.at + ": " + msg
+	}
+	if e.configuring != "" {
+		msg += " (configuring " + e.configuring + ")"
+	}
+	return msg
+}
+
+// placeCycle gives err, if it is a cycle that no reference has closed yet, the reference that closes it:
+// the target that d declares, configured as cl, names the first of the cycle as what, such as base "b".
+func (cr *configurer) placeCycle(err error, d *declaration, cl confLabel, what string) error {
+	var cycle *cycleError
+	if errors.As(err, &cycle) && cycle.at == "" {
+		cycle.at = fmt.Sprintf("%s: %s: %s", d.pos, d.kind, what)
+		if d.static == nil {
+			cycle.configuring = cr.w.describeConfigured(cl)
+		}
+	}
+	return err
 }
 
 // leave records that the target being configured last is done.
@@ -1059,7 +1091,7 @@ func (cr *configurer) image(cl confLabel) error {
 		return err
 	}
 	if err := cr.image(base); err != nil {
-		return err
+		return cr.placeCycle(err, d, cl, fmt.Sprintf("base %q", t.baseRef.ref))
 	}
 	s.base = base
 	for _, in := range t.steps {
@@ -1070,7 +1102,7 @@ func (cr *configurer) image(cl confLabel) error {
 			}
 			instance := *add
 			if instance.set, err = cr.set(used); err != nil {
-				return err
+				return cr.placeCycle(err, d, cl, fmt.Sprintf("add: source %q", add.target.ref))
 			}
 			in = &instance
 		}

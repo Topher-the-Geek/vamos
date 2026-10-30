@@ -134,11 +134,13 @@ glob(
 )
 ```
 
-Read user parameters as `ctx.<name>`.
+Read user parameters as `ctx.<name>`, so a parameter's name is an identifier.
 The function returns the whole attribute, such as a complete `steps` list or `include` list.
 Individual list entries cannot be functions of `ctx`.
 Such functions configure existing targets; they cannot declare new targets.
 The target's `name` and `params` cannot be functions of `ctx`.
+A mistake that a function makes names the configuration it was given,
+such as `(configuring //:app with mode="debug")`.
 
 ### `dep()` and `arg()`
 
@@ -179,6 +181,9 @@ vamos build bundle --set languages=en,es --set verbose=true --set workers=8
 Lists use comma-separated strings and preserve order.
 An empty value, such as `--set languages=`, gives an empty list.
 Boolean values must be lowercase `true` or `false`.
+An integer parameter's value must be an integer, and that of a parameter with `values` must be one of them,
+or for a list, each of its items.
+Give each parameter once.
 With several targets, `build` applies each flag to every named target declaring that parameter.
 A flag that matches none of the named targets is an error.
 

@@ -119,3 +119,15 @@ func TestPull_ImageIsARepositoryWithoutATagOrDigest(t *testing.T) {
 		})
 	}
 }
+
+// TestPull_TakesNoParameters specifies that pull targets have no user parameters; only their platform configures them.
+func TestPull_TakesNoParameters(t *testing.T) {
+	t.Run("A pull that declares parameters fails", func(t *testing.T) {
+		w := newPullMistakeWorld(t)
+		w.GivenTheBuildFileDeclares(`pull(name="app", image="busybox", params={"mode": "release"})`)
+		w.WhenISave("app")
+		w.ThenItFailsWith("/project/BUILD:2:5: pull: a pull takes no parameters; only its platform configures it")
+		w.ThenNoTargetRan()
+		w.ThenNothingIsSaved()
+	})
+}

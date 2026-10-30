@@ -21,6 +21,16 @@ func newPlatformWorld(t *testing.T) *world {
 	return w
 }
 
+// newPlatformMistakeWorld starts a scenario of the platforms feature whose BUILD file gives a platform wrongly,
+// which loading catches before anything runs, so that it needs no buildah.
+// Its project pulls busybox.
+func newPlatformMistakeWorld(t *testing.T) *world {
+	t.Helper()
+	w := newWorld(t)
+	w.GivenAProjectThatPullsBusybox()
+	return w
+}
+
 // machine returns what `uname -m` prints on this machine, or skips the scenario on a machine the scenarios don't know.
 func machine(t *testing.T) string {
 	t.Helper()
@@ -204,6 +214,65 @@ func TestPlatforms_SavingAnIndexSavesThisMachinesImage(t *testing.T) {
 			w.ThenTheImageIsForThisMachine()
 			w.ThenTheTargetsWere(statuses{layer("app"): ranOrReused}) // this machine's, which names no platform
 			w.ThenTheTargetWasBuiltInOneConfiguration(layer("app"))
+		})
+	}
+}
+
+// TestPlatforms_APlatformIsOsArchAndVariant specifies that a platform is os/arch or os/arch/variant,
+// such as linux/arm64 or linux/arm/v7, or EXEC_PLATFORM for the executor's.
+func TestPlatforms_APlatformIsOsArchAndVariant(t *testing.T) {
+	for _, example := range []struct {
+		name     string
+		platform string
+		error    string // after dep()'s position
+	}{
+		{
+			name:     "A platform that isn't os/arch fails",
+			platform: `"x86"`,
+			error:    `dep: platform "x86": want os/arch or os/arch/variant, such as "linux/arm64"`,
+		},
+		{
+			name:     "A platform with an empty part fails",
+			platform: `"linux//amd64"`,
+			error:    `dep: platform "linux//amd64": want os/arch or os/arch/variant, such as "linux/arm64"`,
+		},
+		{
+			name:     "A platform with a part after its variant fails",
+			platform: `"linux/arm/v7/x"`,
+			error:    `dep: platform "linux/arm/v7/x": want os/arch or os/arch/variant, such as "linux/arm64"`,
+		},
+		{
+			name:     "A platform that isn't a string fails",
+			platform: `64`,
+			error:    `dep: platform is int, want a platform, such as "linux/arm64", or EXEC_PLATFORM`,
+		},
+	} {
+		t.Run(example.name, func(t *testing.T) {
+			w := newPlatformMistakeWorld(t)
+			w.GivenTheBuildFileDeclares(`layer(name="app", base=dep("busybox", platform=` + example.platform + `))`)
+			w.WhenISave("app")
+			w.ThenItFailsWith("/project/BUILD:2:27: " + example.error)
+			w.ThenNoTargetRan()
+			w.ThenNothingIsSaved()
+		})
+	}
+}
+
+// TestPlatforms_GlobsAreSharedAcrossPlatforms specifies that globs are shared across platforms and cannot read
+// ctx.platform, ctx.os, ctx.arch, or ctx.variant.
+func TestPlatforms_GlobsAreSharedAcrossPlatforms(t *testing.T) {
+	for _, field := range []string{"platform", "os", "arch", "variant"} {
+		t.Run("A glob that reads ctx."+field+" fails", func(t *testing.T) {
+			w := newPlatformMistakeWorld(t)
+			w.GivenTheBuildFileDeclares(`
+				glob(name="code", include=lambda ctx: [str(ctx.` + field + `)])
+				layer(name="app", base="busybox", steps=[add("code", "/")])
+			`)
+			w.WhenISave("app")
+			w.ThenItFailsWith("/project/BUILD:2:47: ctx has no " + field + " in a glob, " +
+				"whose files are the same for every platform (configuring //:code)")
+			w.ThenNoTargetRan()
+			w.ThenNothingIsSaved()
 		})
 	}
 }
