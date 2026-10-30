@@ -4,16 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
-	"log"
-	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
-	"sync/atomic"
 	"testing"
 
 	"github.com/Topher-the-Geek/vamos/internal/api"
@@ -23,7 +18,6 @@ import (
 
 	"github.com/containerd/platforms"
 	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/google/go-containerregistry/pkg/registry"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
@@ -338,137 +332,4 @@ func randomImage(t *testing.T, platform string) v1.Image {
 	img, err = mutate.ConfigFile(img, config)
 	must(t, err)
 	return img
-}
-
-// assertBase checks that img, a layer's image, is built on base: that it starts with base's layers.
-// what says which image base is, for the message.
-func assertBase(t *testing.T, img, base v1.Image, what string) {
-	t.Helper()
-	got, want := layerDigests(t, img), layerDigests(t, base)
-	if got = got[:min(len(got), len(want))]; !slices.Equal(got, want) {
-		t.Errorf("image starts with layers %v, want those of %s, %v", got, what, want)
-	}
-}
-
-// layerDigests returns the digests of img's layers.
-func layerDigests(t *testing.T, img v1.Image) []v1.Hash {
-	t.Helper()
-	layers, err := img.Layers()
-	must(t, err)
-	var digests []v1.Hash
-	for _, l := range layers {
-		d, err := l.DiffID()
-		must(t, err)
-		digests = append(digests, d)
-	}
-	return digests
-}
-
-// TestPullTag checks that a pull's tag is resolved once and recorded:
-// each platform's image comes from the index it named then, even after the tag moves,
-// and for a platform not built for before, until --rebuild resolves it again.
-// Pruning keeps the record and the pulled images, so builds after it don't reach the registry.
-// It has stores of its own, since it prunes them.
-func TestPullTag(t *testing.T) {
-	requireBuildah(t)
-	usePrivateStores(t)
-	reg := registry.New(registry.Logger(log.New(io.Discard, "", 0)))
-	var requests atomic.Int64 // that pulls make, of the image "base"
-	server, regHost := insecureRegistry(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v2/base/") {
-			requests.Add(1)
-		}
-		reg.ServeHTTP(w, r)
-	}))
-	first := pushIndex(t, regHost+"/base:v1", native, foreign())
-
-	fsys := project(t, map[string]string{
-		"BUILD": fmt.Sprintf(`pull(name="base", image="%s/base", tag="v1")`+"\n"+
-			`layer(name="app", base="base")`, regHost),
-	})
-	dir := t.TempDir()
-	write := func(name, platform string) v1.Image {
-		t.Helper()
-		out := filepath.Join(dir, strings.ReplaceAll(name, "/", "-"))
-		vamos(t, fsys, "save", "app", out, "--platform", platform, "--tls-verify=false", "-C", projectDir).
-			succeeds(t)
-		return readImage(t, out)
-	}
-	img := write("host-1.tar", native)
-	assertPlatform(t, img, native)
-	assertBase(t, img, first[native], "the index's image for "+native)
-
-	// The tag moves, but builds keep using what it named, without asking the registry.
-	second := pushIndex(t, regHost+"/base:v1", native, foreign())
-	before := requests.Load()
-	img = write("host-2.tar", native)
-	if n := requests.Load() - before; n != 0 {
-		t.Errorf("a build after the images were pulled made %d requests to the registry, want none", n)
-	}
-	assertBase(t, img, first[native], "the image the tag named before it moved")
-
-	// A platform not built for before gets its image from the index recorded, not the one the tag names now.
-	img = write("other-2.tar", foreign())
-	assertPlatform(t, img, foreign())
-	assertBase(t, img, first[foreign()], "the recorded index's image for "+foreign()+", not built for before")
-
-	r := vamos(t, fsys, "build", "base", "--rebuild", "--tls-verify=false", "-C", projectDir).ran(t)
-	if want := "pull \"base\": pulling again\n"; r.stdout != want {
-		t.Errorf("stdout = %q, want %q", r.stdout, want)
-	}
-	for _, platform := range []string{native, foreign()} {
-		img := write(platform+"-3.tar", platform)
-		assertBase(t, img, second[platform], "the image the tag names now for "+platform)
-	}
-
-	// With the registry gone, the layers built again after pruning use the images pulled before, and the pulled
-	// image itself is delivered from the store, not from the registry its result also locates it at.
-	vamos(t, fsys, "prune").ran(t)
-	server.Close()
-	for _, platform := range []string{native, foreign()} {
-		img := write(platform+"-4.tar", platform)
-		assertBase(t, img, second[platform], "the image the tag named before pruning, for "+platform)
-	}
-	out := filepath.Join(dir, "base-offline.tar")
-	vamos(t, fsys, "save", "base", out, "--platform", native, "-C", projectDir).succeeds(t)
-	assertBase(t, readImage(t, out), second[native], "the pulled image, saved with the registry gone")
-}
-
-// TestPullTagMistakes checks the errors for a tag that names no image for the platform.
-func TestPullTagMistakes(t *testing.T) {
-	requireBuildah(t)
-	_, regHost := insecureRegistry(t, nil)
-	pushIndex(t, regHost+"/index:v1", "linux/s390x", "linux/ppc64le")
-	ref, err := name.ParseReference(regHost+"/single:v1", name.Insecure)
-	must(t, err)
-	must(t, remote.Write(ref, randomImage(t, "linux/s390x")))
-
-	tests := []struct {
-		name  string
-		image string
-		want  string
-	}{
-		{
-			name:  "index without the platform",
-			image: "index",
-			want: fmt.Sprintf(`its index has no image for %s; it has "linux/ppc64le", "linux/s390x"`,
-				native),
-		},
-		{
-			name:  "image for another platform",
-			image: "single",
-			want: fmt.Sprintf("is for linux/s390x, not %s, and its tag names that image alone, "+
-				"not an index of images for several platforms", native),
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fsys := project(t, map[string]string{
-				"BUILD": fmt.Sprintf(`pull(name="base", image="%s/%s", tag="v1")`+"\n"+
-					`layer(name="app", base="base")`, regHost, tt.image),
-			})
-			vamos(t, fsys, "build", "app", "--tls-verify=false", "-C", projectDir).
-				failsWith(t, false, fmt.Sprintf(`pull "base": image "%s/%s:v1"`, regHost, tt.image), tt.want)
-		})
-	}
 }

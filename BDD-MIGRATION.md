@@ -42,9 +42,8 @@ Delete this file when every box is ticked.
 - [x] **Load into Docker.**
   `TestLoad`, `TestLoadRejected`, `TestLoadWithoutDocker`, `TestLoadIntoDocker`, the load parts of `TestIndex`,
   `TestIndexChoosesManifest` and `TestPlatformVariants`, and load refusing a task are scenarios of the load feature.
-- [ ] **Pulls by tag.**
-  `TestPullTag`, `TestPullTagMistakes`, `TestPullerPinnedIndex`, `TestMaterializeFromRegistry`.
-  The pull feature, from the in-process registry.
+- [x] **Pulls by tag.**
+  `TestPullTag` and `TestPullTagMistakes` are scenarios of the pull feature, from a registry of the scenario's own.
 - [ ] **Platforms and emulation.**
   `TestPlatformMistakes`, `TestExecPlatformChoice`, `TestPlatforms`, `TestPlatformFailures`, `TestGraphConfigurations`.
   The platforms feature, skipping where the host can't emulate.
@@ -100,6 +99,8 @@ Delete this file when every box is ticked.
 - [ ] **Mechanisms beneath a feature.**
   `internal/sched` (action keys, sharing, job limits, the scheduler's reuse and regeneration),
   `internal/fileset` (patterns, tree walks, edits during capture), `internal/cache` (logs, locks, generations),
-  `internal/finish`'s delivery from separate stores, `internal/run`'s runner, and `internal/tracing`.
+  `internal/finish`'s delivery from separate stores, `internal/run`'s runner and its puller (`TestPullerPinnedIndex`,
+  `TestMaterializeFromRegistry`, whose refusals of a mismatched manifest, a wrong image ID or a location that can't
+  be parsed the pull feature doesn't reach), and `internal/tracing`.
   Each either shows in what a user sees, and moves into the feature it serves,
   or is an internal contract, and says so; anything that is neither needs a reason added to the rule.

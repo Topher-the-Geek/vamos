@@ -630,3 +630,47 @@ func (w *world) ThenDockerRunningTheImagePrints(want string) {
 		w.t.Errorf("docker run %s printed %q, want %q", image, got, want)
 	}
 }
+
+// ThenTheImageIsBuiltOn checks that the image saved, pushed or loaded is built on the image that label names for
+// platform, which a Given step put in the registry: that it starts with that image's layers.
+func (w *world) ThenTheImageIsBuiltOn(label, platform string) {
+	w.t.Helper()
+	got, want := w.layersAndHeld(label, platform)
+	if got = got[:min(len(got), len(want))]; !slices.Equal(got, want) {
+		w.t.Errorf("the image starts with layers %v, want those of %s for %s, %v", got, label, platform, want)
+	}
+}
+
+// ThenTheImageIs checks that the image saved, pushed or loaded has the layers of the image that label names for
+// platform, which a Given step put in the registry, and no others.
+func (w *world) ThenTheImageIs(label, platform string) {
+	w.t.Helper()
+	if got, want := w.layersAndHeld(label, platform); !slices.Equal(got, want) {
+		w.t.Errorf("the image has layers %v, want those of %s for %s, %v", got, label, platform, want)
+	}
+}
+
+// layersAndHeld returns the digests of the layers, uncompressed, of the image sent and of the image that label names
+// for platform, which a Given step put in the registry.
+func (w *world) layersAndHeld(label, platform string) (sent, held []v1.Hash) {
+	w.t.Helper()
+	img, ok := w.held[w.heldKey(label, platform)]
+	if !ok {
+		w.t.Fatalf("no Given step put %s for %s in the registry", label, platform)
+	}
+	if w.image == nil {
+		w.t.Fatal("no image was sent")
+	}
+	return w.config(w.image).RootFS.DiffIDs, w.config(img).RootFS.DiffIDs
+}
+
+// ThenTheRegistryWasNotAsked checks that the scenario's registry served no request as the last command ran.
+func (w *world) ThenTheRegistryWasNotAsked() {
+	w.t.Helper()
+	if w.server == nil || !w.ran {
+		w.t.Fatal("no command has run against a registry of the scenario's own")
+	}
+	if w.askedDuring != 0 {
+		w.t.Errorf("the registry served %d requests as the command ran, want none", w.askedDuring)
+	}
+}

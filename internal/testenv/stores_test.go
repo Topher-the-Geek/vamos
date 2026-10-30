@@ -265,3 +265,18 @@ func TestGate(t *testing.T) {
 		})
 	}
 }
+
+// TestStoresName checks that a test's name becomes a directory name that overlay mount options can hold.
+func TestStoresName(t *testing.T) {
+	got := storesName("TestPull_X/After a prune, builds run: a=b")
+	if want := "TestPull_X-After_a_prune__builds_run__a_b"; got != want {
+		t.Errorf("storesName = %q, want %q", got, want)
+	}
+	long := strings.Repeat("Scenario", 20)
+	if got := storesName(long); len(got) != 57 || !strings.HasPrefix(got, long[:48]+"-") {
+		t.Errorf("storesName of a long name = %q, want its first 48 characters and a hash", got)
+	}
+	if storesName(long+"a") == storesName(long+"b") {
+		t.Error("storesName gives two long names that differ at their end the same name")
+	}
+}

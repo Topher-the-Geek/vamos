@@ -16,8 +16,15 @@ import (
 	"strings"
 
 	"github.com/Topher-the-Geek/vamos/internal/testenv"
+	"github.com/containerd/platforms"
 	"github.com/google/go-containerregistry/pkg/authn"
+	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/registry"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/empty"
+	"github.com/google/go-containerregistry/pkg/v1/mutate"
+	"github.com/google/go-containerregistry/pkg/v1/random"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
 )
 
 // Given steps set up a scenario's project.
@@ -39,18 +46,21 @@ func (w *world) GivenTheBuildFileDeclares(build string) {
 	w.GivenThePackageDeclares(".", build)
 }
 
-// GivenTheBuildFileChanges replaces the first old in the BUILD file with new.
+// GivenTheBuildFileChanges replaces the first old in the BUILD file with new, in both of which <registry> stands for
+// the host of the scenario's registry.
 // The BUILD text that it changes is the scenario's own, or a fixture declared in the same feature's file,
 // so that a reader can find what it changes. It stops the scenario if the BUILD file doesn't hold old.
 func (w *world) GivenTheBuildFileChanges(old, new string) {
 	w.t.Helper()
+	old, new = w.atRegistry(old), w.atRegistry(new)
 	if !strings.Contains(w.files["BUILD"], old) {
 		w.t.Fatalf("the BUILD file doesn't hold %q\n%s", old, w.files["BUILD"])
 	}
 	w.files["BUILD"] = strings.Replace(w.files["BUILD"], old, new, 1)
 }
 
-// GivenThePackageDeclares appends build, dedented, to the BUILD file of the package in dir, "." for the project's.
+// GivenThePackageDeclares appends build, dedented, to the BUILD file of the package in dir, "." for the project's,
+// in which <registry> stands for the host of the scenario's registry.
 // A blank build appends nothing, though the package then has its BUILD file, empty if it had none.
 func (w *world) GivenThePackageDeclares(dir, build string) {
 	w.t.Helper()
@@ -59,7 +69,7 @@ func (w *world) GivenThePackageDeclares(dir, build string) {
 		w.files[file] += ""
 		return
 	}
-	w.files[file] += dedent(build)
+	w.files[file] += dedent(w.atRegistry(build))
 }
 
 // GivenIWorkIn makes later commands run in dir, within the project, "." for the project itself,
@@ -220,9 +230,19 @@ func (w *world) startRegistry(handler http.Handler, insecure bool) {
 	if handler == nil {
 		handler = newRegistry()
 	}
-	server := httptest.NewServer(handler)
-	w.t.Cleanup(server.Close)
-	w.registry = strings.TrimPrefix(server.URL, "http://")
+	w.server = httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if w.stopped.Load() {
+			// Dropped, as a registry that has gone drops it, while its port stays the scenario's.
+			if conn, _, err := http.NewResponseController(rw).Hijack(); err == nil {
+				conn.Close()
+			}
+			return
+		}
+		w.asked.Add(1)
+		handler.ServeHTTP(rw, r)
+	}))
+	w.t.Cleanup(w.server.Close)
+	w.registry = strings.TrimPrefix(w.server.URL, "http://")
 	if insecure {
 		testenv.InsecureRegistry(w.t, w.registry)
 	}
@@ -314,5 +334,117 @@ func (w *world) GivenTheHostsDockerDaemon() {
 	w.dockerHost = cmp.Or(os.Getenv("DOCKER_HOST"), "unix:///var/run/docker.sock")
 	if err := exec.Command("docker", "--host", w.dockerHost, "info").Run(); err != nil {
 		w.t.Skipf("needs a Docker daemon at %s: %v", w.dockerHost, err)
+	}
+}
+
+// GivenTheRegistryHoldsAnIndex pushes to the image name image, in which <registry> stands for the scenario's registry,
+// an index of an image of random files for each of platforms, which label names, with the platform,
+// for ThenTheImageIsBuiltOn: a tag that names another index already moves.
+func (w *world) GivenTheRegistryHoldsAnIndex(image, label string, platformNames ...string) {
+	w.t.Helper()
+	var index v1.ImageIndex = empty.Index
+	for _, platform := range platformNames {
+		img := w.heldImage(label, platform)
+		p, err := platforms.Parse(platform)
+		if err != nil {
+			w.t.Fatal(err)
+		}
+		index = mutate.AppendManifests(index, mutate.IndexAddendum{
+			Add: img,
+			Descriptor: v1.Descriptor{
+				Platform: &v1.Platform{OS: p.OS, Architecture: p.Architecture, Variant: p.Variant},
+			},
+		})
+	}
+	if err := remote.WriteIndex(w.registryRef(image), index, w.readingTheRegistry()...); err != nil {
+		w.t.Fatal(err)
+	}
+}
+
+// GivenTheRegistryHoldsAnImage pushes to the image name image, in which <registry> stands for the scenario's
+// registry, an image of random files for platform alone, rather than an index, which label names, with the platform.
+func (w *world) GivenTheRegistryHoldsAnImage(image, label, platform string) {
+	w.t.Helper()
+	if err := remote.Write(w.registryRef(image), w.heldImage(label, platform), w.readingTheRegistry()...); err != nil {
+		w.t.Fatal(err)
+	}
+}
+
+// heldImage returns a new image of random files for platform, which label names, with the platform.
+func (w *world) heldImage(label, platform string) v1.Image {
+	w.t.Helper()
+	img, err := random.Image(256, 1)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	config, err := img.ConfigFile()
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	p, err := platforms.Parse(platform)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	config.OS, config.Architecture, config.Variant = p.OS, p.Architecture, p.Variant
+	if img, err = mutate.ConfigFile(img, config); err != nil {
+		w.t.Fatal(err)
+	}
+	if w.held == nil {
+		w.held = map[string]v1.Image{}
+	}
+	key := w.heldKey(label, platform)
+	if _, ok := w.held[key]; ok {
+		w.t.Fatalf("the registry holds %s already", key)
+	}
+	w.held[key] = img
+	return img
+}
+
+// heldKey returns the key of the image that label names for platform, normalized, among those that Given steps
+// put in the registry.
+func (w *world) heldKey(label, platform string) string {
+	w.t.Helper()
+	p, err := platforms.Parse(platform)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	return label + " for " + platformName(p.OS, p.Architecture, p.Variant)
+}
+
+// registryRef returns the image name image, in which <registry> stands for the scenario's registry, as a reference.
+func (w *world) registryRef(image string) name.Reference {
+	w.t.Helper()
+	ref, err := name.ParseReference(w.atRegistry(image), name.Insecure)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	return ref
+}
+
+// GivenTheRegistryStops stops the scenario's registry answering, for the rest of the scenario: it drops each
+// connection, keeping its port, so that no other server can take it.
+func (w *world) GivenTheRegistryStops() {
+	w.t.Helper()
+	if w.server == nil {
+		w.t.Fatal("no Given step started a registry")
+	}
+	w.stopped.Store(true)
+}
+
+// GivenStoresOfTheScenariosOwn gives the scenario a container store and build cache of its own, for the rest of the
+// scenario, rather than the suite's, for a scenario that destroys what they hold, as prune does.
+// It stops the scenario if a command has run already, on the suite's stores.
+func (w *world) GivenStoresOfTheScenariosOwn() {
+	w.t.Helper()
+	if w.ran {
+		w.t.Fatal("a command has run already, on the suite's stores")
+	}
+	w.stores = testenv.PrivateStores(w.t)
+	if w.before != nil {
+		before, err := w.stores.UnnamedImages()
+		if err != nil {
+			w.t.Fatal(err)
+		}
+		w.before = before
 	}
 }

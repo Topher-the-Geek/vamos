@@ -78,8 +78,9 @@ Each platform's `cache.TagInstance` records the image's ID, platform, epoch and 
 so `Scheduler.resolve` serves a cached pull from the record and the checker alone, asking the runner nothing;
 only a missing or incomplete instance, an image the checker can't find, or `--rebuild` reaches the puller,
 which is given the record in its request and reads none itself.
-`TestSchedulerCachedResolve` and `TestTagRecordLegacyInstances` hold this, and `TestPullTag` still requires that
-nothing reaches a registry once the record and images are cached.
+`TestSchedulerCachedResolve` and `TestTagRecordLegacyInstances` hold this,
+and `TestPull_ResolvedTagsAreReused` still requires that nothing reaches a registry
+once the record and images are cached.
 Pruning removes action results, blobs and cached layer images while retaining tag records and pulled bases,
 which lose their cache-repository name until the next resolve gives it back.
 A coordinator's prune has no lock over its clients, so it fences by generation: `RecordStore.Generation` counts

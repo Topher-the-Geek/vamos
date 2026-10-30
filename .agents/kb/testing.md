@@ -119,15 +119,17 @@ Scenarios that fail before anything builds, such as the mistakes found as a glob
 start from a background that needs no buildah, such as `newGlobMistakeWorld`, so that `-short` runs them too;
 a mistake that loading a BUILD file catches is checked with `ThenItFailsWith`, its position and all,
 `ThenNoTargetRan`, and `ThenNothingIsSaved` or `ThenNothingIsExported` for the command that sends.
-Scenarios run the command line in process, through `cli.NewRootCommand`, on the suite's stores and a project
-held in memory, or on disk once `GivenTheProjectLinks` gives it symbolic links
-or `WhenISave` saves into it with `intoTheProject`.
+Scenarios run the command line in process, through `cli.NewRootCommand`,
+on the suite's stores, or, for one that prunes them with `WhenIPrune`, stores of its own that
+`GivenStoresOfTheScenariosOwn` gives it, and on a project held in memory,
+or on disk once `GivenTheProjectLinks` gives it symbolic links or `WhenISave` saves into it with `intoTheProject`.
 They observe only what a user can:
 the command's standard output, where its statuses and steps' output go, its error,
 the image it saved, the folder it exported and the images left in the store.
 A workspace's packages are declared with `GivenThePackageDeclares`, and commands run in one with `GivenIWorkIn`.
 Observe a layer's image with `WhenISave` and a task's files with `WhenIExport`;
-a push, with `WhenIPush` to a registry of the scenario's own that `GivenARegistry` starts, and `<registry>` stands for,
+a push, with `WhenIPush` to a registry of the scenario's own that `GivenARegistry` starts,
+which `<registry>` stands for in image names, errors and BUILD text, and Given steps fill with indexes and images,
 reads back what it pushed, for the steps about the image, or `ThenTheIndexManifestsAre` for an index;
 a load, with `WhenILoad` into a fake Docker daemon of the scenario's own that `GivenADockerDaemon` starts,
 reads back what the daemon loaded, and `GivenTheHostsDockerDaemon` loads into the host's, where there is one;

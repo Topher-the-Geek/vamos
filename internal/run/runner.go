@@ -89,7 +89,7 @@ const attemptPrefix = "vamos-attempt-"
 // A layer's or a resolve's image must be in the container store, for the action's platform,
 // whatever locations the result names:
 // the local executor pulls through a resolve alone, so a cached resolve whose image is gone resolves again,
-// as TestPullTag requires, from the images pulled before if the store still holds them by digest.
+// as TestPull_ResolvedTagsAreReused requires, from the images pulled before if the store still holds them by digest.
 func (r *localRunner) Check(ctx context.Context, a *sched.Action, result *cache.ActionResult) (problem, err error) {
 	switch a.Kind {
 	case sched.KindTask:

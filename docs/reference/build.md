@@ -53,7 +53,9 @@ A single-platform image must match the configured platform; a mismatch is an err
 Use fully qualified repository names to make the source explicit.
 An image's tag belongs in `tag`, rather than inside `image`.
 Pull targets have no user parameters; only their platform configures them.
-Previously resolved tags are reused until explicitly [rebuilt](cache.md#refreshing-results).
+Previously resolved tags are reused until explicitly [rebuilt](cache.md#refreshing-results):
+a tag that names an index is resolved once, so a platform built for later gets its image from the index the tag named
+then, from the store if it holds it, or else from the registry.
 A pull whose image its registry doesn't have, or won't give, fails, suggesting to check the name,
 and to log in if the image is private; one whose registry can't be reached fails, saying why.
 

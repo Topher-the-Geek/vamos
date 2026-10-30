@@ -381,6 +381,13 @@ func (w *world) sentName(image string) string {
 	return reference.FamiliarString(reference.TagNameOnly(named))
 }
 
+// WhenIPrune prunes the build cache, which sends nothing.
+func (w *world) WhenIPrune() {
+	w.t.Helper()
+	w.sendsNothing("WhenIPrune")
+	w.run("prune")
+}
+
 // WhenIExport exports target to the folder target, in a folder of the command's own, unless options say where.
 func (w *world) WhenIExport(target string, options ...option) {
 	w.t.Helper()

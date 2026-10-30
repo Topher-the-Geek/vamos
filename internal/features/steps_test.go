@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io/fs"
 	"maps"
+	"net/http/httptest"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -60,6 +62,10 @@ type world struct {
 	outside  string              // a folder outside the project, for files that commands read, such as secrets
 	registry string              // the host of the scenario's registry, <registry>, once a Given step starts it
 	login    authn.Authenticator // that the scenario's registry needs, which steps that read from it use
+	server   *httptest.Server    // that serves the scenario's registry, once a Given step starts it
+	asked    atomic.Int64        // the requests that the scenario's registry has served
+	stopped  atomic.Bool         // whether the scenario's registry has stopped answering
+	held     map[string]v1.Image // the images that Given steps put in the registry, by label and platform
 
 	stdout       string
 	stderr       string
@@ -76,6 +82,8 @@ type world struct {
 	dockerHost   string           // the host's Docker daemon, as vamos finds it, if the scenario loads into it
 	loadedBefore int              // how many images the scenario's own daemon had loaded before the last command
 	loadRan      bool             // whether the last command loaded into Docker, or tried to
+	ran          bool             // whether any command has run
+	askedDuring  int64            // the requests that the scenario's registry served as the last command ran
 	first        v1.Image         // the first image that the scenario saved
 	entries      map[string]entry // the image's files, once a step has read them
 	exported     string           // the folder that the last command exported to, if it exported
@@ -132,7 +140,10 @@ func (w *world) execute(fsys afero.Fs, args []string) {
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
 	cmd.SetArgs(append([]string{}, args...)) // never nil, which would make Cobra read the test's own arguments
+	w.ran = true
+	asked := w.asked.Load()
 	w.err = cmd.ExecuteContext(w.t.Context())
+	w.askedDuring = w.asked.Load() - asked
 	w.stdout, w.stderr = stdout.String(), stderr.String()
 }
 

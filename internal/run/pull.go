@@ -111,7 +111,7 @@ func (pl *puller) resolve(ctx context.Context, req sched.Request) (*sched.Report
 	// but one pulled before by its tag may have only that name.
 	// Keep this lookup: redundant copies can exhaust Docker Hub's anonymous pull allowance,
 	// making cached builds fail or spend time retrying registry requests.
-	// TestPullTag counts requests and requires none once the tag record and images are cached.
+	// TestPull_ResolvedTagsAreReused counts requests and requires none once the tag record and images are cached.
 	// Current limits: https://docs.docker.com/docker-hub/usage/pulls/
 	var img *storage.Image
 	images, err := pl.store.ImagesByDigest(instance)

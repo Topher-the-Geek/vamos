@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"path/filepath"
 	"strings"
@@ -173,7 +174,7 @@ func SuiteStores(t *testing.T) *Stores {
 // PrivateStores returns stores for the test alone, removed once it ends.
 func PrivateStores(t *testing.T) *Stores {
 	t.Helper()
-	s, err := newStores(strings.NewReplacer("/", "-", " ", "_").Replace(t.Name()))
+	s, err := newStores(storesName(t.Name()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,6 +184,28 @@ func PrivateStores(t *testing.T) *Stores {
 		}
 	})
 	return s
+}
+
+// storesName returns the test name as part of the name of its stores' directory: "/" as "-", and any other character
+// but a letter, a digit, "_", "." and "-" as "_", since overlay mount options, which name the directory, are separated
+// by commas and can't hold "=" or ":" in a path. A long name is cut short, and a hash of it kept, since every layer
+// of a mount names the directory, and mount options are limited to a page.
+func storesName(test string) string {
+	name := strings.Map(func(r rune) rune {
+		switch {
+		case r == '/':
+			return '-'
+		case strings.ContainsRune("_.-", r), 'a' <= r && r <= 'z', 'A' <= r && r <= 'Z', '0' <= r && r <= '9':
+			return r
+		}
+		return '_'
+	}, test)
+	if len(name) > 64 {
+		h := fnv.New32a()
+		h.Write([]byte(test))
+		name = fmt.Sprintf("%s-%08x", name[:48], h.Sum32())
+	}
+	return name
 }
 
 // RemoveSuiteStores removes the shared stores, if they were made.
