@@ -82,7 +82,8 @@ and the end-to-end cases routed by [container-builds.md](container-builds.md).
 
 Tests never touch the developer's container store or build cache.
 `testenv.SuiteStores` makes a store and cache for the test binary, beside the default store, removed after the run;
-`testenv.PrivateStores` makes a test its own, for one that destroys what they hold, as `TestPrune` does.
+`testenv.PrivateStores` makes a test its own, for one that destroys what they hold, as the prune feature's scenarios
+do through `GivenStoresOfTheScenariosOwn`.
 In `internal/cli`, `vamos` runs against the suite's stores unless the test called `usePrivateStores`.
 Each run of the suite pulls `busybox:1.36` once into its fresh store, which Docker Hub counts against its pull limit,
 so tests that need only a base to add files to push one to an in-process registry instead.
@@ -105,8 +106,8 @@ Trace importer coverage skips without `trace_processor_shell`.
 ## Behavior specifications
 
 [features](../../internal/features/) specifies the behavior of BUILD files and their targets, pulls, globs, layers,
-tasks, their steps, variables and secrets, workspaces, modules, parameters, platforms, the cache,
-and the save and export commands as features, rules and scenarios, in Go:
+tasks, their steps, variables and secrets, workspaces, modules, parameters, platforms, indexes, the cache,
+the command line, and the save, export, push, load and prune commands as features, rules and scenarios, in Go:
 a feature is a file, such as `task_test.go`, and each of its rules is a test named `TestFeature_Rule`,
 such as `TestTask_WithoutOutputIsACheck`,
 whose doc comment states the rule's sentence, in the words of the [BUILD reference](../../docs/reference/build.md),
@@ -189,8 +190,9 @@ and the comparisons that its steps share;
 and its steps' observations;
 [steps_image_test.go](../../internal/features/steps_image_test.go) the image saved;
 [steps_destination_test.go](../../internal/features/steps_destination_test.go) the folder a command sends to;
-and [steps_cache_test.go](../../internal/features/steps_cache_test.go) the Given steps that damage the build cache
-or the container store, as something outside vamos might, on stores of the scenario's own.
+and [steps_cache_test.go](../../internal/features/steps_cache_test.go) the build cache and the container store as
+other programs see them: steps that damage or hold them, as something outside vamos might, and see what they hold,
+on stores of the scenario's own.
 Reuse a step before adding one, and name a new one as what a user does or sees, not as how it is checked.
 Steps call `t.Helper`, so a failure names the scenario's line;
 checks of whether the command succeeded stop the scenario, and other checks let it go on.

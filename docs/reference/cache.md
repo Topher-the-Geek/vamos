@@ -76,7 +76,9 @@ Cache results remain until explicitly pruned:
 vamos prune
 ```
 
-This removes cached layer images and other build results, while keeping pulled images and recorded tag resolutions.
+This removes cached layer images and other build results, while keeping pulled images and recorded tag resolutions,
+and the images that other names, such as one `buildah tag` gave, also name, by those names alone.
+It reports how many images, results and files it removed.
 The next build recreates the needed results.
 A prune is refused while another vamos is using the build cache, and a build is refused while a prune runs;
 run it again when the other finishes.

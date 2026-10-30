@@ -60,10 +60,11 @@ Delete this file when every box is ticked.
   `TestImageStoreIDs` are scenarios of the cache feature. What no user sees is decided below:
   the provenance that `TestResultProvenance` and `TestPlatforms` read from results,
   the names a pull gives in the store that `TestImageIdentityRoundTrip` reads, and `TestExportRepairsCorruptBlob`.
-- [ ] **Prune and store roots.**
-  `TestPrune`, `TestPruneRefusedWhileInUse`, `TestExplicitStoreRoots`, `TestDefaultStore`,
-  `TestPruneHandlerWithoutRoot`.
-  A prune feature, and the configuration feature for the roots; prune runs on private stores.
+- [x] **Prune and store roots.**
+  `TestPrune` and `TestPruneRefusedWhileInUse` are scenarios of the prune feature. `TestExplicitStoreRoots`, of the
+  store a program embedding vamos gives it, and `TestDefaultStore`, which needs a process of its own since
+  containers/storage reads its defaults once, are decided below; `TestPruneHandlerWithoutRoot` moves with write
+  failures.
 - [ ] **Traces.**
   `TestTraceBuild`, `TestTracePush`, `TestTracePull`, `TestTraceFailure`, `TestTraceDestinations`, `TestFinishTrace`,
   `TestTraceMistakes`, `TestTracePerfetto`, `TestSecretsNotInTrace`.
@@ -72,7 +73,7 @@ Delete this file when every box is ticked.
   `TestInterrupted`, `TestCancelLoad`, `TestCancelConfigure`, `TestFailedStepLog`, `TestFailedOutputLog`.
   A feature for interrupting a build and for what a failure reports.
 - [ ] **Failures to write output.**
-  `TestOutputWriteFailure`, `TestBuildHandlerWithoutRoot`, `TestWatchJobWriteFailure`.
+  `TestOutputWriteFailure`, `TestBuildHandlerWithoutRoot`, `TestWatchJobWriteFailure`, `TestPruneHandlerWithoutRoot`.
   Scenarios with a step that makes standard output fail.
 - [ ] **How a user sees remote work and its failures.**
   `TestRemoteBuild`, `TestRemoteMistakes`, `TestCoordinatorCommand`, `TestCoordinatorWithWorker`,
@@ -102,6 +103,7 @@ Delete this file when every box is ticked.
   `internal/sched` (action keys, sharing, job limits, the scheduler's reuse and regeneration),
   `internal/fileset` (patterns, tree walks, edits during capture), `internal/cache` (logs, locks, generations),
   `internal/cli`'s `TestGraphConfigurations`, of the graph an index of two platforms configures,
+  `TestExplicitStoreRoots` and `TestDefaultStore`, of the container store vamos opens,
   `TestResultProvenance` and `TestPlatforms`, of the provenance a result records,
   and `TestImageIdentityRoundTrip`, of the names a pull gives an image in the store,
   `internal/run`'s `TestExportRepairsCorruptBlob`,

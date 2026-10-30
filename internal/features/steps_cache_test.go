@@ -5,20 +5,27 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 
 	"github.com/Topher-the-Geek/vamos/internal/cache"
+	"github.com/Topher-the-Geek/vamos/internal/cli"
 	"github.com/Topher-the-Geek/vamos/internal/run"
+	"github.com/Topher-the-Geek/vamos/internal/testenv"
 	"github.com/opencontainers/go-digest"
 	imagemanifest "go.podman.io/image/v5/manifest"
 	"go.podman.io/storage"
 )
 
-// Given steps that damage the build cache or the container store, as something outside vamos might: a disk that
-// corrupts a file, a person who removes one, or another tool. They reach into the cache's own files, as no user
-// step can, and only stores of the scenario's own, so that they damage nothing another scenario uses.
+// Steps about the build cache and the container store as other programs see them: Given steps that damage them,
+// as something outside vamos might, a disk that corrupts a file, a person who removes one, or another tool, or that
+// hold them as another vamos does; and Then steps that see what they hold, as `podman images` or a look at the disk
+// would. They reach into the cache's own files, as no user step can, and only stores of the scenario's own, so that
+// they damage nothing another scenario uses.
 
 // requireOwnStores fails the scenario unless its stores are its own, which a step that damages them needs.
 func (w *world) requireOwnStores() {
@@ -35,35 +42,84 @@ func (w *world) cacheDir() string {
 	return run.CacheDir(w.stores.Options)
 }
 
-// cached is what stores hold: the blobs in the build cache, by path, and the images that the build cache names in the
-// container store, by ID, for the steps that remove what a command cached to compare with what was there before it.
-type cached struct{ blobs, images map[string]bool }
+// cached is what stores hold: the files and results in the build cache, by path, the images in the container store
+// that the build cache names, by store ID, and every image's names, by store ID, for steps that compare what stores
+// hold before and after a command.
+type cached struct {
+	blobs, records, images map[string]bool
+	names                  map[string]string
+}
+
+// holds reports whether c holds everything that other does: its files, results and images, with the same names.
+func (c cached) holds(other cached) bool {
+	kinds := [][2]map[string]bool{{c.blobs, other.blobs}, {c.records, other.records}, {c.images, other.images}}
+	for _, pair := range kinds {
+		for key := range pair[1] {
+			if !pair[0][key] {
+				return false
+			}
+		}
+	}
+	for id, names := range other.names {
+		if c.names[id] != names {
+			return false
+		}
+	}
+	return true
+}
+
+// same reports whether c and other hold the same files, results and images, every image with the same names.
+func (c cached) same(other cached) bool {
+	return maps.Equal(c.blobs, other.blobs) && maps.Equal(c.records, other.records) &&
+		maps.Equal(c.images, other.images) && maps.Equal(c.names, other.names)
+}
+
+// String says how much c holds, for a failure's message.
+func (c cached) String() string {
+	return fmt.Sprintf("%d files, %d results and %d images, %d of them cached", len(c.blobs), len(c.records),
+		len(c.names), len(c.images))
+}
 
 // cached returns what the scenario's stores hold.
 func (w *world) cached() cached {
 	w.t.Helper()
-	blobs, images := map[string]bool{}, map[string]bool{}
-	dir := filepath.Join(run.CacheDir(w.stores.Options), "cas", "sha256")
-	entries, err := os.ReadDir(dir)
-	if err != nil && !os.IsNotExist(err) {
-		w.t.Fatal(err)
-	}
-	for _, e := range entries {
-		blobs[filepath.Join(dir, e.Name())] = true
-	}
-	err = w.stores.WithStore(func(store storage.Store) error {
+	return w.cachedIn(w.stores)
+}
+
+// cachedIn returns what stores hold.
+func (w *world) cachedIn(stores *testenv.Stores) cached {
+	w.t.Helper()
+	held := cached{blobs: w.entriesOf(stores, "cas", "sha256"), records: w.entriesOf(stores, "ac"),
+		images: map[string]bool{}, names: map[string]string{}}
+	err := stores.WithStore(func(store storage.Store) error {
 		all, err := store.Images()
 		for _, img := range all {
 			if _, named := cacheName(img); named {
-				images[img.ID] = true
+				held.images[img.ID] = true
 			}
+			held.names[img.ID] = strings.Join(slices.Sorted(slices.Values(img.Names)), " ")
 		}
 		return err
 	})
 	if err != nil {
 		w.t.Fatal(err)
 	}
-	return cached{blobs, images}
+	return held
+}
+
+// entriesOf returns the paths of the entries in the directory of stores' build cache that dirs name.
+func (w *world) entriesOf(stores *testenv.Stores, dirs ...string) map[string]bool {
+	w.t.Helper()
+	dir := filepath.Join(append([]string{run.CacheDir(stores.Options)}, dirs...)...)
+	entries, err := os.ReadDir(dir)
+	if err != nil && !os.IsNotExist(err) {
+		w.t.Fatal(err)
+	}
+	paths := map[string]bool{}
+	for _, e := range entries {
+		paths[filepath.Join(dir, e.Name())] = true
+	}
+	return paths
 }
 
 // GivenTheCachedBlobOfIsCorrupt replaces the bytes of the blob in the build cache that holds content with as many
@@ -375,4 +431,184 @@ func copyImageData(store storage.Store, img *storage.Image, to string) error {
 		}
 	}
 	return nil
+}
+
+// GivenAnotherVamosIsUsingTheBuildCache holds the scenario's build cache open, as another vamos that builds does,
+// until the scenario ends or GivenTheOtherVamosIsDone.
+func (w *world) GivenAnotherVamosIsUsingTheBuildCache() {
+	w.t.Helper()
+	w.noOther()
+	d, err := cache.OpenDirectory(w.cacheDir())
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	w.holdOther(func() { d.Close() })
+}
+
+// GivenAnotherVamosIsPruningTheBuildCache holds the scenario's build cache exclusively, as another vamos that prunes
+// does, until the scenario ends or GivenTheOtherVamosIsDone.
+func (w *world) GivenAnotherVamosIsPruningTheBuildCache() {
+	w.t.Helper()
+	w.noOther()
+	d, err := cache.OpenDirectory(w.cacheDir())
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	held, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		done <- cache.HoldExclusive(d, func() {
+			close(held)
+			<-release
+		})
+	}()
+	select {
+	case <-held:
+	case err := <-done:
+		d.Close()
+		w.t.Fatalf("holding the build cache as a prune does: %v", err)
+	}
+	w.holdOther(func() {
+		close(release)
+		if err := <-done; err != nil {
+			w.t.Errorf("the other vamos's prune: %v", err)
+		}
+		d.Close()
+	})
+}
+
+// noOther fails the scenario if another vamos holds the build cache already, before a step takes it for another.
+func (w *world) noOther() {
+	w.t.Helper()
+	if w.other != nil {
+		w.t.Fatal("another vamos holds the build cache already")
+	}
+}
+
+// holdOther records how to release what another vamos holds, once the scenario ends or GivenTheOtherVamosIsDone.
+func (w *world) holdOther(release func()) {
+	w.t.Helper()
+	var once sync.Once
+	w.other = func() { once.Do(release) }
+	w.t.Cleanup(w.other)
+}
+
+// GivenTheOtherVamosIsDone releases what the other vamos held.
+func (w *world) GivenTheOtherVamosIsDone() {
+	w.t.Helper()
+	if w.other == nil {
+		w.t.Fatal("no other vamos holds the build cache")
+	}
+	w.other()
+	w.other = nil
+}
+
+// GivenACachedLayerIsAlsoNamed gives an image that the build cache names, which no other name names, the name name
+// too, as `buildah tag` can: a layer's, since a task keeps files rather than an image, and a pulled image is named by
+// its digest too.
+func (w *world) GivenACachedLayerIsAlsoNamed(name string) {
+	w.t.Helper()
+	w.requireOwnStores()
+	err := w.stores.WithStore(func(store storage.Store) error {
+		images, err := store.Images()
+		if err != nil {
+			return err
+		}
+		for _, img := range images {
+			if _, named := cacheName(img); named && len(img.Names) == 1 {
+				if w.alsoNamed == nil {
+					w.alsoNamed = map[string]string{}
+				}
+				w.alsoNamed[name] = img.ID
+				return store.AddNames(img.ID, []string{name})
+			}
+		}
+		return fmt.Errorf("the build cache names no layer's image alone")
+	})
+	if err != nil {
+		w.t.Fatal(err)
+	}
+}
+
+// ThenTheContainerStoreNamesAnImageOnly checks that the container store has an image named name, and named nothing
+// else, as `podman images` would show it: the image that GivenACachedLayerIsAlsoNamed gave the name, if it did.
+func (w *world) ThenTheContainerStoreNamesAnImageOnly(name string) {
+	w.t.Helper()
+	err := w.stores.WithStore(func(store storage.Store) error {
+		img, err := store.Image(name)
+		if err != nil {
+			return err
+		}
+		if id, ok := w.alsoNamed[name]; ok && img.ID != id {
+			return fmt.Errorf("%s names image %s, want %s, which a Given step gave the name",
+				name, img.ID[:12], id[:12])
+		}
+		if !slices.Equal(img.Names, []string{name}) {
+			return fmt.Errorf("image %s is named %q, want only %s", img.ID[:12], img.Names, name)
+		}
+		return nil
+	})
+	w.check(err)
+}
+
+// ThenTheBuildCacheHoldsNothing checks that the build cache holds no file, and that the container store has no image
+// that the build cache names: nothing that a prune would remove.
+func (w *world) ThenTheBuildCacheHoldsNothing() {
+	w.t.Helper()
+	w.requireOwnStores()
+	if held := w.cached(); len(held.blobs) > 0 || len(held.records) > 0 || len(held.images) > 0 {
+		w.t.Errorf("the build cache holds %d files and %d results, and names %d images in the container store, "+
+			"want none", len(held.blobs), len(held.records), len(held.images))
+	}
+}
+
+// ThenTheStoresHoldWhatTheyDidBefore checks that the last command left the scenario's stores as it found them:
+// every file and result of the build cache, and every image, with its names, and no more.
+func (w *world) ThenTheStoresHoldWhatTheyDidBefore() {
+	w.t.Helper()
+	w.requireOwnStores()
+	if !w.ran {
+		w.t.Fatal("no command has run")
+	}
+	if before, after := w.cachedBefore, w.cachedAfter; !before.same(after) {
+		w.t.Errorf("the stores held %v before the command, and %v after, want them as they were", before, after)
+	}
+}
+
+// GivenTheSuitesStoresHoldAResult builds a layer of its own in the suite's stores, which other scenarios use,
+// and notes what they hold, for ThenTheSuitesStoresHoldWhatTheyDid.
+func (w *world) GivenTheSuitesStoresHoldAResult() {
+	w.t.Helper()
+	suite := testenv.SuiteStores(w.t)
+	fsys := testenv.Project(w.t, files{
+		"BUILD": dedent(`
+			glob(name="marks", include=["mark.txt"])
+			layer(name="mark", base="scratch", steps=[add("marks", "/")])
+		`),
+		"mark.txt": testenv.NewNonce(),
+	})
+	cmd := cli.NewRootCommand(cli.Config{Fs: fsys, Store: &suite.Options})
+	cmd.SetArgs([]string{"-C", testenv.ProjectDir, "build", "mark"})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	if err := cmd.ExecuteContext(w.t.Context()); err != nil {
+		w.t.Fatalf("building in the suite's stores: %v\n%s", err, out.String())
+	}
+	w.suiteBefore = w.cachedIn(suite)
+	if len(w.suiteBefore.blobs) == 0 || len(w.suiteBefore.records) == 0 || len(w.suiteBefore.images) == 0 {
+		w.t.Fatalf("the suite's stores hold %v after building there, want some of each", w.suiteBefore)
+	}
+}
+
+// ThenTheSuitesStoresHoldWhatTheyDid checks that the suite's stores, which other scenarios use, still hold what they
+// did when GivenTheSuitesStoresHoldAResult built there: every file and result of the build cache, and every image,
+// with its names, whatever else they have gained since.
+func (w *world) ThenTheSuitesStoresHoldWhatTheyDid() {
+	w.t.Helper()
+	if len(w.suiteBefore.records) == 0 {
+		w.t.Fatal("no Given step built in the suite's stores")
+	}
+	if now := w.cachedIn(testenv.SuiteStores(w.t)); !now.holds(w.suiteBefore) {
+		w.t.Errorf("the suite's stores held %v, and now %v, want them as they were", w.suiteBefore, now)
+	}
 }

@@ -61,16 +61,6 @@ func usePrivateStores(t *testing.T) {
 	t.Cleanup(func() { privateStores = previous })
 }
 
-// inSuiteStores calls use with the suite's stores as the ones that vamos and the helpers that inspect stores use,
-// as they were before the test called usePrivateStores.
-func inSuiteStores(t *testing.T, use func()) {
-	t.Helper()
-	private := privateStores
-	privateStores = nil
-	defer func() { privateStores = private }()
-	use()
-}
-
 // insecureRegistry serves a registry over plain HTTP, through handler, which defaults to an empty registry,
 // and marks it insecure in a registries.conf of the test's own, so that the executor,
 // which takes its registry settings from its environment, reaches it; the client needs --tls-verify=false.
@@ -85,14 +75,6 @@ func insecureRegistry(t *testing.T, handler http.Handler) (*httptest.Server, str
 	host := strings.TrimPrefix(server.URL, "http://")
 	testenv.InsecureRegistry(t, host)
 	return server, host
-}
-
-// imageIDs returns the IDs of the images in the local container store for which keep is true.
-func imageIDs(t *testing.T, keep func(storage.Image) bool) map[string]bool {
-	t.Helper()
-	ids, err := stores(t).ImageIDs(keep)
-	must(t, err)
-	return ids
 }
 
 // withStore calls use with the test's container store, open only until use returns.

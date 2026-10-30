@@ -72,29 +72,32 @@ type world struct {
 
 	stdout       string
 	stderr       string
-	err          error            // the last command's
-	dest         string           // the folder that the last command sent to, its own, if it sends
-	inProject    bool             // whether the last command saved into the project, whose other files it didn't send
-	archive      string           // the archive that the last command saved, if it saved one
-	sent         string           // what the last command reports once it has sent its image or files, if it sends any
-	image        v1.Image         // the image that the last command saved or pushed, if it sent one
-	index        v1.ImageIndex    // the index that the last command pushed, if it pushed one
-	sentAs       string           // the image name that the last command pushed or loaded as, if it pushed or loaded
-	docker       func() [][]byte  // the images that the scenario's own Docker daemon has loaded, if it has one
-	daemon       string           // which Docker daemon a Given step gave: "fake", "none" or "host"
-	dockerHost   string           // the host's Docker daemon, as vamos finds it, if the scenario loads into it
-	loadedBefore int              // how many images the scenario's own daemon had loaded before the last command
-	loadRan      bool             // whether the last command loaded into Docker, or tried to
-	ran          bool             // whether any command has run
-	ownStores    bool             // whether the scenario's stores are its own, rather than the suite's
-	cachedBefore cached           // what its own stores held as the last command began, alone
-	cachedAfter  cached           // and as it ended
-	emulating    string           // the platform whose programs the scenario runs under emulation, if any
-	askedDuring  int64            // the requests that the scenario's registry served as the last command ran
-	first        v1.Image         // the first image that the scenario saved
-	saved        []v1.Image       // the images that the scenario saved, in order
-	entries      map[string]entry // the image's files, once a step has read them
-	exported     string           // the folder that the last command exported to, if it exported
+	err          error             // the last command's
+	dest         string            // the folder that the last command sent to, its own, if it sends
+	inProject    bool              // whether the last command saved into the project, whose other files it didn't send
+	archive      string            // the archive that the last command saved, if it saved one
+	sent         string            // what the last command reports once it has sent its image or files, if it sends any
+	image        v1.Image          // the image that the last command saved or pushed, if it sent one
+	index        v1.ImageIndex     // the index that the last command pushed, if it pushed one
+	sentAs       string            // the image name that the last command pushed or loaded as, if it pushed or loaded
+	docker       func() [][]byte   // the images that the scenario's own Docker daemon has loaded, if it has one
+	daemon       string            // which Docker daemon a Given step gave: "fake", "none" or "host"
+	dockerHost   string            // the host's Docker daemon, as vamos finds it, if the scenario loads into it
+	loadedBefore int               // how many images the scenario's own daemon had loaded before the last command
+	loadRan      bool              // whether the last command loaded into Docker, or tried to
+	ran          bool              // whether any command has run
+	ownStores    bool              // whether the scenario's stores are its own, rather than the suite's
+	other        func()            // releases what another vamos holds of the build cache, if one does
+	suiteBefore  cached            // what the suite's stores held once GivenTheSuitesStoresHoldAResult built there
+	alsoNamed    map[string]string // the images that GivenACachedLayerIsAlsoNamed named, by name
+	cachedBefore cached            // what its own stores held as the last command began, alone
+	cachedAfter  cached            // and as it ended
+	emulating    string            // the platform whose programs the scenario runs under emulation, if any
+	askedDuring  int64             // the requests that the scenario's registry served as the last command ran
+	first        v1.Image          // the first image that the scenario saved
+	saved        []v1.Image        // the images that the scenario saved, in order
+	entries      map[string]entry  // the image's files, once a step has read them
+	exported     string            // the folder that the last command exported to, if it exported
 }
 
 // newBuildingWorld starts a scenario that builds, which it skips where buildah can't,
