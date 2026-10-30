@@ -11,13 +11,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Topher-the-Geek/vamos/internal/api"
 	"github.com/Topher-the-Geek/vamos/internal/cache"
-	"github.com/Topher-the-Geek/vamos/internal/graph"
 	"github.com/Topher-the-Geek/vamos/internal/run"
 
 	"github.com/containerd/platforms"
-	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 // native is the platform the tests run on, as vamos names it.
@@ -29,75 +26,6 @@ func foreign() string {
 		return "linux/arm64"
 	}
 	return "linux/amd64"
-}
-
-// TestExecPlatformChoice checks which execution platform the client configures a graph for, among those the
-// executor offers: the one named, or else the one the executor says clients use, or else this machine's, or else the
-// only one; several, none this machine's, must be chosen between. An older coordinator, which says none, is answered
-// as before.
-func TestExecPlatformChoice(t *testing.T) {
-	other := imgspecv1.Platform{OS: "linux", Architecture: "s390x"}
-	another := imgspecv1.Platform{OS: "linux", Architecture: "ppc64le"}
-	host := platforms.Normalize(platforms.DefaultSpec())
-	tests := []struct {
-		name      string
-		offered   []imgspecv1.Platform
-		preferred *imgspecv1.Platform // the executor's
-		flag      string
-		want      string // the platform chosen, or "" for an error
-		err       string
-	}{
-		{name: "this machine's among several", offered: []imgspecv1.Platform{other, host}, want: native},
-		{
-			name:      "the executor's, over this machine's",
-			offered:   []imgspecv1.Platform{host, other},
-			preferred: &other,
-			want:      "linux/s390x",
-		},
-		{
-			name:      "named, over the executor's",
-			offered:   []imgspecv1.Platform{host, other},
-			preferred: &other,
-			flag:      native,
-			want:      native,
-		},
-		{
-			name:      "the executor's, not offered",
-			offered:   []imgspecv1.Platform{other, host},
-			preferred: &another,
-			want:      native,
-		},
-		{name: "the only one", offered: []imgspecv1.Platform{other}, want: "linux/s390x"},
-		{name: "named", offered: []imgspecv1.Platform{other, another}, flag: "linux/ppc64le", want: "linux/ppc64le"},
-		{
-			name:    "several, none this machine's",
-			offered: []imgspecv1.Platform{other, another},
-			err: "the executor doesn't run commands on this machine's platform, " + native +
-				`; choose among "linux/s390x", "linux/ppc64le" with --exec-platform`,
-		},
-		{name: "none", err: "the executor offers no platform to run commands on"},
-		{name: "none, named", flag: "linux/s390x", err: "the executor offers no platform to run commands on"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			inv := &invocation{opts: options{execPlatform: tt.flag}}
-			got, err := inv.execPlatform(api.Capabilities{Platforms: tt.offered, ExecPlatform: tt.preferred})
-			switch {
-			case tt.err != "" && (err == nil || err.Error() != tt.err):
-				t.Errorf("execPlatform = %v, want %q", err, tt.err)
-			case tt.err == "" && (err != nil || platforms.Format(got) != tt.want):
-				t.Errorf("execPlatform = %s, %v; want %s", platforms.Format(got), err, tt.want)
-			}
-		})
-	}
-	// An older coordinator's answer has no execution platform for clients: this machine's is chosen, as before.
-	var older api.Capabilities
-	must(t, json.Unmarshal(fmt.Appendf(nil, `{"platforms":[{"os":"linux","architecture":"s390x"},`+
-		`{"os":%q,"architecture":%q}],"graph_versions":[%d]}`, host.OS, host.Architecture, graph.Version), &older))
-	if got, err := (&invocation{}).execPlatform(older); err != nil || platforms.Format(got) != native {
-		t.Errorf("execPlatform of an older coordinator = %s, %v; want this machine's, %s", platforms.Format(got),
-			err, native)
-	}
 }
 
 // requireEmulation skips the test if r failed because the platform it built for needs an emulator that isn't

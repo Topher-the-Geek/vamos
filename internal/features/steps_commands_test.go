@@ -50,8 +50,11 @@ type commandLine struct {
 // sendingCommands are the commands that send what they build to a folder.
 var sendingCommands = []string{"save", "export"}
 
-// everyCommand are the commands that When steps run with options.
+// everyCommand are the commands that build, which When steps run with options.
 var everyCommand = []string{"save", "export", "build", "push", "load"}
+
+// everyCommandAndGraph are everyCommand and graph, which configures a graph as they do, building nothing.
+var everyCommandAndGraph = append(slices.Clone(everyCommand), "graph")
 
 // to sends to the path name, relative to the folder that the command sends to,
 // rather than to the target's name, with .tar for save. Save and export take it.
@@ -156,9 +159,9 @@ func (c *commandLine) verifyTLS(w *world, by string) {
 }
 
 // onTheExecPlatform runs commands on platform, which EXEC_PLATFORM names, with --exec-platform. Every command
-// takes it.
+// takes it, and graph, which is configured for it.
 func onTheExecPlatform(platform string) option {
-	return option{"onTheExecPlatform", everyCommand, func(_ *world, c *commandLine) {
+	return option{"onTheExecPlatform", everyCommandAndGraph, func(_ *world, c *commandLine) {
 		c.flags = append(c.flags, "--exec-platform", platform)
 	}}
 }
@@ -422,10 +425,11 @@ func (w *world) WhenIBuild(target string, options ...option) {
 
 // WhenIShowTheGraph shows the graph that target configures, which the scenario keeps, for Then steps that compare
 // what other commands do with it.
-func (w *world) WhenIShowTheGraph(target string) {
+func (w *world) WhenIShowTheGraph(target string, options ...option) {
 	w.t.Helper()
+	c := w.apply("graph", options)
 	w.sendsNothing("WhenIShowTheGraph")
-	w.run("graph", target)
+	w.run(append([]string{"graph", target}, c.flags...)...)
 	if w.err != nil {
 		return
 	}

@@ -84,11 +84,12 @@ Delete this file when every box is ticked.
   The handlers' running without the root command, which the latter two and `TestHandlerWithoutRoot` keep, and
   `TestWatchJobWriteFailure`, of how a cancelled job's events are drained into the trace, are internal contracts,
   below.
-- [ ] **How a user sees remote work and its failures.**
+- [x] **How a user sees remote work and its failures.**
   `TestRemoteBuild` and `TestRemoteMistakes` are scenarios of the remote feature, and `TestCheckRegistryHost` and
   `TestCoordinatorFlagMistakes` of the coordinator feature.
   `TestCoordinatorCommand` and `TestCoordinatorWithWorker` are scenarios of the remote feature too, run on a
-  coordinator and worker in this process. Still to move: `TestExecPlatformChoice`.
+  coordinator and worker in this process, and `TestExecPlatformChoice`, through the graph a coordinator's platforms
+  configure.
   `TestUsesContainerStore`, of which command lines main re-executes in a user namespace, is an internal contract.
   The failure modes themselves stay below.
 

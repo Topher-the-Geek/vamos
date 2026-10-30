@@ -15,12 +15,14 @@ import (
 
 	"github.com/Topher-the-Geek/vamos/internal/api"
 	"github.com/Topher-the-Geek/vamos/internal/cli"
+	"github.com/Topher-the-Geek/vamos/internal/graph"
 	"github.com/Topher-the-Geek/vamos/internal/remote"
 	"github.com/Topher-the-Geek/vamos/internal/run"
 	"github.com/Topher-the-Geek/vamos/internal/testenv"
 	"github.com/Topher-the-Geek/vamos/internal/worker"
 	"github.com/google/go-containerregistry/pkg/name"
 	gcrremote "github.com/google/go-containerregistry/pkg/v1/remote"
+	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/spf13/afero"
 	"go.podman.io/storage"
 )
@@ -48,11 +50,62 @@ func (w *world) GivenACoordinator() {
 // of versions, and answers nothing else, not finding it.
 func (w *world) GivenACoordinatorThatRunsOnlyGraphVersions(versions ...int) {
 	w.t.Helper()
+	w.startCoordinatorThatSays(map[string]any{"graph_versions": versions})
+}
+
+// startCoordinatorThatSays starts a coordinator, at <coordinator>, whose capabilities are capabilities, as JSON
+// encodes them, and that answers nothing else, not finding it.
+func (w *world) startCoordinatorThatSays(capabilities any) {
+	w.t.Helper()
+	answer, err := json.Marshal(capabilities)
+	if err != nil {
+		w.t.Fatal(err)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/capabilities", func(rw http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(rw).Encode(api.Capabilities{GraphVersions: versions})
+		rw.Header().Set("Content-Type", "application/json")
+		if _, err := rw.Write(answer); err != nil {
+			w.t.Errorf("the coordinator answering its capabilities: %v", err)
+		}
 	})
 	w.startCoordinator(mux)
+}
+
+// GivenACoordinatorThatOffers starts a coordinator, at <coordinator>, that says it runs commands on offered, and
+// that clients run them on preferred, unless it is "", and answers nothing else, not finding it.
+func (w *world) GivenACoordinatorThatOffers(offered []string, preferred string) {
+	w.t.Helper()
+	caps := api.Capabilities{GraphVersions: []int{graph.Version}}
+	for _, p := range offered {
+		caps.Platforms = append(caps.Platforms, w.platform(p))
+	}
+	if preferred != "" {
+		p := w.platform(preferred)
+		caps.ExecPlatform = &p
+	}
+	w.startCoordinatorThatSays(caps)
+}
+
+// platform returns the platform that text names, stopping the scenario if it names none.
+func (w *world) platform(text string) imgspecv1.Platform {
+	w.t.Helper()
+	p, err := graph.ParsePlatform(text)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	return p
+}
+
+// ThenTheGraphIsConfiguredFor checks that the graph that WhenIShowTheGraph showed is configured for run() steps to
+// run on platform.
+func (w *world) ThenTheGraphIsConfiguredFor(platform string) {
+	w.t.Helper()
+	if w.graph == nil {
+		w.t.Fatal("no When step showed the graph")
+	}
+	if w.graph.ExecPlatform != platform {
+		w.t.Errorf("the graph is configured for %s, want %s", w.graph.ExecPlatform, platform)
+	}
 }
 
 // startCoordinator serves handler, at <coordinator>, until the scenario ends, counting the requests it is sent and
@@ -152,9 +205,9 @@ func (w *world) atCoordinator(s string) string {
 }
 
 // onTheCoordinator builds on the coordinator at url, with --coordinator, in which <coordinator> stands for the
-// scenario's. Every command takes it.
+// scenario's. Every command takes it, and graph, which asks the coordinator which platform to configure for.
 func onTheCoordinator(url string) option {
-	return option{"onTheCoordinator", everyCommand, func(w *world, c *commandLine) {
+	return option{"onTheCoordinator", everyCommandAndGraph, func(w *world, c *commandLine) {
 		w.t.Helper()
 		c.flags = append(c.flags, "--coordinator", w.atCoordinator(url))
 	}}

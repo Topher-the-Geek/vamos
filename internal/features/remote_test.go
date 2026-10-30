@@ -9,6 +9,17 @@ import (
 	"github.com/Topher-the-Geek/vamos/internal/testenv"
 )
 
+// other and another are platforms that aren't this machine's, nor each other.
+var other, another = func() (string, string) {
+	var found []string
+	for _, p := range []string{"linux/s390x", "linux/ppc64le", "linux/riscv64"} {
+		if p != thisPlatform() {
+			found = append(found, p)
+		}
+	}
+	return found[0], found[1]
+}()
+
 // newRemoteWorld starts a scenario of the remote feature, from its background: a coordinator, and a project with a
 // layer and a task that add hello.txt, which builds. --coordinator, or $VAMOS_COORDINATOR, names a coordinator that
 // builds instead of this process, and from whose stores the command reads what it sends.
@@ -166,9 +177,104 @@ func TestRemote_InterruptedCoordinatorCancelsItsBuilds(t *testing.T) {
 	})
 }
 
-// newRemoteMistakeWorld starts a scenario of the remote feature whose coordinator can't be used, which fails before
-// anything is built, so that it needs no buildah: a project with a layer.
-func newRemoteMistakeWorld(t *testing.T) *world {
+// TestRemote_ChoosesTheExecutionPlatform specifies which of the platforms that a coordinator offers a command
+// configures run() steps for: the one --exec-platform names, or else the one the coordinator says clients use, if
+// it offers it, or else this machine's, or else the only one; among several, none of them this machine's, the user
+// chooses. A coordinator that says nothing of which clients use, as older ones don't, is one that prefers none.
+func TestRemote_ChoosesTheExecutionPlatform(t *testing.T) {
+	for _, example := range []struct {
+		name      string
+		offered   []string
+		preferred string
+		options   []option
+		chosen    string
+	}{
+		{
+			name:    "This machine's platform is chosen among several",
+			offered: []string{other, thisPlatform()},
+			chosen:  thisPlatform(),
+		},
+		{
+			name:      "The coordinator's preference is chosen over this machine's",
+			offered:   []string{thisPlatform(), other},
+			preferred: other,
+			chosen:    other,
+		},
+		{
+			name:      "The platform named is chosen over the coordinator's preference",
+			offered:   []string{thisPlatform(), other},
+			preferred: other,
+			options:   []option{onTheExecPlatform(thisPlatform())},
+			chosen:    thisPlatform(),
+		},
+		{
+			name:      "A preference the coordinator doesn't offer is passed over for this machine's",
+			offered:   []string{other, thisPlatform()},
+			preferred: another,
+			chosen:    thisPlatform(),
+		},
+		{
+			name:    "The only platform offered is chosen",
+			offered: []string{other},
+			chosen:  other,
+		},
+		{
+			name:    "The platform named is chosen among several, none this machine's",
+			offered: []string{other, another},
+			options: []option{onTheExecPlatform(another)},
+			chosen:  another,
+		},
+	} {
+		t.Run(example.name, func(t *testing.T) {
+			w := newRemoteGraphWorld(t)
+			w.GivenACoordinatorThatOffers(example.offered, example.preferred)
+			w.WhenIShowTheGraph("app", append(example.options, onTheCoordinator("<coordinator>"))...)
+			w.ThenItSucceeds()
+			w.ThenTheGraphIsConfiguredFor(example.chosen)
+		})
+	}
+
+	for _, example := range []struct {
+		name    string
+		offered []string
+		options []option
+		error   string
+	}{
+		{
+			name:    "Several platforms, none this machine's, fail unless one is named",
+			offered: []string{other, another},
+			error: "the executor doesn't run commands on this machine's platform, " + thisPlatform() +
+				fmt.Sprintf(`; choose among %q, %q with --exec-platform`, other, another),
+		},
+		{
+			name:    "A platform named that the coordinator doesn't offer fails",
+			offered: []string{other, thisPlatform()},
+			options: []option{onTheExecPlatform(another)},
+			error: fmt.Sprintf("--exec-platform %s: the executor doesn't run commands on %s; it offers %q, %q",
+				another, another, other, thisPlatform()),
+		},
+		{
+			name:  "A coordinator that offers no platform fails",
+			error: "the executor offers no platform to run commands on",
+		},
+		{
+			name:    "A coordinator that offers no platform fails, even with one named",
+			options: []option{onTheExecPlatform(other)},
+			error:   "the executor offers no platform to run commands on",
+		},
+	} {
+		t.Run(example.name, func(t *testing.T) {
+			w := newRemoteGraphWorld(t)
+			w.GivenACoordinatorThatOffers(example.offered, "")
+			w.WhenIShowTheGraph("app", append(example.options, onTheCoordinator("<coordinator>"))...)
+			w.ThenItFailsWith(example.error)
+		})
+	}
+}
+
+// newRemoteGraphWorld starts a scenario of the remote feature that builds nothing, as when its coordinator can't be
+// used, or only its graph is shown, so that it needs no buildah: a project with a layer.
+func newRemoteGraphWorld(t *testing.T) *world {
 	t.Helper()
 	w := newWorld(t)
 	w.GivenTheBuildFileDeclares(`
@@ -199,14 +305,14 @@ func TestRemote_CoordinatorThatCantBeUsedFails(t *testing.T) {
 		},
 	} {
 		t.Run(example.name, func(t *testing.T) {
-			w := newRemoteMistakeWorld(t)
+			w := newRemoteGraphWorld(t)
 			w.WhenIBuild("app", onTheCoordinator(example.coordinator))
 			w.ThenItFailsWith(example.error)
 		})
 	}
 
 	t.Run("A coordinator that runs other graph versions fails, naming them", func(t *testing.T) {
-		w := newRemoteMistakeWorld(t)
+		w := newRemoteGraphWorld(t)
 		w.GivenACoordinatorThatRunsOnlyGraphVersions(graph.Version + 1000)
 		w.WhenIBuild("app", onTheCoordinator("<coordinator>"))
 		w.ThenItFailsWith(fmt.Sprintf("the coordinator at <coordinator> runs graph versions [%d], not this vamos's, "+
@@ -214,7 +320,7 @@ func TestRemote_CoordinatorThatCantBeUsedFails(t *testing.T) {
 	})
 
 	t.Run("A secret is refused before the coordinator is reached", func(t *testing.T) {
-		w := newRemoteMistakeWorld(t)
+		w := newRemoteGraphWorld(t)
 		w.GivenACoordinatorThatRunsOnlyGraphVersions(graph.Version)
 		w.WhenIBuild("app", onTheCoordinator("<coordinator>"), withSecrets("id=token,env=HOME"))
 		w.ThenItFailsWith("--secret token can't go to a coordinator, which has no authentication or TLS; " +
