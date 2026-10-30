@@ -15,7 +15,7 @@ import (
 )
 
 // TestHandlerWithoutRoot checks that a command handler runs without the root command: the graph command,
-// given its options and writers alone, prints the graph.
+// given its options and writers alone, prints the graph to its writer.
 func TestHandlerWithoutRoot(t *testing.T) {
 	fsys := project(t, map[string]string{"BUILD": pullBusybox + `layer(name="app", base="busybox")`})
 	var stdout, stderr bytes.Buffer
@@ -35,30 +35,16 @@ func TestHandlerWithoutRoot(t *testing.T) {
 	if stderr.Len() != 0 {
 		t.Errorf("stderr = %q, want nothing", stderr.String())
 	}
-}
-
-// TestOutputWriteFailure checks that a failure to write a command's output is the command's error.
-func TestOutputWriteFailure(t *testing.T) {
-	fsys := project(t, map[string]string{"BUILD": pullBusybox + `layer(name="app", base="busybox")`})
+	// What it can't write to its writer is its error: it writes to that writer, and no other.
 	broken := errors.New("stdout is closed")
-	inv := &invocation{
-		app:    &app{fs: fsys, store: &stores(t).Options},
-		ctx:    t.Context(),
-		stdout: writerFunc(func([]byte) (int, error) { return 0, broken }),
-		stderr: &bytes.Buffer{},
-		opts:   options{dir: projectDir},
-	}
+	inv.stdout = writerFunc(func([]byte) (int, error) { return 0, broken })
 	if err := inv.graph([]string{"app"}); !errors.Is(err, broken) {
-		t.Errorf("graph = %v, want %v", err, broken)
-	}
-	r := vamosWithOutput(t, fsys, t.Context(), nil, "graph", "app", "-C", projectDir)
-	if r.err != nil || !strings.Contains(r.stdout, `"nodes"`) {
-		t.Errorf("through the root command, graph = %v, stdout %q", r.err, r.stdout)
+		t.Errorf("graph with a broken writer = %v, want %v", err, broken)
 	}
 }
 
-// TestPruneHandlerWithoutRoot checks that the prune handler runs without the root command, on stores of its own,
-// and that a failure to write its report is its error, with the prune still done.
+// TestPruneHandlerWithoutRoot checks that the prune handler runs without the root command, on stores of its own.
+// The prune feature specifies what a prune does, and what it reports.
 func TestPruneHandlerWithoutRoot(t *testing.T) {
 	requireBuildah(t)
 	usePrivateStores(t)
@@ -74,15 +60,10 @@ func TestPruneHandlerWithoutRoot(t *testing.T) {
 	if !strings.HasPrefix(stdout.String(), "Removed 0 images") {
 		t.Errorf("prune printed %q", stdout.String())
 	}
-	broken := errors.New("stdout is closed")
-	inv.stdout = writerFunc(func([]byte) (int, error) { return 0, broken })
-	if err := inv.prune(); !errors.Is(err, broken) {
-		t.Errorf("prune with a broken stdout = %v, want %v", err, broken)
-	}
 }
 
-// TestBuildHandlerWithoutRoot checks that the build handler, with a trace, runs without the root command,
-// and that a failure to write the build's progress stops the build and is reported.
+// TestBuildHandlerWithoutRoot checks that the build handler, with a trace, runs without the root command.
+// The output feature specifies what a failure to write the build's progress does.
 func TestBuildHandlerWithoutRoot(t *testing.T) {
 	requireBuildah(t)
 	fsys := project(t, map[string]string{
@@ -107,14 +88,6 @@ func TestBuildHandlerWithoutRoot(t *testing.T) {
 	}
 	if _, err := os.Stat(tracePath); err != nil {
 		t.Errorf("no trace written: %v", err)
-	}
-
-	broken := errors.New("stdout is closed")
-	inv.stdout = writerFunc(func([]byte) (int, error) { return 0, broken })
-	inv.opts.trace, inv.opts.rebuild = "", true
-	err := inv.build([]string{"app"})
-	if !errors.Is(err, broken) || !strings.Contains(err.Error(), "writing the build's progress") {
-		t.Errorf("build with a broken stdout = %v, want the write's failure, named", err)
 	}
 }
 

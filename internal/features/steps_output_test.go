@@ -28,7 +28,7 @@ func (w *world) ThenItSucceeds() {
 		w.t.Fatalf("vamos failed: %v\n%s", w.err, w.outputs())
 	}
 	if w.sent == "" {
-		if slices.ContainsFunc(sentReports, w.reported) {
+		if slices.ContainsFunc(sentReports, w.triedToReport) {
 			w.t.Fatalf("reported something sent, want nothing\n%s", w.outputs())
 		}
 	} else if !strings.HasPrefix(lastLine(w.stdout), w.sent) {
@@ -60,6 +60,33 @@ func (w *world) ThenItSucceeds() {
 func lastLine(s string) string {
 	lines := strings.Split(strings.TrimSuffix(s, "\n"), "\n")
 	return lines[len(lines)-1]
+}
+
+// ThenItFailsForTheClosedOutput checks that the command failed, as ThenItFailsWith checks, with wants, in which
+// <closed> stands for the error that standard output gave it, after GivenStandardOutputIsClosed, or with only that
+// error, without wants, and that the error wraps that error, rather than only quoting it.
+func (w *world) ThenItFailsForTheClosedOutput(wants ...string) {
+	w.t.Helper()
+	if len(wants) == 0 {
+		wants = []string{"<closed>"}
+	}
+	var expanded []string
+	for _, want := range wants {
+		expanded = append(expanded, strings.ReplaceAll(want, "<closed>", errOutputClosed.Error()))
+	}
+	w.ThenItFailsWith(expanded...)
+	if !errors.Is(w.err, errOutputClosed) {
+		w.t.Errorf("the command's error %v doesn't wrap standard output's", w.err)
+	}
+}
+
+// ThenItTriedToPrintOnly checks that the command, whose standard output was closed, tried to print there only what
+// starts with want: that nothing it printed before failed.
+func (w *world) ThenItTriedToPrintOnly(want string) {
+	w.t.Helper()
+	if !strings.HasPrefix(w.tried, want) {
+		w.t.Errorf("the command tried to print %q, want only what starts with %q", w.tried, want)
+	}
 }
 
 // ThenItFailsWith checks that the command failed, at run time, with an error that contains each of wants,
@@ -95,7 +122,7 @@ func (w *world) fails(usage bool, wants []string) {
 			errs = append(errs, fmt.Errorf("error = %q, want it to contain %q", w.err, want))
 		}
 	}
-	if printed := w.reported("Usage:"); printed && !usage {
+	if printed := w.triedToReport("Usage:"); printed && !usage {
 		errs = append(errs, fmt.Errorf("printed usage for a failure at run time\n%s", w.outputs()))
 	} else if !printed && usage {
 		errs = append(errs, fmt.Errorf("printed no usage for a mistake on the command line\n%s", w.outputs()))
@@ -149,8 +176,17 @@ func (w *world) reported(s string) bool {
 	return strings.Contains(w.stdout, s) || strings.Contains(w.stderr, s)
 }
 
+// triedToReport reports whether the command wrote s, as reported says, or tried to print it to standard output that
+// was closed: for checks that it printed nothing it shouldn't, whether or not anyone saw it.
+func (w *world) triedToReport(s string) bool {
+	return w.reported(s) || strings.Contains(w.tried, s)
+}
+
 // outputs shows what the command wrote, for a failure's message.
 func (w *world) outputs() string {
+	if w.tried != "" {
+		return fmt.Sprintf("stdout, closed, refused:\n%s\nstderr:\n%s", w.tried, w.stderr)
+	}
 	return fmt.Sprintf("stdout:\n%s\nstderr:\n%s", w.stdout, w.stderr)
 }
 

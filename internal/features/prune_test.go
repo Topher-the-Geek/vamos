@@ -43,6 +43,18 @@ func TestPrune_RemovesCachedResults(t *testing.T) {
 		w.ThenTheSuitesStoresHoldWhatTheyDid()
 	})
 
+	t.Run("A prune whose report can't be written still prunes, and fails with the write's failure",
+		func(t *testing.T) {
+			w := newPruneWorld(t)
+			w.WhenIBuild("app")
+			w.ThenItSucceeds()
+			w.GivenStandardOutputIsClosed()
+			w.WhenIPrune()
+			w.ThenItFailsForTheClosedOutput()
+			w.ThenItTriedToPrintOnly("Removed ") // its report, once it had pruned, so that the write stopped nothing
+			w.ThenTheBuildCacheHoldsNothing()
+		})
+
 	t.Run("A second prune removes nothing", func(t *testing.T) {
 		w := newPruneWorld(t)
 		w.WhenIBuild("app")

@@ -36,6 +36,9 @@ func (w *world) interruptOnce() {
 	if w.interruptOn != "" || w.interruptIn != 0 {
 		w.t.Fatal("the command is given more than one option that interrupts it")
 	}
+	if w.outputClosed {
+		w.t.Fatal("a command whose standard output is closed stops on its first write, before any interrupt")
+	}
 }
 
 // interrupter writes what a command prints to out, and cancels the command once it has printed text.

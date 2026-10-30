@@ -77,9 +77,13 @@ Delete this file when every box is ticked.
   `TestFailedStepLog` and `TestFailedOutputLog`, of the log that an executor's `api.Failure` names, which the command
   line never prints, and which a coordinator replays to jobs that share a failed attempt, are internal contracts,
   below.
-- [ ] **Failures to write output.**
-  `TestOutputWriteFailure`, `TestBuildHandlerWithoutRoot`, `TestWatchJobWriteFailure`, `TestPruneHandlerWithoutRoot`.
-  Scenarios with a step that makes standard output fail.
+- [x] **Failures to write output.**
+  What `TestOutputWriteFailure`, `TestBuildHandlerWithoutRoot` and `TestPruneHandlerWithoutRoot` checked of a
+  standard output that can't be written is the output feature's, and the prune feature's; the graph that
+  `vamos graph` prints is read by `WhenIShowTheGraph`, which the trace feature uses.
+  The handlers' running without the root command, which the latter two and `TestHandlerWithoutRoot` keep, and
+  `TestWatchJobWriteFailure`, of how a cancelled job's events are drained into the trace, are internal contracts,
+  below.
 - [ ] **How a user sees remote work and its failures.**
   `TestRemoteBuild`, `TestRemoteMistakes`, `TestCoordinatorCommand`, `TestCoordinatorWithWorker`,
   `TestExecPlatformChoice`,
@@ -97,6 +101,7 @@ Delete this file when every box is ticked.
   `apitest.Contract` (`TestContract`, `TestContractJSON`, `TestContractHTTP`), `TestErrorsCross`,
   `TestFailureCrosses`, `TestWorkerFailureCrosses`, `TestReleaseCrosses`, `TestGraphValidate`, `TestGraphRoundTrip`,
   `TestFailedStepLog`, `TestFailedOutputLog`,
+  `TestHandlerWithoutRoot`, `TestBuildHandlerWithoutRoot`, `TestPruneHandlerWithoutRoot`, `TestWatchJobWriteFailure`,
   `TestGraphExamples` and `internal/api`.
 - [ ] **The test harness.**
   `internal/testenv`, and the features package's own tests of its matchers and image reader.

@@ -96,6 +96,8 @@ type world struct {
 	interruptIn  time.Duration     // how long interruptedAfter lets the command running run
 	containers   map[string]bool   // the containers in the store when the scenario started, if it builds
 	took         time.Duration     // how long the last command ran
+	outputClosed bool              // whether the command running's standard output fails every write
+	tried        string            // what the last command tried to print to standard output that was closed
 	tracePath    string            // where the last command wrote its trace, if traced() asked it to
 	trace        *trace            // the trace there, once a step has read it
 	graph        *graph.Graph      // the graph that WhenIShowTheGraph showed last
@@ -114,13 +116,23 @@ type world struct {
 	exported     string            // the folder that the last command exported to, if it exported
 }
 
-// newBuildingWorld starts a scenario that builds, which it skips where buildah can't,
-// noting the store's images and containers, so that ThenNoImageIsLeftBehind and ThenTheCommandLeavesNoContainer
-// can tell those the scenario leaves.
+// newBuildingWorld starts a scenario that builds, which it skips where buildah can't, as GivenBuildahCanBuildHere.
 func newBuildingWorld(t *testing.T) *world {
 	t.Helper()
-	testenv.RequireBuildah(t)
 	w := newWorld(t)
+	w.GivenBuildahCanBuildHere()
+	return w
+}
+
+// GivenBuildahCanBuildHere skips the scenario where buildah can't build, since it builds, and notes the store's
+// images and containers, so that ThenNoImageIsLeftBehind and ThenTheCommandLeavesNoContainer can tell those the
+// scenario leaves.
+func (w *world) GivenBuildahCanBuildHere() {
+	w.t.Helper()
+	if w.ran {
+		w.t.Fatal("GivenBuildahCanBuildHere comes before any command, so that it notes what the scenario leaves")
+	}
+	testenv.RequireBuildah(w.t)
 	err := w.stores.WithStore(func(store storage.Store) error {
 		images, err := store.Images()
 		if err != nil {
@@ -140,9 +152,8 @@ func newBuildingWorld(t *testing.T) *world {
 		return err
 	})
 	if err != nil {
-		t.Fatal(err)
+		w.t.Fatal(err)
 	}
-	return w
 }
 
 // newWorld starts a scenario that needs no buildah, since it fails before anything is built.
@@ -183,12 +194,18 @@ func (w *world) execute(fsys afero.Fs, args []string) {
 	w.loadRan, w.trace = false, nil
 	w.tracePath, w.traceTo = w.traceTo, ""
 	cmd := cli.NewRootCommand(cli.Config{Fs: fsys, Store: &w.stores.Options})
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr, tried bytes.Buffer
 	ctx, cancel := context.WithCancel(w.t.Context())
 	defer cancel()
-	if w.interruptOn != "" {
+	if w.outputClosed && (w.interruptOn != "" || w.interruptIn != 0) {
+		w.t.Fatal("a command whose standard output is closed stops on its first write, before any interrupt")
+	}
+	switch {
+	case w.outputClosed:
+		cmd.SetOut(closedOutput{&tried})
+	case w.interruptOn != "":
 		cmd.SetOut(&interrupter{out: &stdout, text: []byte(w.interruptOn), cancel: cancel})
-	} else {
+	default:
 		cmd.SetOut(&stdout)
 	}
 	interruptIn := w.interruptIn
@@ -211,7 +228,8 @@ func (w *world) execute(fsys afero.Fs, args []string) {
 	if w.ownStores {
 		w.cachedAfter = w.cached()
 	}
-	w.stdout, w.stderr = stdout.String(), stderr.String()
+	w.stdout, w.stderr, w.tried = stdout.String(), stderr.String(), tried.String()
+	w.outputClosed = false // for this command alone
 }
 
 // project returns a new filesystem holding the scenario's project: in memory, unless it holds links

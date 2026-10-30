@@ -1,8 +1,10 @@
 package features
 
 import (
+	"bytes"
 	"cmp"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -30,6 +32,27 @@ import (
 )
 
 // Given steps set up a scenario's project.
+
+// GivenStandardOutputIsClosed makes the next command's standard output fail every write, as a pipe does once
+// what reads it has gone, such as head once it has read its lines: with the error that errOutputClosed is.
+// What the command tried to print there is no part of its output, though steps that check it printed no usage, or
+// reported nothing sent, see it.
+func (w *world) GivenStandardOutputIsClosed() {
+	w.t.Helper()
+	w.outputClosed = true
+}
+
+// errOutputClosed is what writing to standard output fails with, after GivenStandardOutputIsClosed.
+var errOutputClosed = errors.New("standard output is closed")
+
+// closedOutput is standard output after GivenStandardOutputIsClosed, which fails every write, noting what it was
+// given in tried.
+type closedOutput struct{ tried *bytes.Buffer }
+
+func (c closedOutput) Write(p []byte) (int, error) {
+	c.tried.Write(p)
+	return 0, errOutputClosed
+}
 
 // GivenAProjectThatPullsBusybox starts the BUILD file with the pull "busybox", of busybox:1.36,
 // the one BUILD text that a step writes rather than the scenario. It stops the scenario if the BUILD file holds
