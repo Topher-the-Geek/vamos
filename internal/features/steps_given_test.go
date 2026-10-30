@@ -13,7 +13,9 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/Topher-the-Geek/vamos/internal/testenv"
 	"github.com/containerd/platforms"
@@ -47,12 +49,12 @@ func (w *world) GivenTheBuildFileDeclares(build string) {
 }
 
 // GivenTheBuildFileChanges replaces the first old in the BUILD file with new, in both of which <registry> stands for
-// the host of the scenario's registry.
+// the host of the scenario's registry, and <outside> for the folder of GivenAFileOutsideTheProjectHolds.
 // The BUILD text that it changes is the scenario's own, or a fixture declared in the same feature's file,
 // so that a reader can find what it changes. It stops the scenario if the BUILD file doesn't hold old.
 func (w *world) GivenTheBuildFileChanges(old, new string) {
 	w.t.Helper()
-	old, new = w.atRegistry(old), w.atRegistry(new)
+	old, new = w.atOutside(w.atRegistry(old)), w.atOutside(w.atRegistry(new))
 	if !strings.Contains(w.files["BUILD"], old) {
 		w.t.Fatalf("the BUILD file doesn't hold %q\n%s", old, w.files["BUILD"])
 	}
@@ -60,7 +62,8 @@ func (w *world) GivenTheBuildFileChanges(old, new string) {
 }
 
 // GivenThePackageDeclares appends build, dedented, to the BUILD file of the package in dir, "." for the project's,
-// in which <registry> stands for the host of the scenario's registry.
+// in which <registry> stands for the host of the scenario's registry, and <outside> for the folder of
+// GivenAFileOutsideTheProjectHolds, which comes first.
 // A blank build appends nothing, though the package then has its BUILD file, empty if it had none.
 func (w *world) GivenThePackageDeclares(dir, build string) {
 	w.t.Helper()
@@ -69,7 +72,7 @@ func (w *world) GivenThePackageDeclares(dir, build string) {
 		w.files[file] += ""
 		return
 	}
-	w.files[file] += dedent(w.atRegistry(build))
+	w.files[file] += dedent(w.atOutside(w.atRegistry(build)))
 }
 
 // GivenIWorkIn makes later commands run in dir, within the project, "." for the project itself,
@@ -160,6 +163,15 @@ func (w *world) GivenTheProjectLinks(project links) {
 	maps.Copy(w.links, project)
 }
 
+// GivenFilesOutsideTheProjectHold writes each of written, by path, as GivenAFileOutsideTheProjectHolds does,
+// and nothing for none.
+func (w *world) GivenFilesOutsideTheProjectHold(written files) {
+	w.t.Helper()
+	for _, name := range slices.Sorted(maps.Keys(written)) {
+		w.GivenAFileOutsideTheProjectHolds(name, written[name])
+	}
+}
+
 // GivenTheEnvironmentSets sets the environment variable name of the vamos process, for the rest of the scenario.
 func (w *world) GivenTheEnvironmentSets(name, value string) {
 	w.t.Helper()
@@ -174,7 +186,8 @@ func (w *world) GivenTheEnvironmentDoesNotSet(name string) {
 }
 
 // GivenAFileOutsideTheProjectHolds writes content to the file name, a path, in a folder outside the project,
-// which <outside> stands for in the secrets of the withSecrets option and the targets of GivenTheProjectLinks.
+// at an old time, which <outside> stands for in the secrets of the withSecrets option, the targets of links that
+// Given and Then steps take, and BUILD text, which a scenario declares after this step.
 func (w *world) GivenAFileOutsideTheProjectHolds(name, content string) {
 	w.t.Helper()
 	if w.outside == "" {
@@ -187,6 +200,19 @@ func (w *world) GivenAFileOutsideTheProjectHolds(name, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		w.t.Fatal(err)
 	}
+	// An old time, which a command that touched the file would change.
+	old := time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(path, old, old); err != nil {
+		w.t.Fatal(err)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	if w.outsideWas == nil {
+		w.outsideWas = map[string]outsideFile{}
+	}
+	w.outsideWas[name] = outsideFile{content, info}
 }
 
 // GivenTheProjectFileCannotBeChecked makes the project file at path, besides any that earlier calls named,

@@ -60,14 +60,15 @@ type world struct {
 	root    string          // the folder that holds the project, if it is on disk
 	before  map[string]bool // the store's unnamed images when the scenario began, if it builds
 
-	prepared string              // the folder that the next command sends to, if Given steps have put something there
-	outside  string              // a folder outside the project, for files that commands read, such as secrets
-	registry string              // the host of the scenario's registry, <registry>, once a Given step starts it
-	login    authn.Authenticator // that the scenario's registry needs, which steps that read from it use
-	server   *httptest.Server    // that serves the scenario's registry, once a Given step starts it
-	asked    atomic.Int64        // the requests that the scenario's registry has served
-	stopped  atomic.Bool         // whether the scenario's registry has stopped answering
-	held     map[string]v1.Image // the images that Given steps put in the registry, by label and platform
+	prepared   string                 // the folder the next command sends to, if Given steps have put something there
+	outside    string                 // a folder outside the project, for files that commands read, such as secrets
+	outsideWas map[string]outsideFile // what GivenAFileOutsideTheProjectHolds wrote there, by name
+	registry   string                 // the host of the scenario's registry, <registry>, once a Given step starts it
+	login      authn.Authenticator    // that the scenario's registry needs, which steps that read from it use
+	server     *httptest.Server       // that serves the scenario's registry, once a Given step starts it
+	asked      atomic.Int64           // the requests that the scenario's registry has served
+	stopped    atomic.Bool            // whether the scenario's registry has stopped answering
+	held       map[string]v1.Image    // the images that Given steps put in the registry, by label and platform
 
 	stdout       string
 	stderr       string
@@ -239,7 +240,13 @@ type entry struct {
 	content string    // a regular file's
 	target  string    // a symbolic link's
 	modTime time.Time // when it was last modified
-	owner   string    // its owner and group in an image, as "uid:gid"
+	owner   string    // its owner and group, as "uid:gid"
+}
+
+// outsideFile is a file that GivenAFileOutsideTheProjectHolds wrote: what it held, and what Lstat said of it then.
+type outsideFile struct {
+	content string
+	info    os.FileInfo
 }
 
 // matchFiles checks entries against want, regular files by path.

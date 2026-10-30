@@ -113,7 +113,8 @@ Its parent directory must already exist.
 
 When vamos runs as root, exported files receive the owner and group of the destination's parent directory.
 Otherwise, files belong to the user running vamos, with the filesystem's usual group assignment.
-They receive the task's timestamp, and keep the modes the task selected them with.
+They receive the task's timestamp, and keep the modes the task selected them with,
+setuid and setgid bits among them where the task's `mode_mask` retains them, whatever their owner.
 Symbolic links are written as links, never followed.
 
 ### `prune`

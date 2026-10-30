@@ -1,15 +1,20 @@
 package features
 
 import (
+	"fmt"
 	"io/fs"
 	"maps"
 	"os"
 	"path"
 	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Topher-the-Geek/vamos/internal/cache"
+	"github.com/Topher-the-Geek/vamos/internal/testenv"
 )
 
 // Steps about the folder that a command sends to, and the files that export writes there.
@@ -47,6 +52,37 @@ func (w *world) GivenTheDestinationHasTheFolders(paths ...string) {
 		if err := os.MkdirAll(filepath.Join(w.destination(), path), 0o755); err != nil {
 			w.t.Fatal(err)
 		}
+	}
+}
+
+// GivenTheDestinationLinks puts symbolic links, by path, to their targets, in the folder that the next command sends
+// to, in which <outside> stands for the folder of GivenAFileOutsideTheProjectHolds.
+func (w *world) GivenTheDestinationLinks(destination links) {
+	w.t.Helper()
+	for path, target := range w.atOutsideLinks(destination) {
+		path = filepath.Join(w.destination(), path)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			w.t.Fatal(err)
+		}
+		if err := os.Symlink(target, path); err != nil {
+			w.t.Fatal(err)
+		}
+	}
+}
+
+// GivenTheDestinationIsOwnedBy gives the folder that the next command sends to the owner owner, as "uid:gid",
+// skipping the scenario where the tests can't change owners.
+func (w *world) GivenTheDestinationIsOwnedBy(owner string) {
+	w.t.Helper()
+	testenv.RequireOwnership(w.t)
+	u, g, _ := strings.Cut(owner, ":")
+	uid, uidErr := strconv.Atoi(u)
+	gid, gidErr := strconv.Atoi(g)
+	if uidErr != nil || gidErr != nil {
+		w.t.Fatalf("%q isn't an owner, as uid:gid", owner)
+	}
+	if err := os.Chown(w.destination(), uid, gid); err != nil {
+		w.t.Fatal(err)
 	}
 }
 
@@ -124,10 +160,17 @@ func (w *world) ThenTheExportPathsAre(want ...string) {
 }
 
 // ThenTheExportLinks checks that the symbolic links in the folder exported to are exactly want, by path,
-// to their targets.
+// to their targets, in which <outside> stands for the folder of GivenAFileOutsideTheProjectHolds.
 func (w *world) ThenTheExportLinks(want links) {
 	w.t.Helper()
-	w.check(matchLinks(w.exportedEntries(), want, true))
+	w.check(matchLinks(w.exportedEntries(), w.atOutsideLinks(want), true))
+}
+
+// ThenTheExportOwnersAre checks the owners, as "uid:gid", of the files, folders and links exported at want's paths,
+// "." for the folder exported to, and checks no others.
+func (w *world) ThenTheExportOwnersAre(want owners) {
+	w.t.Helper()
+	w.check(matchOwners(w.exportedEntries(), want))
 }
 
 // ThenTheExportModesAre checks the modes of the files and folders exported at want's paths, "." for the folder
@@ -158,6 +201,13 @@ func (w *world) ThenTheDestinationHolds(want files) {
 func (w *world) ThenTheDestinationHoldsAtLeast(want files) {
 	w.t.Helper()
 	w.check(matchFiles(w.destinationEntries(), want, false))
+}
+
+// ThenTheDestinationLinksAtLeast checks that the destination's symbolic links at want's paths lead to their targets,
+// in which <outside> stands for the folder of GivenAFileOutsideTheProjectHolds, and checks no others.
+func (w *world) ThenTheDestinationLinksAtLeast(want links) {
+	w.t.Helper()
+	w.check(matchLinks(w.destinationEntries(), w.atOutsideLinks(want), false))
 }
 
 // ThenTheDestinationModesAre checks the modes of the files and folders at want's paths,
@@ -216,6 +266,7 @@ func (w *world) folderEntries(dir string) map[string]entry {
 			symlink: d.Type()&fs.ModeSymlink != 0,
 			mode:    int64(cache.ChmodBits(info)),
 			modTime: info.ModTime(),
+			owner:   ownerOf(info),
 		}
 		switch {
 		case e.regular:
@@ -243,4 +294,82 @@ func withoutRoot(entries map[string]entry) map[string]entry {
 	entries = maps.Clone(entries)
 	delete(entries, ".")
 	return entries
+}
+
+// ThenTheFilesOutsideTheProjectAreAsTheyWere checks, as ThenTheFileOutsideTheProjectIsAsItWas does, each file that
+// GivenAFileOutsideTheProjectHolds wrote: none, if it wrote none.
+func (w *world) ThenTheFilesOutsideTheProjectAreAsTheyWere() {
+	w.t.Helper()
+	for _, name := range slices.Sorted(maps.Keys(w.outsideWas)) {
+		w.ThenTheFileOutsideTheProjectIsAsItWas(name)
+	}
+}
+
+// ThenTheFileOutsideTheProjectIsAsItWas checks that the file name, which GivenAFileOutsideTheProjectHolds wrote,
+// has the content, mode, time and owner it had then.
+func (w *world) ThenTheFileOutsideTheProjectIsAsItWas(name string) {
+	w.t.Helper()
+	was, ok := w.outsideWas[name]
+	if !ok {
+		w.t.Fatalf("no file outside the project is named %s", name)
+	}
+	path := filepath.Join(w.outside, name)
+	now, err := os.Lstat(path)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	if string(content) != was.content {
+		w.t.Errorf("%s holds %q, want %q, as it did", name, content, was.content)
+	}
+	if now.Mode() != was.info.Mode() || !now.ModTime().Equal(was.info.ModTime()) ||
+		w.ownedBy(now) != w.ownedBy(was.info) {
+		w.t.Errorf("%s is %v, %v, owned by %s; want it as it was: %v, %v, owned by %s", name,
+			now.Mode(), now.ModTime(), w.ownedBy(now), was.info.Mode(), was.info.ModTime(), w.ownedBy(was.info))
+	}
+}
+
+// ThenNothingElseIsOutsideTheProject checks that the folder of GivenAFileOutsideTheProjectHolds holds no file,
+// link or other node but those that the step wrote, and the folders that lead to them: nothing, if it wrote none.
+func (w *world) ThenNothingElseIsOutsideTheProject() {
+	w.t.Helper()
+	if w.outside == "" {
+		return // nothing is there, as no step made the folder
+	}
+	written := slices.Collect(maps.Keys(w.outsideWas))
+	w.check(matchPaths(withoutRoot(w.folderEntries(w.outside)), pathsOf(nil, written)))
+}
+
+// ownerOf returns the owner of the file that info describes, as "uid:gid", or nothing on a system that doesn't say.
+func ownerOf(info os.FileInfo) string {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("%d:%d", st.Uid, st.Gid)
+}
+
+// ownedBy returns the owner of the file that info describes, as "uid:gid",
+// failing the scenario on a system that doesn't say, for a check of owners.
+func (w *world) ownedBy(info os.FileInfo) string {
+	w.t.Helper()
+	owner := ownerOf(info)
+	if owner == "" {
+		w.t.Fatalf("%s has no owner that this system says", info.Name())
+	}
+	return owner
+}
+
+// atOutsideLinks returns links with each <outside> in their targets replaced by the folder of
+// GivenAFileOutsideTheProjectHolds.
+func (w *world) atOutsideLinks(given links) links {
+	w.t.Helper()
+	expanded := links{}
+	for path, target := range given {
+		expanded[path] = w.atOutside(target)
+	}
+	return expanded
 }

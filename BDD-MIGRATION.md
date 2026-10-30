@@ -51,10 +51,10 @@ Delete this file when every box is ticked.
 - [x] **Steps and task outputs.**
   `TestIncludeProject`, `TestSteps`, `TestWorkdirUser` and `TestTaskOutputLinks` are scenarios of the glob, env,
   layer and task features.
-- [ ] **Export details.**
-  `internal/finish`: `TestExportLinks`, `TestExportOwners`, `TestExportSetuid`, `TestExportReplace`,
-  `TestExportReplacesOnlyFolders`, `TestExportIntoEmptyFolder`, `TestExportFolderFilledDuringBuild`.
-  The export feature; owners skip where the host can't `chown`.
+- [x] **Export details.**
+  `TestExportLinks`, `TestExportOwners`, `TestExportSetuid`, `TestExportReplace` and `TestExportIntoEmptyFolder`
+  are scenarios of the export feature; the rest of `internal/finish`'s export tests, which inject faults or races,
+  are decided below.
 - [ ] **The cache as a user sees it.**
   `TestCacheCorruption`, `TestCacheEntryRemoved`, `TestMovedCacheName`, `TestUnverifiedLayers`,
   `TestResultProvenance`, including whether a result's commands ran under emulation, `TestExportRepairsCorruptBlob`,
@@ -103,8 +103,11 @@ Delete this file when every box is ticked.
   `internal/sched` (action keys, sharing, job limits, the scheduler's reuse and regeneration),
   `internal/fileset` (patterns, tree walks, edits during capture), `internal/cache` (logs, locks, generations),
   `internal/cli`'s `TestGraphConfigurations`, of the graph an index of two platforms configures,
-  `internal/finish`'s delivery from separate stores, `internal/run`'s runner and its puller (`TestPullerPinnedIndex`,
-  `TestMaterializeFromRegistry`, whose refusals of a mismatched manifest, a wrong image ID or a location that can't
-  be parsed the pull feature doesn't reach), and `internal/tracing`.
+  `internal/finish`'s delivery from separate stores, and its export tests that inject a fault or race:
+  `TestExportFolderFilledDuringBuild`, `TestExportReplacesOnlyFolders`, `TestExportCleanupFails`,
+  `TestExportPutBackFails` and `TestExportReplaceWithoutExchange`,
+  `internal/run`'s runner and its puller (`TestPullerPinnedIndex`, `TestMaterializeFromRegistry`,
+  whose refusals of a mismatched manifest, a wrong image ID or a location that can't be parsed
+  the pull feature doesn't reach), and `internal/tracing`.
   Each either shows in what a user sees, and moves into the feature it serves,
   or is an internal contract, and says so; anything that is neither needs a reason added to the rule.

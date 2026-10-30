@@ -130,7 +130,9 @@ the image it saved, the folder it exported and the images left in the store.
 A workspace's packages are declared with `GivenThePackageDeclares`, and commands run in one with `GivenIWorkIn`.
 Observe a layer's image with `WhenISave` and a task's files with `WhenIExport`;
 a push, with `WhenIPush` to a registry of the scenario's own that `GivenARegistry` starts,
-which `<registry>` stands for in image names, errors and BUILD text, and Given steps fill with indexes and images,
+which `<registry>` stands for in image names, errors and BUILD text, and Given steps fill with indexes and images
+(`<outside>` stands likewise for the folder of files outside the project, once `GivenAFileOutsideTheProjectHolds`
+has written one),
 reads back what it pushed, for the steps about the image, or `ThenTheIndexManifestsAre` for an index;
 a load, with `WhenILoad` into a fake Docker daemon of the scenario's own that `GivenADockerDaemon` starts,
 reads back what the daemon loaded, and `GivenTheHostsDockerDaemon` loads into the host's, where there is one;

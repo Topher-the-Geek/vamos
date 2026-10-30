@@ -65,58 +65,6 @@ func assertNoStaging(t *testing.T, dir string) {
 	}
 }
 
-// TestExportLinks checks that an export sets the times, and owners, of links themselves,
-// and leaves alone the files they lead to, wherever they lead.
-func TestExportLinks(t *testing.T) {
-	victim, old := newVictim(t)
-	before, err := os.Stat(victim)
-	testenv.Must(t, err)
-	c, res := testTree(t, victim)
-	dir := filepath.Join(t.TempDir(), "out")
-	testenv.Must(t, Export(context.Background(), c, res, dir, false, noWarnings(t)))
-
-	for _, link := range []string{"abs", "dangling", "up"} {
-		info, err := os.Lstat(filepath.Join(dir, link))
-		testenv.Must(t, err)
-		if info.Mode()&os.ModeSymlink == 0 || !info.ModTime().Equal(epoch) {
-			t.Errorf("%s: mode %v, time %v; want a link with the tree's time, %v", link, info.Mode(), info.ModTime(),
-				epoch)
-		}
-	}
-	after, err := os.Stat(victim)
-	testenv.Must(t, err)
-	if !after.ModTime().Equal(old) {
-		t.Errorf("the file links lead to has time %v, want %v, as it was", after.ModTime(), old)
-	}
-	if owner(t, after) != owner(t, before) {
-		t.Errorf("the file links lead to is owned by %v, want %v, as it was", owner(t, after), owner(t, before))
-	}
-	assertNoStaging(t, dir)
-}
-
-// TestExportOwners checks that, as root, an export gives every entry it writes the owner of the folder's parent:
-// the folder itself and the folders the tree doesn't list too.
-func TestExportOwners(t *testing.T) {
-	testenv.RequireOwnership(t)
-	victim, _ := newVictim(t)
-	c, res := testTree(t, victim)
-	parent := t.TempDir()
-	testenv.Must(t, os.Chown(parent, 1234, 1235))
-	dir := filepath.Join(parent, "out")
-	testenv.Must(t, Export(context.Background(), c, res, dir, false, noWarnings(t)))
-
-	for _, path := range []string{".", "a.txt", "deep", "deep/x", "deep/x/y.txt", "abs", "dangling", "up"} {
-		info, err := os.Lstat(filepath.Join(dir, path))
-		testenv.Must(t, err)
-		if got := owner(t, info); got != [2]uint32{1234, 1235} {
-			t.Errorf("%s is owned by %v, want 1234:1235, the parent's owner", path, got)
-		}
-	}
-	if victimOwner := owner(t, stat(t, victim)); victimOwner == [2]uint32{1234, 1235} {
-		t.Errorf("the file links lead to was given the export's owner")
-	}
-}
-
 // TestExportFolderFilledDuringBuild checks that files added to an empty folder after it was checked,
 // as if during the build, are kept, and the export refused, unless it replaces the folder.
 func TestExportFolderFilledDuringBuild(t *testing.T) {
@@ -163,22 +111,6 @@ func TestExportReplacesOnlyFolders(t *testing.T) {
 	}
 }
 
-// TestExportReplace checks that replace swaps the folder for the task's files, and removes what it held.
-func TestExportReplace(t *testing.T) {
-	victim, _ := newVictim(t)
-	c, res := testTree(t, victim)
-	dir := t.TempDir()
-	testenv.Must(t, os.WriteFile(filepath.Join(dir, "old.txt"), nil, 0o644))
-	testenv.Must(t, Export(context.Background(), c, res, dir, true, noWarnings(t)))
-	if _, err := os.Stat(filepath.Join(dir, "old.txt")); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("old.txt is still there: %v", err)
-	}
-	if got, err := os.ReadFile(filepath.Join(dir, "a.txt")); err != nil || string(got) != "a" {
-		t.Errorf("a.txt = %q, %v; want the task's", got, err)
-	}
-	assertNoStaging(t, dir)
-}
-
 // TestExportCleanupFails checks that failing to remove what an export replaced is a warning,
 // once the files are in place.
 func TestExportCleanupFails(t *testing.T) {
@@ -198,65 +130,6 @@ func TestExportCleanupFails(t *testing.T) {
 	}
 	if _, err := os.ReadFile(filepath.Join(dir, "a.txt")); err != nil {
 		t.Errorf("the task's files aren't in place: %v", err)
-	}
-}
-
-// owner returns the owner and group of the file info describes.
-func owner(t *testing.T, info os.FileInfo) [2]uint32 {
-	t.Helper()
-	st := info.Sys().(*syscall.Stat_t)
-	return [2]uint32{st.Uid, st.Gid}
-}
-
-// stat returns what os.Stat says of path.
-func stat(t *testing.T, path string) os.FileInfo {
-	t.Helper()
-	info, err := os.Stat(path)
-	testenv.Must(t, err)
-	return info
-}
-
-// TestExportIntoEmptyFolder checks that an export without replace fills a folder that is there but empty.
-func TestExportIntoEmptyFolder(t *testing.T) {
-	victim, _ := newVictim(t)
-	c, res := testTree(t, victim)
-	dir := t.TempDir()
-	testenv.Must(t, Export(context.Background(), c, res, dir, false, noWarnings(t)))
-	if got, err := os.ReadFile(filepath.Join(dir, "a.txt")); err != nil || string(got) != "a" {
-		t.Errorf("a.txt = %q, %v; want the task's", got, err)
-	}
-	assertNoStaging(t, dir)
-}
-
-// TestExportSetuid checks that, as root, giving files the parent's owner keeps their setuid and setgid bits,
-// which changing an owner clears.
-func TestExportSetuid(t *testing.T) {
-	testenv.RequireOwnership(t)
-	c, err := cache.OpenDirectory(t.TempDir())
-	testenv.Must(t, err)
-	a, err := c.PutBytes(t.Context(), []byte("a"))
-	testenv.Must(t, err)
-	tree := &cache.Tree{Entries: []cache.TreeEntry{
-		{Path: "setgid", Type: cache.EntryFile, Mode: 0o2755, Blob: &a},
-		{Path: "setuid", Type: cache.EntryFile, Mode: 0o4755, Blob: &a},
-	}}
-	stored, err := c.PutBytes(t.Context(), tree.Encode())
-	testenv.Must(t, err)
-	parent := t.TempDir()
-	testenv.Must(t, os.Chown(parent, 1234, 1235))
-	dir := filepath.Join(parent, "out")
-	res := api.Exported{Files: &stored, Epoch: epoch.Unix()}
-	testenv.Must(t, Export(context.Background(), c, res, dir, false, noWarnings(t)))
-
-	for name, want := range map[string]os.FileMode{
-		"setgid": 0o755 | os.ModeSetgid,
-		"setuid": 0o755 | os.ModeSetuid,
-	} {
-		info, err := os.Lstat(filepath.Join(dir, name))
-		testenv.Must(t, err)
-		if info.Mode() != want || owner(t, info) != [2]uint32{1234, 1235} {
-			t.Errorf("%s: mode %v, owner %v; want %v, 1234:1235", name, info.Mode(), owner(t, info), want)
-		}
 	}
 }
 
