@@ -19,9 +19,9 @@ Delete this file when every box is ticked.
 - [x] **Mistakes in parameters, `--set`, `dep()` and `arg()`.**
   `TestParamMistakes`, `TestSetMistakes`, `TestDepMistakes`: scenarios of the parameters, targets, platforms
   and pull features.
-- [ ] **Mistakes in `load()` and `.star` files.**
+- [x] **Mistakes in `load()` and `.star` files.**
   `TestLoadMistakes`: scenarios of the modules feature.
-- [ ] **Mistakes in workspaces.**
+- [x] **Mistakes in workspaces.**
   `TestWorkspaceMistakes`, `TestWorkspaceErrorInOtherPackage`, `TestWorkspaceTargetMistakes`,
   and `TestPackagesNamingEachOther`'s cycles and late names: scenarios of the workspaces feature,
   from a background that needs no buildah, so `-short` runs them;
@@ -31,7 +31,7 @@ Delete this file when every box is ticked.
   `TestInvalidImageNames`, `TestProjectDirectoryMistakes`, `TestMissingAuthFile`, `TestTLSVerifyFlagForms`,
   and the flag mistakes of the platform, index, trace, remote and coordinator tests.
   These print usage, which `ThenItFailsWith` refuses, so they need a step that expects it.
-- [ ] **Workspace loading.**
+- [x] **Workspace loading.**
   `TestWorkspaceRoot`, `TestLabelsInOwnPackage`, `TestWorkspaceSearchError`, `TestPackageLinks`, `TestBuildVms`,
   `TestPackagesNamingEachOther`.
   The workspaces feature, observed through what builds rather than the graph.
@@ -41,7 +41,8 @@ Delete this file when every box is ticked.
   and `TestImageIdentityRoundTrip`'s reported ID.
   A push feature; the in-process registry goes behind Given and destination steps.
 - [ ] **Load into Docker.**
-  `TestLoad`, `TestLoadRejected`, `TestLoadWithoutDocker`, `TestLoadIntoDocker`.
+  `TestLoad`, `TestLoadRejected`, `TestLoadWithoutDocker`, `TestLoadIntoDocker`, and load refusing a task,
+  which `TestWorkspaceTargetMistakes` checked.
   A load feature; the fake daemon goes behind steps, and the real one skips where there is none.
 - [ ] **Pulls by tag.**
   `TestPullTag`, `TestPullTagMistakes`, `TestPullerPinnedIndex`, `TestMaterializeFromRegistry`.

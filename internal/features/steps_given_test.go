@@ -108,7 +108,8 @@ func (w *world) GivenNoFileChangesWhileTheBuildReadsIt() {
 	w.edit = nil
 }
 
-// GivenTheProjectLinks adds symbolic links to the project, by path, to their targets.
+// GivenTheProjectLinks adds symbolic links to the project, by path, to their targets,
+// in which <outside> stands for the folder of GivenAFileOutsideTheProjectHolds.
 func (w *world) GivenTheProjectLinks(project links) {
 	w.t.Helper()
 	maps.Copy(w.links, project)
@@ -130,14 +131,26 @@ func (w *world) GivenTheEnvironmentDoesNotSet(name string) {
 	}
 }
 
-// GivenAFileOutsideTheProjectHolds writes content to the file name in a folder outside the project,
-// which <outside> stands for in the secrets of the withSecrets option.
+// GivenAFileOutsideTheProjectHolds writes content to the file name, a path, in a folder outside the project,
+// which <outside> stands for in the secrets of the withSecrets option and the targets of GivenTheProjectLinks.
 func (w *world) GivenAFileOutsideTheProjectHolds(name, content string) {
 	w.t.Helper()
 	if w.outside == "" {
 		w.outside = w.t.TempDir()
 	}
-	if err := os.WriteFile(filepath.Join(w.outside, name), []byte(content), 0o600); err != nil {
+	path := filepath.Join(w.outside, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		w.t.Fatal(err)
 	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		w.t.Fatal(err)
+	}
+}
+
+// GivenTheProjectFileCannotBeChecked makes the project file at path, besides any that earlier calls named,
+// one whose existence can't be checked, as when its directory isn't searchable,
+// which permissions don't make it as the tests run as root.
+func (w *world) GivenTheProjectFileCannotBeChecked(path string) {
+	w.t.Helper()
+	w.denied = append(w.denied, path)
 }

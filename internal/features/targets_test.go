@@ -279,6 +279,15 @@ func TestTargets_CommandsNameTheBuildFilesTargets(t *testing.T) {
 // TestTargets_GlobsAreNotNamedByCommands specifies that globs provide input filesets to add(),
 // and cannot be named directly by a command.
 func TestTargets_GlobsAreNotNamedByCommands(t *testing.T) {
+	t.Run("Saving a glob fails, saying its files are read by the targets that add them", func(t *testing.T) {
+		w := newTargetMistakeWorld(t)
+		w.GivenTheBuildFileDeclares(`glob(name="code", include=["app.sh"])`)
+		w.WhenISave("code")
+		w.ThenItFailsWith(`"code" is a glob(), whose files are read by the targets that add them, not an image`)
+		w.ThenNoTargetRan()
+		w.ThenNothingIsSaved()
+	})
+
 	t.Run("Building a glob fails, saying its files are read by the targets that add them", func(t *testing.T) {
 		w := newTargetMistakeWorld(t)
 		w.GivenTheBuildFileDeclares(`glob(name="code", include=["app.sh"])`)

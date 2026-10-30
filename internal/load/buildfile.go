@@ -462,8 +462,17 @@ func describeExecError(err error) error {
 // loadModule implements load(): it returns the globals of the .star file that label names, such as "//:defs.star",
 // running it the first time it is named.
 func (w *workspace) loadModule(_ *starlark.Thread, label string) (starlark.StringDict, error) {
-	if !strings.HasPrefix(label, "//") || !strings.HasSuffix(label, ".star") {
-		return nil, fmt.Errorf(`a .star file is named by its label, which starts with "//", such as "//:defs.star"`)
+	if !strings.HasPrefix(label, "//") {
+		return nil, fmt.Errorf(`a .star file is named by its label, which starts with "//" and ends with ".star", ` +
+			`such as "//:defs.star"`)
+	}
+	if !strings.HasSuffix(label, ".star") {
+		return nil, fmt.Errorf(`only a .star file can be loaded, such as "//:defs.star"`)
+	}
+	// A target's label checks the rest, but what it would say of a target's name would mislead.
+	if _, file, ok := strings.Cut(label, ":"); !ok || strings.ContainsAny(file, ":/") {
+		return nil, fmt.Errorf(`a .star file's label names its directory, then ":" and the file, ` +
+			`such as "//:defs.star" or "//tools:defs.star"`)
 	}
 	pkg, name, err := parseLabel(label, "")
 	if err != nil {

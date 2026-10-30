@@ -6,6 +6,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/spf13/afero"
@@ -106,6 +107,33 @@ type EditedFs struct {
 	opened     int
 }
 
+// LstatIfPossible describes the file path without following a link, as the wrapped filesystem does.
+func (f *EditedFs) LstatIfPossible(path string) (fs.FileInfo, bool, error) {
+	return lstat(f.Fs, path)
+}
+
+// ReadlinkIfPossible reads the symbolic link path, as the wrapped filesystem does.
+func (f *EditedFs) ReadlinkIfPossible(path string) (string, error) {
+	return readlink(f.Fs, path)
+}
+
+// readlink reads the symbolic link path in fsys, if fsys can.
+func readlink(fsys afero.Fs, path string) (string, error) {
+	if r, ok := fsys.(afero.LinkReader); ok {
+		return r.ReadlinkIfPossible(path)
+	}
+	return "", &fs.PathError{Op: "readlink", Path: path, Err: afero.ErrNoReadlink}
+}
+
+// lstat describes the file path in fsys without following a link, if fsys can.
+func lstat(fsys afero.Fs, path string) (fs.FileInfo, bool, error) {
+	if l, ok := fsys.(afero.Lstater); ok {
+		return l.LstatIfPossible(path)
+	}
+	info, err := fsys.Stat(path)
+	return info, false, err
+}
+
 // Open opens the file name, first editing it if it is File, opened At-1 times before.
 func (f *EditedFs) Open(name string) (afero.File, error) {
 	if name == f.File {
@@ -117,4 +145,61 @@ func (f *EditedFs) Open(name string) (afero.File, error) {
 		}
 	}
 	return f.Fs.Open(name)
+}
+
+// DeniedFs is a filesystem in which the files Files, clean absolute paths, can't be checked, read or opened,
+// as when their directory isn't searchable: Stat, LstatIfPossible, ReadlinkIfPossible, Open and OpenFile fail for
+// those paths, though not for files beneath them. Tests run as root, which permissions on disk don't stop.
+type DeniedFs struct {
+	afero.Fs
+	Files []string
+}
+
+// Stat describes the file path, or fails for one of Files.
+func (f *DeniedFs) Stat(path string) (fs.FileInfo, error) {
+	if err := f.denied("stat", path); err != nil {
+		return nil, err
+	}
+	return f.Fs.Stat(path)
+}
+
+// LstatIfPossible describes the file path without following a link, as the wrapped filesystem does,
+// or fails for one of Files.
+func (f *DeniedFs) LstatIfPossible(path string) (fs.FileInfo, bool, error) {
+	if err := f.denied("lstat", path); err != nil {
+		return nil, false, err
+	}
+	return lstat(f.Fs, path)
+}
+
+// ReadlinkIfPossible reads the symbolic link path, as the wrapped filesystem does, or fails for one of Files.
+func (f *DeniedFs) ReadlinkIfPossible(path string) (string, error) {
+	if err := f.denied("readlink", path); err != nil {
+		return "", err
+	}
+	return readlink(f.Fs, path)
+}
+
+// Open opens the file name, or fails for one of Files.
+func (f *DeniedFs) Open(name string) (afero.File, error) {
+	if err := f.denied("open", name); err != nil {
+		return nil, err
+	}
+	return f.Fs.Open(name)
+}
+
+// OpenFile opens the file name, or fails for one of Files.
+func (f *DeniedFs) OpenFile(name string, flag int, perm fs.FileMode) (afero.File, error) {
+	if err := f.denied("open", name); err != nil {
+		return nil, err
+	}
+	return f.Fs.OpenFile(name, flag, perm)
+}
+
+// denied returns the error that op on path gets, if path is one of Files.
+func (f *DeniedFs) denied(op, path string) error {
+	if slices.Contains(f.Files, filepath.Clean(path)) {
+		return &fs.PathError{Op: op, Path: path, Err: fs.ErrPermission}
+	}
+	return nil
 }

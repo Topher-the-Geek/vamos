@@ -103,10 +103,7 @@ func withSecrets(secrets ...string) option {
 	return option{"withSecrets", everyCommand, func(w *world, c *commandLine) {
 		w.t.Helper()
 		for _, secret := range secrets {
-			if strings.Contains(secret, "<outside>") && w.outside == "" {
-				w.t.Fatalf("%q names <outside>, but no file outside the project was given", secret)
-			}
-			c.flags = append(c.flags, "--secret", strings.ReplaceAll(secret, "<outside>", w.outside))
+			c.flags = append(c.flags, "--secret", w.atOutside(secret))
 		}
 	}}
 }

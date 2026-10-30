@@ -48,6 +48,7 @@ type world struct {
 	links   links           // the project's symbolic links, which keep it on disk rather than in memory
 	edit    *edit           // a change to a project file once a command has read it, if any
 	touched []string        // the project files whose modification times are an hour ahead
+	denied  []string        // the project files that can't be checked
 	dir     string          // the directory within the project that commands run in, with -C
 	onDisk  bool            // whether the project is kept on disk, under root, even without links
 	root    string          // the folder that holds the project, if it is on disk
@@ -118,7 +119,11 @@ func (w *world) project() afero.Fs {
 	w.t.Helper()
 	var fsys afero.Fs
 	if len(w.links) > 0 || w.onDisk {
-		fsys, w.root = testenv.DiskProject(w.t, w.files, w.links)
+		links := links{}
+		for path, target := range w.links {
+			links[path] = w.atOutside(target)
+		}
+		fsys, w.root = testenv.DiskProject(w.t, w.files, links)
 	} else {
 		fsys = testenv.Project(w.t, w.files)
 	}
@@ -139,7 +144,24 @@ func (w *world) project() afero.Fs {
 		path := filepath.Join(testenv.ProjectDir, w.edit.path)
 		fsys = &testenv.EditedFs{Fs: fsys, File: path, Edit: w.edit.content, At: w.edit.at}
 	}
+	if len(w.denied) > 0 {
+		denied := &testenv.DeniedFs{Fs: fsys}
+		for _, path := range w.denied {
+			denied.Files = append(denied.Files, filepath.Join(testenv.ProjectDir, path))
+		}
+		fsys = denied
+	}
 	return fsys
+}
+
+// atOutside returns s with each <outside> replaced by the folder of GivenAFileOutsideTheProjectHolds,
+// failing the scenario if s names it but no file outside the project was given.
+func (w *world) atOutside(s string) string {
+	w.t.Helper()
+	if strings.Contains(s, "<outside>") && w.outside == "" {
+		w.t.Fatalf("%q names <outside>, but no file outside the project was given", s)
+	}
+	return strings.ReplaceAll(s, "<outside>", w.outside)
 }
 
 // notThroughLink fails the scenario if the project path is a link or beneath one:

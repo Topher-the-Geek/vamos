@@ -30,6 +30,8 @@ project/
 
 vamos searches for the nearest `WORKSPACE` in `-C`'s directory and its ancestors.
 Without one, `-C`'s directory is the workspace root.
+A `WORKSPACE` that can't be checked, such as one in a directory vamos can't search, stops the search with an error,
+rather than letting another directory become the root.
 
 | Reference | Meaning |
 | --- | --- |
@@ -52,7 +54,9 @@ task(
 )
 ```
 
+A label's path is a clean path to a directory within the workspace, reached through no symbolic link.
 A referenced glob keeps paths relative to its own BUILD directory.
+A mistake in a BUILD file that loads because another names one of its targets is reported where it is.
 vamos loads only the packages needed by the requested targets and reports dependency cycles.
 
 Packages may name each other's targets, as where their files sit is often for other tools to say.
@@ -301,7 +305,10 @@ def go_checks(name, base, source):
 ```
 
 Module labels start with `//` and name a `.star` file in the workspace.
-A module cannot declare targets at its top level while loading;
-its functions can declare targets when called by a BUILD file.
+A mistake in a module is reported where it is in the `.star` file, and a module that loads itself,
+through the modules it loads, is an error.
+A module cannot declare targets at its top level while loading, nor name a target by a label that doesn't start
+with `//`; its functions can declare targets when called by a BUILD file.
+The arguments that a module's `dep()` gives are checked where a BUILD file uses it.
 References inside those functions resolve relative to the calling BUILD file's package.
 References in functions of `ctx` resolve relative to the target being configured.
