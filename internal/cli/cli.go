@@ -969,13 +969,21 @@ func (inv *invocation) runGraph(
 	}
 	outcome, end, err := watchJob(ctx, ex, id, events)
 	runSpan.EndWith(err)
-	if err == nil {
+	var there cancelledThere
+	switch {
+	case err == nil:
 		inv.hold(ex, id, end) // through delivery, until the executor is closed
-	} else {
+	case !errors.As(err, &there): // which an executor that cancelled the job itself, perhaps as it ended, has freed
 		inv.holds = append(inv.holds, &hold{id: id, stop: func() {}, done: closedChan})
 	}
 	return outcome.Results, c, err
 }
+
+// cancelledThere is the error of a job that its executor cancelled, rather than this command, as a coordinator that
+// is ending does: one that has nothing left to release.
+type cancelledThere struct{ error }
+
+func (c cancelledThere) Unwrap() error { return c.error }
 
 // closedChan is a channel that is closed, for a hold that renews nothing.
 var closedChan = func() chan struct{} { ch := make(chan struct{}); close(ch); return ch }()
@@ -1250,15 +1258,20 @@ func (inv *invocation) graph(targets []string) error {
 }
 
 // watchJob watches the job id on ex to its end, printing its events through events,
-// and returns its outcome, read back with Result, with the position of its terminal event, or the error its
-// failure reports.
+// and returns its outcome, as its terminal event carries it, or as Result reads it back if no event did, with the
+// position of its terminal event, or the error its failure reports. The event's is used first, since a coordinator
+// that ends once the job is cancelled can't be asked again.
 // If ctx ends first, as on Ctrl-C, or the events can't be written, it cancels the job and waits for it to stop,
 // so that its cleanup runs, and returns ctx's error, or the write's, unless the job had already failed on its own:
 // then the job's failure is returned, joined with the write's.
 func watchJob(ctx context.Context, ex api.Executor, id api.JobID, events *eventPrinter) (api.Outcome, int64, error) {
 	next := int64(0)
-	var unwritten error // the first failure to write an event, after which events are only counted
+	var unwritten error    // the first failure to write an event, after which events are only counted
+	var ended *api.Outcome // what the job's terminal event says, if it was seen
 	handle := func(e api.Event) error {
+		if e.Kind == api.EventDone && e.Outcome != nil {
+			ended = e.Outcome
+		}
 		if unwritten != nil {
 			// Output is no longer written, but the trace still takes the job's spans and gaps.
 			events.record(e)
@@ -1293,7 +1306,12 @@ func watchJob(ctx context.Context, ex api.Executor, id api.JobID, events *eventP
 	if err != nil {
 		return api.Outcome{}, 0, errors.Join(unwritten, err)
 	}
-	outcome, err := ex.Result(ctx, id)
+	var outcome api.Outcome
+	if ended != nil {
+		outcome = *ended
+	} else {
+		outcome, err = ex.Result(ctx, id)
+	}
 	switch {
 	case err != nil:
 		return api.Outcome{}, 0, errors.Join(unwritten, err)
@@ -1305,9 +1323,9 @@ func watchJob(ctx context.Context, ex api.Executor, id api.JobID, events *eventP
 	case interrupted:
 		return api.Outcome{}, 0, context.Canceled
 	case outcome.Failure != nil:
-		return api.Outcome{}, 0, errors.New(outcome.Failure.Describe(events.graph))
+		return api.Outcome{}, 0, cancelledThere{errors.New(outcome.Failure.Describe(events.graph))}
 	case outcome.Cancelled:
-		return api.Outcome{}, 0, errors.New("the job was cancelled")
+		return api.Outcome{}, 0, cancelledThere{errors.New("the job was cancelled")}
 	}
 	return outcome, next - 1, nil
 }

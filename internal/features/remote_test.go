@@ -3,6 +3,7 @@ package features
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/Topher-the-Geek/vamos/internal/graph"
 	"github.com/Topher-the-Geek/vamos/internal/testenv"
@@ -61,6 +62,107 @@ func TestRemote_BuildsOnTheCoordinator(t *testing.T) {
 		w.ThenItSucceeds()
 		w.ThenTheTargetsWere(statuses{layer("app"): reused}) // as the coordinator built it
 		w.ThenTheCoordinatorWasGivenTheBuild()
+	})
+}
+
+// TestRemote_BuildsOnWorkers specifies that a coordinator without --local builds on the workers that register with
+// it, which push the layers they build to its cache repository, from which a command reads what it sends, and
+// pushes, from the client or, with the worker's own settings, from the worker.
+func TestRemote_BuildsOnWorkers(t *testing.T) {
+	t.Run("A build on a coordinator runs on its worker, and a second build reuses what it made", func(t *testing.T) {
+		w := newBuildingWorld(t)
+		w.GivenARegistry()
+		w.GivenACoordinatorWithAWorker()
+		w.GivenTheBuildFileDeclares(`
+			glob(name="src", include=["hello.txt"])
+			layer(name="app", base="scratch", steps=[add("src", "/data")])
+		`)
+		hello := testenv.NewNonce()
+		w.GivenTheProjectHolds(files{"hello.txt": hello})
+		w.WhenIBuild("app", onTheCoordinator("<coordinator>"))
+		w.ThenItSucceeds()
+		w.ThenTheTargetsWere(statuses{layer("app"): ran})
+		w.ThenTheCoordinatorWasGivenTheBuild()
+		w.ThenTheCacheRepositoryHoldsALayer()
+		w.WhenIBuild("app", onTheCoordinator("<coordinator>"))
+		w.ThenItSucceeds()
+		w.ThenTheTargetsWere(statuses{layer("app"): reused})
+		w.WhenISave("app", onTheCoordinator("<coordinator>"))
+		w.ThenItSucceeds()
+		w.ThenTheImageHolds(under("/data"), files{"/data/hello.txt": hello})
+	})
+
+	t.Run("A pull through a coordinator's pull-through cache pulls from the cache, not the registry it maps",
+		func(t *testing.T) {
+			w := newBuildingWorld(t)
+			w.GivenARegistry()
+			w.GivenTheRegistryHoldsAnIndex("<registry>/base:v1", "base", thisPlatform())
+			// No registry answers at upstream.invalid, so only the pull-through cache can serve the pull.
+			w.GivenACoordinatorWithAWorker("--pull-through", "upstream.invalid:5000=<registry>")
+			w.GivenTheBuildFileDeclares(`
+				pull(name="base", image="upstream.invalid:5000/base", tag="v1")
+			`)
+			w.WhenISave("base", onTheCoordinator("<coordinator>"))
+			w.ThenItSucceeds()
+			w.ThenTheImageIs("base", thisPlatform())
+		})
+
+	for _, example := range []struct {
+		name    string
+		options []option
+	}{
+		{name: "A push from the client copies the image from the cache repository",
+			options: []option{fromTheClient(), withoutTLSVerification()}},
+		{name: "A push from the executor runs on the worker, with its settings"},
+	} {
+		t.Run(example.name, func(t *testing.T) {
+			w := newBuildingWorld(t)
+			w.GivenARegistry()
+			w.GivenACoordinatorWithAWorker()
+			w.GivenTheBuildFileDeclares(`
+				glob(name="src", include=["hello.txt"])
+				layer(name="app", base="scratch", steps=[add("src", "/data")])
+			`)
+			hello := testenv.NewNonce()
+			w.GivenTheProjectHolds(files{"hello.txt": hello})
+			w.WhenIPush("app", "<registry>/pushed:v1", append(example.options, onTheCoordinator("<coordinator>"))...)
+			w.ThenItSucceeds()
+			w.ThenTheImageHolds(under("/data"), files{"/data/hello.txt": hello})
+		})
+	}
+}
+
+// TestRemote_InterruptedCoordinatorCancelsItsBuilds specifies that a coordinator serves builds until it is
+// interrupted, when it cancels the builds it runs, which end, saying why, and then ends cleanly, promptly.
+func TestRemote_InterruptedCoordinatorCancelsItsBuilds(t *testing.T) {
+	t.Run("A local coordinator builds in its process", func(t *testing.T) {
+		w := newBuildingWorld(t)
+		w.GivenALocalCoordinator()
+		w.GivenTheBuildFileDeclares(`
+			glob(name="src", include=["hello.txt"])
+			layer(name="app", base="scratch", steps=[add("src", "/data")])
+		`)
+		hello := testenv.NewNonce()
+		w.GivenTheProjectHolds(files{"hello.txt": hello})
+		w.WhenISave("app", onTheCoordinator("<coordinator>"))
+		w.ThenItSucceeds()
+		w.ThenTheTargetsWere(statuses{layer("app"): ran})
+		w.ThenTheCoordinatorWasGivenTheBuild()
+		w.ThenTheImageHolds(under("/data"), files{"/data/hello.txt": hello})
+	})
+
+	t.Run("A build waiting on a registry ends, cancelled, when its coordinator is interrupted", func(t *testing.T) {
+		w := newBuildingWorld(t)
+		w.GivenARegistryThatNeverAnswers()
+		w.GivenALocalCoordinator()
+		w.GivenTheBuildFileDeclares(`
+			pull(name="base", image="<registry>/base", tag="v1")
+		`)
+		w.WhenIInterruptTheCoordinatorWhileIBuild("base")
+		w.ThenItFailsWith(`pull "base": context canceled`) // the job's own failure, cancelled, as its last event said
+		w.ThenTheCoordinatorWasGivenTheBuild()
+		w.ThenTheBuildEndsWithin(5 * time.Second) // with nothing left to release on the coordinator that has gone
+		w.ThenTheCoordinatorEndsCleanlyWithin(8 * time.Second)
 	})
 }
 

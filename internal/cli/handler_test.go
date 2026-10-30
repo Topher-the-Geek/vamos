@@ -173,3 +173,33 @@ func TestWatchJobWriteFailure(t *testing.T) {
 type writerFunc func(p []byte) (int, error)
 
 func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+// endedExecutor is a job whose events end with outcome, and whose coordinator has gone by the time it is asked for
+// the job's result.
+type endedExecutor struct {
+	api.Executor
+	outcome api.Outcome
+}
+
+func (x endedExecutor) Watch(_ context.Context, _ api.JobID, _ int64, fn func(api.Event) error) error {
+	return fn(api.Event{Position: 0, Kind: api.EventDone, Outcome: &x.outcome})
+}
+
+func (endedExecutor) Result(context.Context, api.JobID) (api.Outcome, error) {
+	return api.Outcome{}, errors.New("can't reach the coordinator")
+}
+
+// TestWatchJobOutcomeFromEvent checks that watchJob takes the job's outcome from its terminal event, without asking
+// for it again, as a coordinator that ended once it cancelled the job can't answer.
+func TestWatchJobOutcomeFromEvent(t *testing.T) {
+	x := endedExecutor{outcome: api.Outcome{Cancelled: true, Failure: &api.Failure{Message: "the pull was cancelled"}}}
+	events := &eventPrinter{
+		stdout: &bytes.Buffer{},
+		stderr: &bytes.Buffer{},
+		trace:  &traceSession{recorder: tracing.NewRecorder(clientProcess, nil)},
+	}
+	_, _, err := watchJob(t.Context(), x, "job", events)
+	if err == nil || err.Error() != "the pull was cancelled" {
+		t.Errorf("watchJob = %v, want the outcome's failure, from its terminal event", err)
+	}
+}

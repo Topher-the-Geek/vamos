@@ -1,16 +1,28 @@
 package features
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"strings"
+	"sync"
+	"testing"
 	"time"
 
 	"github.com/Topher-the-Geek/vamos/internal/api"
+	"github.com/Topher-the-Geek/vamos/internal/cli"
 	"github.com/Topher-the-Geek/vamos/internal/remote"
 	"github.com/Topher-the-Geek/vamos/internal/run"
 	"github.com/Topher-the-Geek/vamos/internal/testenv"
+	"github.com/Topher-the-Geek/vamos/internal/worker"
+	"github.com/google/go-containerregistry/pkg/name"
+	gcrremote "github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/spf13/afero"
+	"go.podman.io/storage"
 )
 
 // Steps about building on a coordinator, which --coordinator names: one in this process, at <coordinator>.
@@ -43,21 +55,27 @@ func (w *world) GivenACoordinatorThatRunsOnlyGraphVersions(versions ...int) {
 	w.startCoordinator(mux)
 }
 
-// startCoordinator serves handler, at <coordinator>, until the scenario ends.
+// startCoordinator serves handler, at <coordinator>, until the scenario ends, counting the requests it is sent and
+// the jobs it is given, and telling watching, if it has room, when a command watches a job.
 func (w *world) startCoordinator(handler http.Handler) {
 	w.t.Helper()
-	if w.coordinator != "" {
-		w.t.Fatal("the scenario has a coordinator already")
-	}
-	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+	w.hasNoCoordinator()
+	w.watching = make(chan struct{}, 1)
+	w.coordinatorServer = httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		w.served.Add(1)
 		if r.Method == http.MethodPost && r.URL.Path == "/v1/jobs" { // remote's pathJobs
 			w.jobs.Add(1)
 		}
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/events") {
+			select {
+			case w.watching <- struct{}{}:
+			default:
+			}
+		}
 		handler.ServeHTTP(rw, r)
 	}))
-	w.t.Cleanup(server.Close)
-	w.coordinator = server.URL
+	w.t.Cleanup(w.coordinatorServer.Close)
+	w.coordinator = w.coordinatorServer.URL
 }
 
 // ThenTheCoordinatorWasGivenTheBuild checks that the last command gave the scenario's coordinator a job: that it
@@ -101,6 +119,29 @@ func (w *world) ThenTheCoordinatorWasSentNothing() {
 	}
 }
 
+// hasNoCoordinator stops the scenario if a Given step has started a coordinator already.
+func (w *world) hasNoCoordinator() {
+	w.t.Helper()
+	if w.coordinator != "" {
+		w.t.Fatal("the scenario has a coordinator already")
+	}
+}
+
+// front makes <coordinator> a front for the coordinator that served started, once it says where it listens, so that
+// steps count what is sent to it, as for every coordinator, and returns the URL it listens at itself.
+func (w *world) front(served *server) string {
+	w.t.Helper()
+	address := "http://" + served.waitFor(w.t, "Coordinating builds at ")
+	backend, err := url.Parse(address)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(backend)
+	proxy.FlushInterval = -1 // so that events stream
+	w.startCoordinator(proxy)
+	return address
+}
+
 // atCoordinator returns s with each <coordinator> replaced by the URL of the scenario's coordinator.
 func (w *world) atCoordinator(s string) string {
 	w.t.Helper()
@@ -117,4 +158,235 @@ func onTheCoordinator(url string) option {
 		w.t.Helper()
 		c.flags = append(c.flags, "--coordinator", w.atCoordinator(url))
 	}}
+}
+
+// GivenACoordinatorWithAWorker starts `vamos coordinator`, with args, and `vamos worker`, in this process, until the
+// scenario ends: the coordinator, at <coordinator>, keeps the layers that its workers build in <registry>/vamos-cache,
+// args being placeholders as atPlaceholders says, and the
+// worker, which builds in stores of its own, registers with it. It waits until the worker has registered.
+func (w *world) GivenACoordinatorWithAWorker(args ...string) {
+	w.t.Helper()
+	w.hasNoCoordinator()
+	w.t.Setenv(worker.ChildEnv, "1") // the worker runs this test binary as its attempts' process
+	workerStores := testenv.PrivateStores(w.t)
+	ctx, cancel := context.WithCancel(context.Background())
+	var coordinator, registered *server
+	w.t.Cleanup(func() { // registered first, so that it runs however the step ends
+		cancel()
+		for _, s := range []*server{registered, coordinator} {
+			if s != nil {
+				s.wait(w.t, time.Minute)
+			}
+		}
+	})
+	coordinator = w.serve(ctx, &w.stores.Options, append([]string{"coordinator", "--listen", "127.0.0.1:0",
+		"--cache-dir", w.t.TempDir(), "--cache-repository", w.atRegistry("<registry>/vamos-cache"), "--lease", "2s"},
+		w.allAtPlaceholders(args)...)...)
+	address := w.front(coordinator)
+	// The worker reaches the coordinator itself, so that what it sends isn't counted as a command's.
+	registered = w.serve(ctx, &workerStores.Options, "worker", "--coordinator", address, "--capacity", "2")
+	client, err := remote.NewClient(address)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	defer client.Close()
+	for start := time.Now(); ; time.Sleep(50 * time.Millisecond) {
+		caps, err := client.Capabilities(w.t.Context())
+		if err != nil {
+			w.t.Fatal(err)
+		}
+		if len(caps.Platforms) > 0 {
+			return
+		}
+		select {
+		case <-registered.ended:
+			w.t.Fatalf("the worker ended with %v before it registered\n%s", registered.err, registered.output())
+		default:
+		}
+		if time.Since(start) > 20*time.Second {
+			w.t.Fatalf("the worker never registered\n%s", registered.output())
+		}
+	}
+}
+
+// allAtPlaceholders returns args, each with placeholders replaced as atPlaceholders says.
+func (w *world) allAtPlaceholders(args []string) []string {
+	w.t.Helper()
+	expanded := make([]string, len(args))
+	for i, arg := range args {
+		expanded[i] = w.atPlaceholders(arg)
+	}
+	return expanded
+}
+
+// ThenTheCacheRepositoryHoldsALayer checks that <registry>/vamos-cache, the coordinator's cache repository, has a
+// tag: an image that a worker pushed there.
+func (w *world) ThenTheCacheRepositoryHoldsALayer() {
+	w.t.Helper()
+	repo, err := name.NewRepository(w.atRegistry("<registry>/vamos-cache"), name.Insecure)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	tags, err := gcrremote.List(repo, w.readingTheRegistry()...)
+	if err != nil || len(tags) == 0 {
+		w.t.Errorf("the cache repository has tags %q, %v; want a layer that the worker pushed", tags, err)
+	}
+}
+
+// server is a vamos command that serves, run by serve, until its context ends.
+type server struct {
+	mu    sync.Mutex
+	out   bytes.Buffer
+	ended chan struct{} // closed once it has ended, with err
+	err   error
+}
+
+func (s *server) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.out.Write(p)
+}
+
+// wait waits, for at most d, for the server to end, and returns its error, failing the test if it doesn't end.
+func (s *server) wait(t *testing.T, d time.Duration) error {
+	t.Helper()
+	select {
+	case <-s.ended:
+		return s.err
+	case <-time.After(d):
+		t.Fatalf("vamos didn't end within %s\n%s", d, s.output())
+		return nil
+	}
+}
+
+// output returns what the server has printed so far.
+func (s *server) output() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.out.String()
+}
+
+// waitFor waits until the server prints a line that starts with prefix, and returns the rest of the line,
+// failing the test if the server ends first, or prints no such line within twenty seconds.
+func (s *server) waitFor(t *testing.T, prefix string) string {
+	t.Helper()
+	for start := time.Now(); time.Since(start) < 20*time.Second; time.Sleep(20 * time.Millisecond) {
+		lines := strings.Split(s.output(), "\n")
+		for _, line := range lines[:len(lines)-1] { // whole lines only, as one may be written in parts
+			if rest, ok := strings.CutPrefix(line, prefix); ok {
+				return strings.TrimSpace(rest)
+			}
+		}
+		select {
+		case <-s.ended:
+			t.Fatalf("vamos ended with %v before it printed %q\n%s", s.err, prefix, s.output())
+		default:
+		}
+	}
+	t.Fatalf("vamos printed no %q\n%s", prefix, s.output())
+	return ""
+}
+
+// serve runs the vamos command line args, which reads no project, on the stores that store gives, until ctx ends.
+func (w *world) serve(ctx context.Context, store *storage.StoreOptions, args ...string) *server {
+	w.t.Helper()
+	s := &server{ended: make(chan struct{})}
+	cmd := cli.NewRootCommand(cli.Config{Fs: afero.NewMemMapFs(), Store: store}) // which reads no project
+	cmd.SetOut(s)
+	cmd.SetErr(s)
+	cmd.SetArgs(args)
+	go func() {
+		s.err = cmd.ExecuteContext(ctx)
+		close(s.ended)
+	}()
+	return s
+}
+
+// GivenARegistryThatNeverAnswers starts a registry, at <registry>, that holds every request it is sent until the
+// one who sent it gives up, or the scenario ends.
+func (w *world) GivenARegistryThatNeverAnswers() {
+	w.t.Helper()
+	ended := make(chan struct{})
+	w.startRegistry(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-ended:
+		case <-r.Context().Done():
+		}
+	}), true)
+	w.t.Cleanup(func() { close(ended) }) // after startRegistry's, so first, letting the server close
+}
+
+// GivenALocalCoordinator starts `vamos coordinator --local`, in this process, behind <coordinator>, which builds on
+// the scenario's stores until WhenIInterruptTheCoordinatorWhileIBuild interrupts it, or the scenario ends.
+func (w *world) GivenALocalCoordinator() {
+	w.t.Helper()
+	w.hasNoCoordinator()
+	ctx, cancel := context.WithCancel(context.Background())
+	w.t.Cleanup(func() {
+		cancel()
+		if w.local != nil {
+			w.local.wait(w.t, time.Minute) // which ThenTheCoordinatorEndsCleanlyWithin checks, if a scenario asks
+		}
+	})
+	w.local = w.serve(ctx, &w.stores.Options, "coordinator", "--local", "--listen", "127.0.0.1:0")
+	w.interruptLocal = cancel
+	w.front(w.local)
+}
+
+// WhenIInterruptTheCoordinatorWhileIBuild builds target on the coordinator of GivenALocalCoordinator and, once the
+// build watches its job there, interrupts the coordinator, as Ctrl-C does, and once it has ended, closes
+// <coordinator>, so that whatever the build sends from then finds no coordinator, as when one has ended.
+// The build is the last command, for Then steps to check.
+func (w *world) WhenIInterruptTheCoordinatorWhileIBuild(target string) {
+	w.t.Helper()
+	if w.local == nil {
+		w.t.Fatal("no Given step started a local coordinator")
+	}
+	// Alongside the build, which runs as any command does, and which this touches nothing of until it has ended.
+	var failure string
+	interrupted := make(chan struct{})
+	go func() {
+		defer close(interrupted)
+		select {
+		case <-w.watching:
+		case <-time.After(time.Minute):
+			failure = "the build didn't watch its job within a minute"
+		}
+		w.interruptedAt = time.Now()
+		w.interruptLocal()
+		select {
+		case <-w.local.ended:
+			w.localErr, w.localTook = w.local.err, time.Since(w.interruptedAt)
+		case <-time.After(time.Minute):
+			failure = "the coordinator didn't end within a minute of its interrupt"
+		}
+		w.coordinatorServer.Close()
+	}()
+	w.WhenIBuild(target, onTheCoordinator("<coordinator>"))
+	<-interrupted
+	w.buildTook = time.Since(w.interruptedAt)
+	if failure != "" {
+		w.t.Fatalf("%s\n%s\n%s", failure, w.outputs(), w.local.output())
+	}
+}
+
+// ThenTheBuildEndsWithin checks that the build of WhenIInterruptTheCoordinatorWhileIBuild ended within d of the
+// coordinator's interrupt.
+func (w *world) ThenTheBuildEndsWithin(d time.Duration) {
+	w.t.Helper()
+	if w.buildTook > d {
+		w.t.Errorf("the build ended %s after its coordinator was interrupted, want within %s", w.buildTook, d)
+	}
+}
+
+// ThenTheCoordinatorEndsCleanlyWithin checks that the coordinator that WhenIInterruptTheCoordinatorWhileIBuild
+// interrupted ended without an error, within d of the interrupt.
+func (w *world) ThenTheCoordinatorEndsCleanlyWithin(d time.Duration) {
+	w.t.Helper()
+	if w.localErr != nil {
+		w.t.Errorf("the coordinator, interrupted, ended with %v, want a clean end\n%s", w.localErr, w.local.output())
+	}
+	if w.localTook > d {
+		w.t.Errorf("the coordinator took %s to end once interrupted, want within %s", w.localTook, d)
+	}
 }

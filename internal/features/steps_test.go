@@ -66,18 +66,27 @@ type world struct {
 	root    string          // the folder that holds the project, if it is on disk
 	before  map[string]bool // the store's unnamed images when the scenario began, if it builds
 
-	prepared    string                 // the folder the next command sends to, if Given steps have put something there
-	outside     string                 // a folder outside the project, for files that commands read, such as secrets
-	outsideWas  map[string]outsideFile // what GivenAFileOutsideTheProjectHolds wrote there, by name
-	registry    string                 // the host of the scenario's registry, <registry>, once a Given step starts it
-	coordinator string                 // the URL of the scenario's coordinator, <coordinator>, once started
-	jobs        atomic.Int64           // the jobs that the scenario's coordinator was given
-	served      atomic.Int64           // the requests that the scenario's coordinator was sent
-	login       authn.Authenticator    // that the scenario's registry needs, which steps that read from it use
-	server      *httptest.Server       // that serves the scenario's registry, once a Given step starts it
-	asked       atomic.Int64           // the requests that the scenario's registry has served
-	stopped     atomic.Bool            // whether the scenario's registry has stopped answering
-	held        map[string]v1.Image    // the images that Given steps put in the registry, by label and platform
+	coordinator       string             // the URL of the scenario's coordinator, <coordinator>, once started
+	jobs              atomic.Int64       // the jobs that the scenario's coordinator was given
+	served            atomic.Int64       // the requests that the scenario's coordinator was sent
+	coordinatorServer *httptest.Server   // that serves <coordinator>, counting what it is sent
+	watching          chan struct{}      // told when a command watches a job on <coordinator>, if it has room
+	interruptedAt     time.Time          // when WhenIInterruptTheCoordinatorWhileIBuild interrupted the coordinator
+	buildTook         time.Duration      // how long after that the build ended
+	local             *server            // the coordinator that GivenALocalCoordinator started
+	interruptLocal    context.CancelFunc // interrupts it
+	localErr          error              // what it ended with, once interrupted
+	localTook         time.Duration      // how long it took to end, once interrupted
+
+	prepared   string                 // the folder the next command sends to, if Given steps have put something there
+	outside    string                 // a folder outside the project, for files that commands read, such as secrets
+	outsideWas map[string]outsideFile // what GivenAFileOutsideTheProjectHolds wrote there, by name
+	registry   string                 // the host of the scenario's registry, <registry>, once a Given step starts it
+	login      authn.Authenticator    // that the scenario's registry needs, which steps that read from it use
+	server     *httptest.Server       // that serves the scenario's registry, once a Given step starts it
+	asked      atomic.Int64           // the requests that the scenario's registry has served
+	stopped    atomic.Bool            // whether the scenario's registry has stopped answering
+	held       map[string]v1.Image    // the images that Given steps put in the registry, by label and platform
 
 	stdout       string
 	stderr       string
@@ -181,6 +190,12 @@ func (w *world) run(args ...string) {
 // even with a flag that lacks its value.
 func (w *world) runIn(fsys afero.Fs, args ...string) {
 	w.t.Helper()
+	w.execute(fsys, w.commandLine(fsys, args))
+}
+
+// commandLine returns the command line that runIn runs args with in the project fsys, with -C first.
+func (w *world) commandLine(fsys afero.Fs, args []string) []string {
+	w.t.Helper()
 	dir := w.cDir
 	if dir == "" {
 		dir = filepath.Join(testenv.ProjectDir, w.dir)
@@ -192,7 +207,7 @@ func (w *world) runIn(fsys afero.Fs, args ...string) {
 		args = append(slices.Clone(args), "--trace", w.atPlaceholders(w.traceAt))
 		w.traceAt = ""
 	}
-	w.execute(fsys, append([]string{"-C", dir}, args...))
+	return append([]string{"-C", dir}, args...)
 }
 
 // execute runs the vamos command line with exactly args, none for none, in the project fsys, as main does.

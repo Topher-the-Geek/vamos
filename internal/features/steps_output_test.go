@@ -459,11 +459,7 @@ func (w *world) ThenTheTargetWasShownAs(label string, shown ...string) {
 	if len(shown) == 0 {
 		w.t.Fatal("no statuses to expect")
 	}
-	expanded := make([]string, len(shown))
-	for i := range shown {
-		expanded[i] = w.atPlaceholders(shown[i])
-	}
-	shown = expanded
+	shown = w.allAtPlaceholders(shown)
 	got := w.shownStatuses(label)
 	matches := len(got) == len(shown)
 	for i := 0; matches && i < len(got); i++ {

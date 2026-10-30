@@ -87,7 +87,8 @@ Delete this file when every box is ticked.
 - [ ] **How a user sees remote work and its failures.**
   `TestRemoteBuild` and `TestRemoteMistakes` are scenarios of the remote feature, and `TestCheckRegistryHost` and
   `TestCoordinatorFlagMistakes` of the coordinator feature.
-  Still to move: `TestCoordinatorCommand`, `TestCoordinatorWithWorker`, `TestExecPlatformChoice`.
+  `TestCoordinatorCommand` and `TestCoordinatorWithWorker` are scenarios of the remote feature too, run on a
+  coordinator and worker in this process. Still to move: `TestExecPlatformChoice`.
   `TestUsesContainerStore`, of which command lines main re-executes in a user namespace, is an internal contract.
   The failure modes themselves stay below.
 
@@ -102,6 +103,7 @@ Delete this file when every box is ticked.
   `TestFailureCrosses`, `TestWorkerFailureCrosses`, `TestReleaseCrosses`, `TestGraphValidate`, `TestGraphRoundTrip`,
   `TestFailedStepLog`, `TestFailedOutputLog`,
   `TestHandlerWithoutRoot`, `TestBuildHandlerWithoutRoot`, `TestPruneHandlerWithoutRoot`, `TestWatchJobWriteFailure`,
+  `TestWatchJobOutcomeFromEvent`,
   `TestUsesContainerStore`,
   `TestGraphExamples` and `internal/api`.
 - [ ] **The test harness.**
