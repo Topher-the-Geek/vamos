@@ -108,7 +108,7 @@ Trace importer coverage skips without `trace_processor_shell`.
 [features](../../internal/features/) specifies the behavior of BUILD files and their targets, pulls, globs, layers,
 tasks, their steps, variables and secrets, workspaces, modules, parameters, platforms, indexes, the cache,
 the command line, the save, export, push, load and prune commands, traces, interrupts, output that can't be
-written, and building on a coordinator as features, rules and scenarios, in Go:
+written, building on a coordinator, and the coordinator command as features, rules and scenarios, in Go:
 a feature is a file, such as `task_test.go`, and each of its rules is a test named `TestFeature_Rule`,
 such as `TestTask_WithoutOutputIsACheck`,
 whose doc comment states the rule's sentence, in the words of the [BUILD reference](../../docs/reference/build.md),

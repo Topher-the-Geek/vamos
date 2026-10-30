@@ -96,8 +96,10 @@ type world struct {
 	loadRan      bool              // whether the last command loaded into Docker, or tried to
 	traceTo      string            // where the command running is to write its trace, if traced() asked it to
 	traceAt      string            // where tracedTo asked the command running to write its trace, with placeholders
-	interruptOn  string            // what the command running prints that interruptedOnceItPrints waits for
+	interruptOn  string            // what the command running prints that an option or step interrupts it on
 	interruptIn  time.Duration     // how long interruptedAfter lets the command running run
+	interruptBy  time.Duration     // how long a step lets the command running run, if what it waits for never comes
+	printedCue   bool              // whether the last command printed what it was interrupted on, before any deadline
 	containers   map[string]bool   // the containers in the store when the scenario started, if it builds
 	took         time.Duration     // how long the last command ran
 	outputClosed bool              // whether the command running's standard output fails every write
@@ -201,21 +203,23 @@ func (w *world) execute(fsys afero.Fs, args []string) {
 	w.tracePath, w.traceTo = w.traceTo, ""
 	cmd := cli.NewRootCommand(cli.Config{Fs: fsys, Store: &w.stores.Options})
 	var stdout, stderr, tried bytes.Buffer
+	var cue *interrupter
 	ctx, cancel := context.WithCancel(w.t.Context())
 	defer cancel()
-	if w.outputClosed && (w.interruptOn != "" || w.interruptIn != 0) {
+	if w.outputClosed && (w.interruptOn != "" || w.interruptIn != 0 || w.interruptBy != 0) {
 		w.t.Fatal("a command whose standard output is closed stops on its first write, before any interrupt")
 	}
 	switch {
 	case w.outputClosed:
 		cmd.SetOut(closedOutput{&tried})
 	case w.interruptOn != "":
-		cmd.SetOut(&interrupter{out: &stdout, text: []byte(w.interruptOn), cancel: cancel})
+		cue = &interrupter{out: &stdout, text: []byte(w.interruptOn), ctx: ctx, cancel: cancel}
+		cmd.SetOut(cue)
 	default:
 		cmd.SetOut(&stdout)
 	}
-	interruptIn := w.interruptIn
-	w.interruptOn, w.interruptIn = "", 0 // for this command alone
+	interruptIn, interruptBy := w.interruptIn, w.interruptBy
+	w.interruptOn, w.interruptIn, w.interruptBy = "", 0, 0 // for this command alone
 	cmd.SetErr(&stderr)
 	cmd.SetArgs(append([]string{}, args...)) // never nil, which would make Cobra read the test's own arguments
 	w.ran = true
@@ -223,9 +227,11 @@ func (w *world) execute(fsys afero.Fs, args []string) {
 		w.cachedBefore = w.cached()
 	}
 	asked, jobs, served := w.asked.Load(), w.jobs.Load(), w.served.Load()
-	if interruptIn > 0 { // as the command starts, after anything slow beforehand
-		timer := time.AfterFunc(interruptIn, cancel)
-		defer timer.Stop()
+	for _, d := range []time.Duration{interruptIn, interruptBy} {
+		if d > 0 { // as the command starts, after anything slow beforehand
+			timer := time.AfterFunc(d, cancel)
+			defer timer.Stop()
+		}
 	}
 	start := time.Now()
 	w.err = cmd.ExecuteContext(ctx)
@@ -236,6 +242,7 @@ func (w *world) execute(fsys afero.Fs, args []string) {
 		w.cachedAfter = w.cached()
 	}
 	w.stdout, w.stderr, w.tried = stdout.String(), stderr.String(), tried.String()
+	w.printedCue = cue != nil && cue.fired
 	w.outputClosed = false // for this command alone
 }
 

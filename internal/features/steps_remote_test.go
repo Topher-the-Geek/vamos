@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"time"
 
 	"github.com/Topher-the-Geek/vamos/internal/api"
 	"github.com/Topher-the-Geek/vamos/internal/remote"
@@ -66,6 +67,17 @@ func (w *world) ThenTheCoordinatorWasGivenTheBuild() {
 	if w.jobsDuring == 0 {
 		w.t.Error("the coordinator was given no job, so the command built elsewhere")
 	}
+}
+
+// WhenIStartACoordinatorUntilItListens runs `vamos coordinator` with args, listening on a port of its choosing, with
+// a cache folder of the scenario's own, and interrupts it once it says where it listens, or after ten seconds if it
+// never does: so that one that starts ends cleanly, and one given a mistake fails before it listens.
+func (w *world) WhenIStartACoordinatorUntilItListens(args ...string) {
+	w.t.Helper()
+	w.sendsNothing("WhenIStartACoordinatorUntilItListens")
+	interruptedOnceItPrints("Coordinating builds at ").apply(w, &commandLine{})
+	w.interruptBy = 10 * time.Second
+	w.run(append([]string{"coordinator", "--listen", "127.0.0.1:0", "--cache-dir", w.t.TempDir()}, args...)...)
 }
 
 // GivenTheCoordinatorHasBuilt builds target on the scenario's coordinator, with --coordinator, failing the scenario
