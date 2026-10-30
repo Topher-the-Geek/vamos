@@ -480,7 +480,7 @@ func (w *world) GivenStoresOfTheScenariosOwn() {
 	if w.ran {
 		w.t.Fatal("a command has run already, on the suite's stores")
 	}
-	w.stores = testenv.PrivateStores(w.t)
+	w.stores, w.ownStores = testenv.PrivateStores(w.t), true
 	if w.before != nil {
 		before, err := w.stores.UnnamedImages()
 		if err != nil {

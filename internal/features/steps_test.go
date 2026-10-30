@@ -86,6 +86,9 @@ type world struct {
 	loadedBefore int              // how many images the scenario's own daemon had loaded before the last command
 	loadRan      bool             // whether the last command loaded into Docker, or tried to
 	ran          bool             // whether any command has run
+	ownStores    bool             // whether the scenario's stores are its own, rather than the suite's
+	cachedBefore cached           // what its own stores held as the last command began, alone
+	cachedAfter  cached           // and as it ended
 	emulating    string           // the platform whose programs the scenario runs under emulation, if any
 	askedDuring  int64            // the requests that the scenario's registry served as the last command ran
 	first        v1.Image         // the first image that the scenario saved
@@ -145,9 +148,15 @@ func (w *world) execute(fsys afero.Fs, args []string) {
 	cmd.SetErr(&stderr)
 	cmd.SetArgs(append([]string{}, args...)) // never nil, which would make Cobra read the test's own arguments
 	w.ran = true
+	if w.ownStores {
+		w.cachedBefore = w.cached()
+	}
 	asked := w.asked.Load()
 	w.err = cmd.ExecuteContext(w.t.Context())
 	w.askedDuring = w.asked.Load() - asked
+	if w.ownStores {
+		w.cachedAfter = w.cached()
+	}
 	w.stdout, w.stderr = stdout.String(), stderr.String()
 }
 

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Topher-the-Geek/vamos/internal/testenv"
+	"github.com/opencontainers/go-digest"
 )
 
 // newCacheWorld starts a scenario of the cache feature, from its background.
@@ -523,5 +524,133 @@ func TestCache_TimestampIsAMinimumForTargetsThatRun(t *testing.T) {
 		w.ThenTheTargetsWere(statuses{layer("deps"): ran})
 		w.ThenTheImageWasCreatedWhenTheOneSavedFirstWas()
 		w.ThenTheImageFilesWereModifiedWhenItWasCreated("/deps/nonce.txt", "/app/size.txt")
+	})
+}
+
+// TestCache_ResultsThatCantBeUsedAreBuiltAgain specifies that a cached result that can't be used, since its image or
+// files were removed, or are corrupt, is reported and built again, rather than failing the build; files of the project
+// that a glob captured, which only the client can capture again, fail the build, saying to run it again.
+// Scenarios damage the build cache, so each has stores of its own.
+func TestCache_ResultsThatCantBeUsedAreBuiltAgain(t *testing.T) {
+	t.Run("A task whose cached files are corrupt is built again, and what needed them tried again", func(t *testing.T) {
+		w := newCacheWorld(t)
+		w.GivenStoresOfTheScenariosOwn()
+		nonce := testenv.NewNonce()
+		w.GivenTheBuildFileDeclares(depsSizeAndApp(nonce))
+		w.GivenTheProjectHolds(files{"input.txt": "hello\n"})
+		w.WhenIBuild("app")
+		w.ThenItSucceeds()
+		w.GivenTheCachedBlobOfIsCorrupt(nonce + "\n") // the task's n.txt, which app adds
+		w.WhenIBuild("app", rebuilding())
+		w.ThenItSucceeds()
+		w.ThenTheTargetWasShownAs(task("size"), "cached", "building again, since its cached files are corrupt: ")
+		w.ThenTheTargetWasShownAs(layer("app"), "rebuilding", "rebuilding") // tried again, once the task's files are
+		w.WhenIBuild("app")
+		w.ThenItSucceeds()
+		w.ThenTheTargetsWere(statuses{layer("deps"): reused, task("size"): reused, layer("app"): reused})
+		w.WhenIExport("size") // from the files made again, which a corrupt blob would fail
+		w.ThenItSucceeds()
+		w.ThenTheExportHolds(files{"size.txt": "6\n", "n.txt": nonce + "\n"})
+	})
+
+	t.Run("A task whose cached files are a malformed tree is built again, saying why", func(t *testing.T) {
+		w := newCacheWorld(t)
+		w.GivenStoresOfTheScenariosOwn()
+		w.GivenTheBuildFileDeclares(depsSizeAndApp(testenv.NewNonce()))
+		w.GivenTheProjectHolds(files{"input.txt": "hello\n"})
+		w.WhenIBuild("size")
+		w.ThenItSucceeds()
+		w.GivenEveryCachedTasksFilesAreAMalformedTree()
+		w.WhenIBuild("size")
+		w.ThenItSucceeds()
+		w.ThenTheOutputIncludes(`task "size": building, since the cached result can't be used: ` +
+			"its files can't be used from the cache: ")
+		w.ThenTheOutputIncludes(`is corrupt: it isn't a valid tree: "../x"`)
+	})
+
+	t.Run("A project file whose captured copy is corrupt fails, saying to run the build again, which repairs it",
+		func(t *testing.T) {
+			w := newCacheWorld(t)
+			w.GivenStoresOfTheScenariosOwn()
+			nonce := testenv.NewNonce()
+			input := "hello " + nonce + "\n"
+			w.GivenTheBuildFileDeclares(depsSizeAndApp(nonce))
+			w.GivenTheProjectHolds(files{"input.txt": input})
+			w.WhenIBuild("deps")
+			w.ThenItSucceeds()
+			w.GivenTheCachedBlobOfIsCorrupt(input)
+			w.WhenIBuild("deps", rebuilding())
+			w.ThenItFailsWith(`layer "deps": add("input", "/deps") failed: copying sources from the build cache: `+
+				"input.txt: blob "+digest.FromString(input).String()+" is corrupt", "captured and submitted again")
+			w.WhenIBuild("deps", rebuilding())
+			w.ThenItSucceeds()
+			w.WhenISave("deps")
+			w.ThenItSucceeds()
+			w.ThenTheImageHolds(under("/deps"), files{"/deps/input.txt": input, "/deps/nonce.txt": nonce + "\n"})
+		})
+
+	t.Run("A layer whose cached log is corrupt is built again, saying why", func(t *testing.T) {
+		w := newCacheWorld(t)
+		w.GivenStoresOfTheScenariosOwn()
+		w.GivenTheBuildFileDeclares(depsSizeAndApp(testenv.NewNonce()))
+		w.GivenTheProjectHolds(files{"input.txt": "hello\n"})
+		w.WhenIBuild("deps")
+		w.ThenItSucceeds()
+		w.GivenEveryCachedLogIsCorrupt()
+		w.WhenIBuild("deps")
+		w.ThenItSucceeds()
+		w.ThenTheOutputIncludes(`layer "deps": building, since the cached result can't be used: ` +
+			"its output can't be used from the cache: ")
+		w.ThenTheOutputIncludes("is corrupt")
+	})
+
+	t.Run("A layer whose cached log is malformed is built again, saying why", func(t *testing.T) {
+		w := newCacheWorld(t)
+		w.GivenStoresOfTheScenariosOwn()
+		w.GivenTheBuildFileDeclares(depsSizeAndApp(testenv.NewNonce()))
+		w.GivenTheProjectHolds(files{"input.txt": "hello\n"})
+		w.WhenIBuild("deps")
+		w.ThenItSucceeds()
+		w.GivenEveryCachedLogIsMalformed()
+		w.WhenIBuild("deps")
+		w.ThenItSucceeds()
+		w.ThenTheOutputIncludes(`layer "deps": building, since the cached result can't be used: ` +
+			"its output can't be used from the cache: ")
+		w.ThenTheOutputIncludes("it isn't a whole log")
+	})
+
+	t.Run("A layer whose cached image was removed is built again, saying why", func(t *testing.T) {
+		w := newCacheWorld(t)
+		w.GivenStoresOfTheScenariosOwn()
+		w.GivenTheBuildFileDeclares(depsSizeAndApp(testenv.NewNonce()))
+		w.GivenTheProjectHolds(files{"input.txt": "hello\n"})
+		w.WhenIBuild("busybox") // pulled first, so that the next command's images are the layers' alone
+		w.ThenItSucceeds()
+		w.WhenISave("app")
+		w.ThenItSucceeds()
+		w.GivenTheImagesTheLastCommandCachedAreRemoved()
+		w.WhenISave("app")
+		w.ThenItSucceeds()
+		w.ThenTheOutputIncludes(`layer "deps": building, since the cached result can't be used: its image `)
+		w.ThenTheOutputIncludes("is no longer in the container store")
+		w.ThenTheTargetsWere(statuses{task("size"): reused})
+	})
+
+	t.Run("Targets whose cached files were removed are built again, saying why", func(t *testing.T) {
+		w := newCacheWorld(t)
+		w.GivenStoresOfTheScenariosOwn()
+		w.GivenTheBuildFileDeclares(depsSizeAndApp(testenv.NewNonce()))
+		w.GivenTheProjectHolds(files{"input.txt": "hello\n"})
+		w.WhenIBuild("busybox") // pulled first, so that the next command's blobs are the targets' alone
+		w.ThenItSucceeds()
+		w.WhenISave("app")
+		w.ThenItSucceeds()
+		w.GivenTheBlobsTheLastCommandCachedAreRemoved()
+		w.WhenISave("app")
+		w.ThenItSucceeds()
+		w.ThenTheOutputIncludes(`layer "deps": building, since the cached result can't be used: ` +
+			"its output can't be used from the cache: blob sha256:")
+		w.ThenTheOutputIncludes(`task "size": building, since the cached result can't be used: ` +
+			"its files can't be used from the cache: tree sha256:")
 	})
 }

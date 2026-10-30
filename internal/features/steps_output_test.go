@@ -404,6 +404,23 @@ func (w *world) ThenNoTargetRan() {
 	}
 }
 
+// ThenTheTargetWasShownAs checks that the command showed exactly the statuses of the target that label names,
+// in order, each starting with the one that shown gives, such as "rebuilding" or "building again, since".
+func (w *world) ThenTheTargetWasShownAs(label string, shown ...string) {
+	w.t.Helper()
+	if len(shown) == 0 {
+		w.t.Fatal("no statuses to expect")
+	}
+	got := w.shownStatuses(label)
+	matches := len(got) == len(shown)
+	for i := 0; matches && i < len(got); i++ {
+		matches = strings.HasPrefix(got[i], shown[i])
+	}
+	if !matches {
+		w.t.Errorf("%s: shown as %q, want %q, in order\n%s", label, got, shown, w.stdout)
+	}
+}
+
 // ThenTheTargetWasBuiltInOneConfiguration checks that the command showed statuses of the target that label names
 // in one configuration alone, whatever its arguments. It fails the scenario at once if label names a configuration.
 func (w *world) ThenTheTargetWasBuiltInOneConfiguration(label string) {

@@ -64,6 +64,9 @@ Cached layers are container-store images named `localhost/vamos-cache:<id>`, by 
 pulled images carry that name too, beside the name of the digest they were pulled by.
 Other cached data is beside the container store, normally in `/var/lib/containers/vamos`.
 A volume on `/var/lib/containers` preserves both when vamos runs in a disposable container.
+A cached result that can't be used, since its image or files were removed from either, or are corrupt,
+is reported and built again, rather than failing the build;
+a project file whose captured copy is corrupt fails the build, which captures it again when run again.
 See the [tutorial](../tutorial.md#2-set-up-vamos) for a Docker setup with a named volume.
 
 Cache results remain until explicitly pruned:

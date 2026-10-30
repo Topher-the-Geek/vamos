@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,7 +17,6 @@ import (
 	"github.com/Topher-the-Geek/vamos/internal/run"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
-	"github.com/opencontainers/go-digest"
 	"github.com/spf13/afero"
 	"go.podman.io/storage"
 )
@@ -52,142 +50,7 @@ layer(name="app", base="deps", steps=[add("size", "/app")])
 `, nonce)
 }
 
-// blobPath returns where the test's content store keeps the blob of content.
-func blobPath(t *testing.T, content string) string {
-	t.Helper()
-	return filepath.Join(run.CacheDir(stores(t).Options), "cas", "sha256", digest.FromString(content).Encoded())
-}
-
-// corruptBlob replaces the content of the blob at path with as many other bytes,
-// so that only reading it tells it is corrupt.
-func corruptBlob(t *testing.T, path string) {
-	t.Helper()
-	info, err := os.Stat(path)
-	must(t, err)
-	must(t, os.WriteFile(path, bytes.Repeat([]byte("x"), int(info.Size())), 0o600))
-}
-
-// TestCacheCorruption checks what a build does with content that is corrupt in the content store:
-// a task's files are made again, and the target that needed them tried again;
-// a glob's files fail the build, naming the blob, since only the client can capture them again;
-// and a cached target whose output is corrupt is built again.
-func TestCacheCorruption(t *testing.T) {
-	requireBuildah(t)
-	t.Run("task files", func(t *testing.T) {
-		nonce := newNonce()
-		fsys := project(t, map[string]string{"BUILD": cachedBuild(nonce), "input.txt": "hello\n"})
-		vamos(t, fsys, "build", "app", "-C", projectDir).ran(t)
-		corruptBlob(t, blobPath(t, nonce+"\n")) // the task's nonce.txt, which app adds
-
-		r := vamos(t, fsys, "build", "app", "--rebuild", "-C", projectDir).ran(t)
-		want := `task "size": building again, since its cached files are corrupt: `
-		if !strings.Contains(r.stdout, want) {
-			t.Errorf("stdout = %q, want it to report the task built again", r.stdout)
-		}
-		if strings.Count(r.stdout, `layer "app": rebuilding`) != 2 {
-			t.Errorf("stdout = %q, want the layer tried again after the task", r.stdout)
-		}
-		if data, err := os.ReadFile(blobPath(t, nonce+"\n")); err != nil || string(data) != nonce+"\n" {
-			t.Errorf("the corrupt blob holds %q, %v after the build; want it made again", data, err)
-		}
-		r = vamos(t, fsys, "build", "app", "-C", projectDir).ran(t)
-		assertTargets(t, r, map[string]string{
-			`layer "deps"`: "cached",
-			`task "size"`:  "cached",
-			`layer "app"`:  "cached",
-		})
-	})
-	t.Run("task tree", func(t *testing.T) {
-		nonce := newNonce()
-		fsys := project(t, map[string]string{"BUILD": cachedBuild(nonce), "input.txt": "hello\n"})
-		vamos(t, fsys, "build", "size", "-C", projectDir).ran(t)
-		// A tree whose content matches its digest, but which no walk could have made: an entry outside the tree.
-		dir := run.CacheDir(stores(t).Options)
-		store, err := cache.OpenDirectory(dir)
-		must(t, err)
-		malformed, err := store.PutBytes(t.Context(), []byte(`{"entries":[{"path":"../x","type":"dir"}]}`))
-		must(t, err)
-		replaceRecorded(t, "output", malformed)
-
-		r := vamos(t, fsys, "build", "size", "-C", projectDir).ran(t)
-		want := `task "size": building, since the cached result can't be used: ` +
-			"its files can't be used from the cache: "
-		if !strings.Contains(r.stdout, want) ||
-			!strings.Contains(r.stdout, `is corrupt: it isn't a valid tree: "../x"`) {
-			t.Errorf("stdout = %q, want it to report the malformed tree", r.stdout)
-		}
-	})
-	t.Run("glob files", func(t *testing.T) {
-		nonce := newNonce()
-		input := "hello " + nonce + "\n"
-		fsys := project(t, map[string]string{"BUILD": cachedBuild(nonce), "input.txt": input})
-		vamos(t, fsys, "build", "deps", "-C", projectDir).ran(t)
-		corruptBlob(t, blobPath(t, input))
-
-		vamos(t, fsys, "build", "deps", "--rebuild", "-C", projectDir).failsWith(t, false,
-			`layer "deps": add("input", "/deps") failed: copying sources from the build cache: input.txt: blob `+
-				digest.FromString(input).String()+" is corrupt", "captured and submitted again")
-		// The corrupt blob had the right size; building again captures the sources again and repairs it.
-		vamos(t, fsys, "build", "deps", "--rebuild", "-C", projectDir).ran(t)
-		if data, err := os.ReadFile(blobPath(t, input)); err != nil || string(data) != input {
-			t.Errorf("the corrupt blob holds %q, %v after building again; want it captured again", data, err)
-		}
-	})
-	t.Run("log", func(t *testing.T) {
-		nonce := newNonce()
-		fsys := project(t, map[string]string{"BUILD": cachedBuild(nonce), "input.txt": "hello\n"})
-		vamos(t, fsys, "build", "deps", "-C", projectDir).ran(t)
-		for _, log := range recordedBlobs(t, "log") {
-			corruptBlob(t, log)
-		}
-
-		r := vamos(t, fsys, "build", "deps", "-C", projectDir).ran(t)
-		want := `layer "deps": building, since the cached result can't be used: ` +
-			"its output can't be used from the cache: "
-		if !strings.Contains(r.stdout, want) {
-			t.Errorf("stdout = %q, want it to report the corrupt output", r.stdout)
-		}
-		if !strings.Contains(r.stdout, "is corrupt") {
-			t.Errorf("stdout = %q, want the reason to say the log is corrupt", r.stdout)
-		}
-	})
-	t.Run("malformed log", func(t *testing.T) {
-		nonce := newNonce()
-		fsys := project(t, map[string]string{"BUILD": cachedBuild(nonce), "input.txt": "hello\n"})
-		vamos(t, fsys, "build", "deps", "-C", projectDir).ran(t)
-		// A log whose content matches its digest, but whose record promises more bytes than follow.
-		store, err := cache.OpenDirectory(run.CacheDir(stores(t).Options))
-		must(t, err)
-		malformed, err := store.PutBytes(t.Context(), []byte{cache.StreamStdout, 10, 'h', 'i'})
-		must(t, err)
-		replaceRecorded(t, "log", malformed)
-
-		r := vamos(t, fsys, "build", "deps", "-C", projectDir).ran(t)
-		want := `layer "deps": building, since the cached result can't be used: ` +
-			"its output can't be used from the cache: "
-		if !strings.Contains(r.stdout, want) || !strings.Contains(r.stdout, "it isn't a whole log") {
-			t.Errorf("stdout = %q, want it to report the malformed log and build again", r.stdout)
-		}
-	})
-}
-
-// replaceRecorded makes every one of the test's action results that has the field, "log" or "output", name b.
-func replaceRecorded(t *testing.T, field string, b cache.Blob) {
-	t.Helper()
-	for _, record := range recordsNaming(t, field) {
-		data, err := os.ReadFile(record)
-		must(t, err)
-		var fields map[string]json.RawMessage
-		must(t, json.Unmarshal(data, &fields))
-		fields[field], err = json.Marshal(b)
-		must(t, err)
-		data, err = json.Marshal(fields)
-		must(t, err)
-		must(t, os.WriteFile(record, data, 0o600))
-	}
-}
-
-// recordsNaming returns the paths of the test's action results that have the field, "log" or "output".
+// recordsNaming returns the paths of the test's action results that have the field, such as "epoch".
 func recordsNaming(t *testing.T, field string) []string {
 	t.Helper()
 	dir := run.CacheDir(stores(t).Options)
@@ -205,84 +68,6 @@ func recordsNaming(t *testing.T, field string) []string {
 		}
 	}
 	return paths
-}
-
-// recordedBlobs returns the paths of the blobs that the test's action results name in field, "log" or "output".
-func recordedBlobs(t *testing.T, field string) []string {
-	t.Helper()
-	dir := run.CacheDir(stores(t).Options)
-	var paths []string
-	for _, record := range recordsNaming(t, field) {
-		data, err := os.ReadFile(record)
-		must(t, err)
-		var fields map[string]json.RawMessage
-		must(t, json.Unmarshal(data, &fields))
-		var b struct {
-			Digest digest.Digest `json:"digest"`
-		}
-		must(t, json.Unmarshal(fields[field], &b))
-		paths = append(paths, filepath.Join(dir, "cas", "sha256", b.Digest.Encoded()))
-	}
-	return paths
-}
-
-// TestCacheEntryRemoved checks that a cached result whose image or files have been removed
-// since is reported and built again, rather than failing the build.
-func TestCacheEntryRemoved(t *testing.T) {
-	requireBuildah(t)
-	tests := []struct {
-		name   string
-		remove func(t *testing.T, images map[string]bool, blobs map[string]bool)
-		want   []string
-	}{
-		{
-			name: "image",
-			remove: func(t *testing.T, images map[string]bool, blobs map[string]bool) {
-				withStore(t, func(store storage.Store) {
-					for id := range images {
-						if _, err := store.DeleteImage(id, true); err != nil {
-							t.Fatal(err)
-						}
-					}
-				})
-			},
-			want: []string{
-				`layer "deps": building, since the cached result can't be used: its image `,
-				"is no longer in the container store",
-				`task "size": cached`,
-			},
-		},
-		{
-			name: "files",
-			remove: func(t *testing.T, images map[string]bool, blobs map[string]bool) {
-				for path := range blobs {
-					must(t, os.Remove(path))
-				}
-			},
-			want: []string{
-				`layer "deps": building, since the cached result can't be used: ` +
-					"its output can't be used from the cache: blob sha256:",
-				`task "size": building, since the cached result can't be used: ` +
-					"its files can't be used from the cache: tree sha256:",
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fsys := project(t, map[string]string{"BUILD": cachedBuild(newNonce()), "input.txt": "hello\n"})
-			dir := t.TempDir()
-			images, blobs := cachedImages(t), cachedBlobs(t)
-			vamos(t, fsys, "save", "app", filepath.Join(dir, "1.tar"), "-C", projectDir).succeeds(t)
-			tt.remove(t, newKeys(cachedImages(t), images), newKeys(cachedBlobs(t), blobs))
-
-			r := vamos(t, fsys, "save", "app", filepath.Join(dir, "2.tar"), "-C", projectDir).succeeds(t)
-			for _, want := range tt.want {
-				if !strings.Contains(r.stdout, want) {
-					t.Errorf("stdout = %q, want it to contain %q", r.stdout, want)
-				}
-			}
-		})
-	}
 }
 
 // assertTargets fails the test unless r reports each target in want, such as `layer "app"`, as "building" or "cached".

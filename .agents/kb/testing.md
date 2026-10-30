@@ -188,7 +188,9 @@ and the comparisons that its steps share;
 [steps_output_test.go](../../internal/features/steps_output_test.go) what a command reported, its targets' statuses
 and its steps' observations;
 [steps_image_test.go](../../internal/features/steps_image_test.go) the image saved;
-and [steps_destination_test.go](../../internal/features/steps_destination_test.go) the folder a command sends to.
+[steps_destination_test.go](../../internal/features/steps_destination_test.go) the folder a command sends to;
+and [steps_cache_test.go](../../internal/features/steps_cache_test.go) the Given steps that damage the build cache
+or the container store, as something outside vamos might, on stores of the scenario's own.
 Reuse a step before adding one, and name a new one as what a user does or sees, not as how it is checked.
 Steps call `t.Helper`, so a failure names the scenario's line;
 checks of whether the command succeeded stop the scenario, and other checks let it go on.

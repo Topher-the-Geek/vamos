@@ -56,7 +56,8 @@ Delete this file when every box is ticked.
   are scenarios of the export feature; the rest of `internal/finish`'s export tests, which inject faults or races,
   are decided below.
 - [ ] **The cache as a user sees it.**
-  `TestCacheCorruption`, `TestCacheEntryRemoved`, `TestMovedCacheName`, `TestUnverifiedLayers`,
+  `TestCacheCorruption` and `TestCacheEntryRemoved` are scenarios of the cache feature. Left:
+  `TestMovedCacheName`, `TestUnverifiedLayers`,
   `TestResultProvenance`, including whether a result's commands ran under emulation, `TestExportRepairsCorruptBlob`,
   and the store's names in `TestImageIdentityRoundTrip`,
   whose reported ID the push feature checks.

@@ -11,7 +11,7 @@ and a client gets its content store from the executor it builds with.
 Record metadata alone cannot prove an image or tree is still available.
 Content is verified as it is read: a task whose cached files are found corrupt runs again,
 a glob whose files are corrupt fails the build, since only the client can capture them again,
-and a result whose log is corrupt is a miss; `TestCacheCorruption` covers each.
+and a result whose log is corrupt is a miss; `TestCache_ResultsThatCantBeUsedAreBuiltAgain` covers each.
 
 Do not conflate these identities:
 
