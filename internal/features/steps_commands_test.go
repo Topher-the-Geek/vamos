@@ -196,6 +196,9 @@ func (w *world) WhenISave(target string, options ...option) {
 	if w.prepared != "" {
 		w.t.Fatal("saving into the project doesn't send to the folder that Given steps prepared")
 	}
+	if w.cDir != "" {
+		w.t.Fatal("saving into the project needs a directory within it to run in, not GivenTheCommandRunsIn")
+	}
 	w.onDisk = true
 	fsys := w.project()
 	w.onDisk = false
@@ -249,12 +252,38 @@ func (w *world) WhenIExport(target string, options ...option) {
 func (w *world) WhenIBuild(target string, options ...option) {
 	w.t.Helper()
 	c := w.apply("build", options)
-	if w.prepared != "" {
-		w.t.Fatal("build sends nothing, so it doesn't use the folder that Given steps prepared")
-	}
-	w.dest, w.inProject, w.sent = "", false, "" // build sends nothing, so nothing can be checked as unsent
+	w.sendsNothing("WhenIBuild")
 	args := append([]string{"build", target}, c.targets...)
 	w.run(append(args, c.flags...)...)
+}
+
+// WhenIRun runs vamos with args as they are, after -C, for a command line that the other When steps don't give:
+// one that is itself a mistake, or that asks for help. A command line that builds is given by the When step of its
+// command and the options that name its flags. It sends nothing that a later step can check.
+func (w *world) WhenIRun(args ...string) {
+	w.t.Helper()
+	w.sendsNothing("WhenIRun")
+	w.run(args...)
+}
+
+// WhenIRunVamosAlone runs vamos without arguments, not even -C, so that no Given step may say where it runs.
+func (w *world) WhenIRunVamosAlone() {
+	w.t.Helper()
+	if (w.dir != "" && w.dir != ".") || w.cDir != "" {
+		w.t.Fatal("vamos alone runs in no directory that a Given step can give")
+	}
+	w.sendsNothing("WhenIRunVamosAlone")
+	w.execute(w.project(), nil)
+}
+
+// sendsNothing records that the next command, run by step, sends nothing, so that nothing can be checked as unsent,
+// failing the scenario if Given steps prepared a folder for it to send to.
+func (w *world) sendsNothing(step string) {
+	w.t.Helper()
+	if w.prepared != "" {
+		w.t.Fatalf("%s doesn't send to the folder that Given steps prepared", step)
+	}
+	w.dest, w.inProject, w.sent = "", false, ""
 }
 
 // newDest gives the next command a folder of its own to send to, so that checks see only what it sent,

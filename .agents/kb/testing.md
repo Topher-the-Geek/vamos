@@ -217,6 +217,10 @@ Steps about named paths, variables or targets, such as `ThenTheImageModesAre`, `
 `ThenItSucceeds` and `ThenItFailsWith` carry the checks that success and failure mean for every command:
 success reports sending what the command sends, nothing if it sends nothing, and a save the saved image's ID;
 failure prints no usage and reports nothing sent.
+`ThenItFailsShowingUsage` is the failure of a mistake on the command line, which prints usage.
+`WhenIRun` runs a command line that the other When steps don't give, such as a mistaken one,
+`WhenIRunVamosAlone` runs vamos without arguments,
+and `GivenTheCommandRunsIn` gives `-C` as it is, even outside the project, rather than `GivenIWorkIn`.
 No other step checks more than its name says, beyond what it needs to check that,
 such as a real time to compare with or a path in both images it compares;
 steps also stop the scenario on a mistake in the scenario itself, such as a path outside the scope it lists.

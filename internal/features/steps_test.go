@@ -50,6 +50,7 @@ type world struct {
 	touched []string        // the project files whose modification times are an hour ahead
 	denied  []string        // the project files that can't be checked
 	dir     string          // the directory within the project that commands run in, with -C
+	cDir    string          // the directory that -C names as given, rather than dir, if a step says
 	onDisk  bool            // whether the project is kept on disk, under root, even without links
 	root    string          // the folder that holds the project, if it is on disk
 	before  map[string]bool // the store's unnamed images when the scenario began, if it builds
@@ -97,18 +98,29 @@ func (w *world) run(args ...string) {
 	w.runIn(w.project(), args...)
 }
 
-// runIn is run in the project fsys.
+// runIn is run in the project fsys. -C comes first, before the command, so that args end as a scenario gives them,
+// even with a flag that lacks its value.
 func (w *world) runIn(fsys afero.Fs, args ...string) {
 	w.t.Helper()
-	if info, err := fsys.Stat(filepath.Join(testenv.ProjectDir, w.dir)); err != nil || !info.IsDir() {
-		w.t.Fatalf("the project has no directory %s to work in", w.dir)
+	dir := w.cDir
+	if dir == "" {
+		dir = filepath.Join(testenv.ProjectDir, w.dir)
+		if info, err := fsys.Stat(dir); err != nil || !info.IsDir() {
+			w.t.Fatalf("the project has no directory %s to work in", w.dir)
+		}
 	}
+	w.execute(fsys, append([]string{"-C", dir}, args...))
+}
+
+// execute runs the vamos command line with exactly args, none for none, in the project fsys, as main does.
+func (w *world) execute(fsys afero.Fs, args []string) {
+	w.t.Helper()
 	w.image, w.archive, w.entries, w.exported = nil, "", nil, ""
 	cmd := cli.NewRootCommand(cli.Config{Fs: fsys, Store: &w.stores.Options})
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs(append(args, "-C", filepath.Join(testenv.ProjectDir, w.dir)))
+	cmd.SetArgs(append([]string{}, args...)) // never nil, which would make Cobra read the test's own arguments
 	w.err = cmd.ExecuteContext(w.t.Context())
 	w.stdout, w.stderr = stdout.String(), stderr.String()
 }

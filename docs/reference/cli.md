@@ -1,10 +1,11 @@
 # CLI reference
 
-Run `vamos --help` or `vamos <command> --help` for command-line help.
+Run `vamos --help` or `vamos <command> --help` for command-line help; `vamos` alone shows it too.
 Targets are names in the current directory's `BUILD` file, or [workspace labels](configuration.md#workspaces).
 Any other name fails before anything runs,
 suggesting the name that was meant where one is close, and otherwise naming the targets there are.
-`-C <dir>` chooses the directory whose targets can be named without a label.
+`-C <dir>` chooses the directory whose targets can be named without a label, which must exist;
+a relative one is relative to the working directory, as for other tools.
 It does not change the process's working directory: local output paths remain relative to where you run vamos.
 
 ## Commands
@@ -48,7 +49,7 @@ vamos push release ghcr.io/me/app:1.0 --push-from=client
 
 Publishes an image, or a whole index with its images, to the destination repository.
 An image name without a tag gets `:latest`.
-Destination names cannot include a digest.
+Destination names are lowercase image references and cannot include a digest.
 
 `--push-from=executor` is the default: the executor pushes with its credentials and registry settings,
 from its own environment: `registries.conf` and `REGISTRY_AUTH_FILE`.
@@ -65,7 +66,8 @@ vamos load app app:dev
 docker run --rm app:dev
 ```
 
-Loads the image into Docker with the given name, defaulting its tag to `:latest`.
+Loads the image into Docker with the given name, defaulting its tag to `:latest`;
+the name is a lowercase image reference without a digest.
 It uses `$DOCKER_HOST`, or `/var/run/docker.sock`, with TLS settings from `$DOCKER_CERT_PATH` and `$DOCKER_TLS_VERIFY`.
 When the target is an index, it selects and builds only the image matching the Docker daemon's platform.
 For a single-image target, the build platform defaults to the host unless `--platform` overrides it.
@@ -80,7 +82,8 @@ docker run --rm app:dev
 
 Writes an archive that `docker load` can import, at any path, colons and all,
 even inside the project, whose globs never read the archive being written.
-`--tag <image>`, or `-t <image>`, records an image name; without it, the archive has no image name.
+`--tag <image>`, or `-t <image>`, records an image name, a lowercase image reference without a digest;
+without it, the archive has no image name.
 An existing output file is replaced only after the new image is complete.
 The output file's parent directory must already exist, and the output path must not be a directory.
 For an index, only the image matching the host's platform is built and saved.
@@ -234,7 +237,7 @@ With multiple build targets, each `--set` applies to named targets declaring tha
 and must match at least one named target.
 See [parameters](configuration.md#parameters) for value syntax.
 
-`--timestamp` accepts Unix seconds or RFC 3339, such as `2026-01-01T00:00:00Z`.
+`--timestamp` accepts Unix seconds or RFC 3339, such as `2026-01-01T00:00:00Z`, no earlier than 1970.
 It does not invalidate existing cached results.
 
 ### Secrets
@@ -257,7 +260,7 @@ build secrets in your own process.
 `--trace <file.json>` writes a [Perfetto trace](cache.md#traces)
 and is available on `build`, `push`, `load`, `save` (including its deprecated `write` alias), and `export`.
 
-The TLS flag displays `true` in help, but when omitted vamos defers to `registries.conf`,
+The TLS flag displays `true` in help, and given alone means `true`, but when omitted vamos defers to `registries.conf`,
 including entries with `insecure = true`.
 It applies to what the client itself does: a push with `--push-from=client`, and reading a coordinator's images to
 load, save or push;

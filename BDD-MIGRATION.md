@@ -26,17 +26,18 @@ Delete this file when every box is ticked.
   and `TestPackagesNamingEachOther`'s cycles and late names: scenarios of the workspaces feature,
   from a background that needs no buildah, so `-short` runs them;
   each states the error, with its `file:line:col` and operation.
-- [ ] **Mistakes on the command line.**
-  `TestCommandLineMistakes`, `TestUnknownCommands`, `TestNoCommandShowsHelp`,
-  `TestInvalidImageNames`, `TestProjectDirectoryMistakes`, `TestMissingAuthFile`, `TestTLSVerifyFlagForms`,
-  and the flag mistakes of the platform, index, trace, remote and coordinator tests.
-  These print usage, which `ThenItFailsWith` refuses, so they need a step that expects it.
+- [x] **Mistakes on the command line.**
+  `TestCommandLineMistakes`, `TestUnknownCommands`, `TestNoCommandShowsHelp`, `TestInvalidImageNames`,
+  `TestProjectDirectoryMistakes` and `TestTLSVerifyFlagForms` are scenarios of the command line feature;
+  the flag mistakes of the platform, index, trace, remote and coordinator tests move with their categories,
+  and `TestMissingAuthFile` with push.
 - [x] **Workspace loading.**
   `TestWorkspaceRoot`, `TestLabelsInOwnPackage`, `TestWorkspaceSearchError`, `TestPackageLinks`, `TestBuildVms`,
   `TestPackagesNamingEachOther`.
   The workspaces feature, observed through what builds rather than the graph.
 - [ ] **Push and index push.**
-  `TestPush`, `TestPushWithAuthFile`, `TestTLSVerifyIsTheClients`, `TestPushFailures`, `TestIndex`,
+  `TestPush`, `TestPushWithAuthFile`, `TestTLSVerifyIsTheClients`, `TestPushFailures`, `TestMissingAuthFile`,
+  that `--tls-verify` given alone means true, `TestIndex`,
   `TestIndexByPlatform`, `TestIndexChoosesManifest`, `TestPlatformVariants`, `TestIndexMistakes`,
   and `TestImageIdentityRoundTrip`'s reported ID.
   A push feature; the in-process registry goes behind Given and destination steps.

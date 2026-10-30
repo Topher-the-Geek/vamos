@@ -59,7 +59,20 @@ func (w *world) GivenIWorkIn(dir string) {
 	if dir = path.Clean(dir); path.IsAbs(dir) || dir == ".." || strings.HasPrefix(dir, "../") {
 		w.t.Fatalf("%s isn't within the project", dir)
 	}
+	if w.cDir != "" {
+		w.t.Fatal("GivenTheCommandRunsIn has given -C already")
+	}
 	w.dir = dir
+}
+
+// GivenTheCommandRunsIn makes later commands name dir with -C as it is given, rather than a directory within the
+// project, for a scenario of -C's mistakes: dir may be missing, a file, or relative to the working directory.
+func (w *world) GivenTheCommandRunsIn(dir string) {
+	w.t.Helper()
+	if w.dir != "" && w.dir != "." {
+		w.t.Fatal("GivenIWorkIn has given a directory within the project already")
+	}
+	w.cDir = dir
 }
 
 // GivenTheProjectHolds adds files to the project, by path, replacing any it held at those paths.

@@ -118,19 +118,6 @@ func TestBuildHandlerWithoutRoot(t *testing.T) {
 	}
 }
 
-// TestTLSVerifyFlagForms checks the forms --tls-verify takes: given alone it means true, and help shows its default.
-func TestTLSVerifyFlagForms(t *testing.T) {
-	fsys := project(t, map[string]string{"BUILD": `layer(name="app", base="scratch")`})
-	r := vamos(t, fsys, "graph", "app", "--tls-verify", "-C", projectDir)
-	if r.err != nil {
-		t.Errorf("--tls-verify alone = %v, want it taken as true", r.err)
-	}
-	r = vamos(t, fsys, "--help")
-	if !strings.Contains(r.stdout, "--tls-verify ") || !strings.Contains(r.stdout, "(default true)") {
-		t.Errorf("help = %q, want --tls-verify shown with its default", r.stdout)
-	}
-}
-
 // drainingExecutor is a job whose events, watched, are a status line then, once the job is cancelled,
 // the executor's spans, a gap and its end, with outcome as its result.
 type drainingExecutor struct {

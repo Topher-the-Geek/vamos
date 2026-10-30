@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -44,8 +45,22 @@ func lastLine(s string) string {
 
 // ThenItFailsWith checks that the command failed, at run time, with an error that contains each of wants,
 // printed no usage, and reported sending nothing. In wants, <destination> stands for the folder that the command
-// sent to. It stops the scenario if any of these doesn't hold.
+// sent to, and <working directory> for the test's. It stops the scenario if any of these doesn't hold.
 func (w *world) ThenItFailsWith(wants ...string) {
+	w.t.Helper()
+	w.fails(false, wants)
+}
+
+// ThenItFailsShowingUsage checks that the command failed as a mistake on the command line does:
+// as ThenItFailsWith checks, but printing usage.
+func (w *world) ThenItFailsShowingUsage(wants ...string) {
+	w.t.Helper()
+	w.fails(true, wants)
+}
+
+// fails checks that the command failed with an error that contains each of wants, printing usage or not,
+// and reported sending nothing, stopping the scenario if any of these doesn't hold.
+func (w *world) fails(usage bool, wants []string) {
 	w.t.Helper()
 	if w.err == nil {
 		w.t.Fatalf("vamos succeeded, want an error\n%s", w.outputs())
@@ -55,13 +70,15 @@ func (w *world) ThenItFailsWith(wants ...string) {
 	}
 	var errs []error
 	for _, want := range wants {
-		want = w.atDestination(want)
+		want = w.atPlaceholders(want)
 		if !strings.Contains(w.err.Error(), want) {
 			errs = append(errs, fmt.Errorf("error = %q, want it to contain %q", w.err, want))
 		}
 	}
-	if w.reported("Usage:") {
+	if printed := w.reported("Usage:"); printed && !usage {
 		errs = append(errs, fmt.Errorf("printed usage for a failure at run time\n%s", w.outputs()))
+	} else if !printed && usage {
+		errs = append(errs, fmt.Errorf("printed no usage for a mistake on the command line\n%s", w.outputs()))
 	}
 	if slices.ContainsFunc(sentReports, w.reported) {
 		errs = append(errs, fmt.Errorf("reported something sent after an error\n%s", w.outputs()))
@@ -71,9 +88,17 @@ func (w *world) ThenItFailsWith(wants ...string) {
 	}
 }
 
-// atDestination returns s with each <destination> replaced by the folder that the last command sent to.
-func (w *world) atDestination(s string) string {
+// atPlaceholders returns s with each <destination> replaced by the folder that the last command sent to,
+// and each <working directory> by the test's.
+func (w *world) atPlaceholders(s string) string {
 	w.t.Helper()
+	if strings.Contains(s, "<working directory>") {
+		wd, err := os.Getwd()
+		if err != nil {
+			w.t.Fatal(err)
+		}
+		s = strings.ReplaceAll(s, "<working directory>", wd)
+	}
 	if strings.Contains(s, "<destination>") && w.dest == "" {
 		w.t.Fatalf("%q names <destination>, but no command has run that sends images or files", s)
 	}
@@ -102,9 +127,29 @@ func (w *world) outputs() string {
 // In want, <destination> stands for the folder that the command sent to.
 func (w *world) ThenTheOutputIncludes(want string) {
 	w.t.Helper()
-	if want = w.atDestination(want); !strings.Contains(w.stdout, want) {
+	if want = w.atPlaceholders(want); !strings.Contains(w.stdout, want) {
 		w.t.Errorf("stdout = %q, want it to include %q", w.stdout, want)
 	}
+}
+
+// ThenALineOfTheOutputHolds checks that one line of the command's standard output holds each of parts, in order.
+func (w *world) ThenALineOfTheOutputHolds(parts ...string) {
+	w.t.Helper()
+	for line := range strings.Lines(w.stdout) {
+		rest, held := line, true
+		for _, part := range parts {
+			_, after, ok := strings.Cut(rest, part)
+			if !ok {
+				held = false
+				break
+			}
+			rest = after
+		}
+		if held {
+			return
+		}
+	}
+	w.t.Errorf("stdout = %q, want a line that holds %q, in order", w.stdout, parts)
 }
 
 // ThenTheOutputIs checks that the command's standard output is exactly want.
@@ -127,7 +172,7 @@ func (w *world) ThenTheOutputDoesNotInclude(unwanted string) {
 // In want, <destination> stands for the folder that the command sent to.
 func (w *world) ThenItLastReports(want string) {
 	w.t.Helper()
-	if want = w.atDestination(want); !strings.HasPrefix(lastLine(w.stdout), want) {
+	if want = w.atPlaceholders(want); !strings.HasPrefix(lastLine(w.stdout), want) {
 		w.t.Errorf("stdout = %q, want its last line to start with %q", w.stdout, want)
 	}
 }
