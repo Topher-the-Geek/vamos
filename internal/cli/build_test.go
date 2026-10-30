@@ -2,12 +2,10 @@ package cli
 
 import (
 	"archive/tar"
-	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -231,81 +229,6 @@ layer(name="app", base="busybox", steps=[add("make", "/app")])
 	}
 	if got := imageFile(t, img, "/app/file.txt"); got != "inside\n" {
 		t.Errorf("/app/file.txt = %q, want the file from the container", got)
-	}
-}
-
-func TestLoad(t *testing.T) {
-	requireBuildah(t)
-	// Over TCP, like Docker, vamos uses TLS only when $DOCKER_CERT_PATH is set.
-	for _, network := range []string{"unix", "tcp"} {
-		t.Run(network, func(t *testing.T) {
-			loaded := fakeDocker(t, network, "")
-
-			r := vamos(t, project(t, helloBuild), "load", "app", "app:dev", "-C", projectDir).succeeds(t)
-			if !strings.Contains(r.stdout, "app:dev") {
-				t.Errorf("stdout = %q, want it to name app:dev", r.stdout)
-			}
-
-			images := loaded()
-			if len(images) != 1 {
-				t.Fatalf("Docker loaded %d images, want 1", len(images))
-			}
-			tag, err := name.NewTag("app:dev")
-			if err != nil {
-				t.Fatal(err)
-			}
-			img, err := tarball.Image(func() (io.ReadCloser, error) {
-				return io.NopCloser(bytes.NewReader(images[0])), nil
-			}, &tag)
-			if err != nil {
-				t.Fatalf("reading image sent to Docker as app:dev: %v", err)
-			}
-			if got, want := imageCmd(t, img), []string{"echo", "hello from vamos"}; !slices.Equal(got, want) {
-				t.Errorf("command = %q, want %q", got, want)
-			}
-		})
-	}
-}
-
-func TestLoadRejected(t *testing.T) {
-	requireBuildah(t)
-	fakeDocker(t, "unix", `{"errorDetail":{"message":"no space left on device"},"error":"no space left on device"}`)
-
-	vamos(t, project(t, helloBuild), "load", "app", "app:dev", "-C", projectDir).
-		failsWith(t, false, "loading into Docker: no space left on device")
-}
-
-func TestLoadWithoutDocker(t *testing.T) {
-	requireBuildah(t)
-	t.Setenv("DOCKER_HOST", "unix:///nonexistent/docker.sock")
-
-	fsys := project(t, map[string]string{
-		"BUILD": pullBusybox + `layer(name="app", base="busybox", steps=[run(["echo", "build completed"])])`,
-	})
-	r := vamos(t, fsys, "load", "app", "app:dev", "-C", projectDir).
-		failsWith(t, false, "loading into Docker", "/nonexistent/docker.sock")
-	if !strings.Contains(r.stdout, "build completed") {
-		t.Errorf("stdout = %q, want the build to run before connecting to Docker", r.stdout)
-	}
-}
-
-// TestLoadIntoDocker checks the fake Docker daemon's assumptions against a real one.
-func TestLoadIntoDocker(t *testing.T) {
-	requireBuildah(t)
-	if err := exec.Command("docker", "info").Run(); err != nil {
-		t.Skip("needs a running Docker daemon")
-	}
-	image := "vamos-test-" + strings.ToLower(strings.ReplaceAll(t.Name(), "/", "-")) + ":latest"
-	t.Cleanup(func() { exec.Command("docker", "rmi", "--force", image).Run() })
-
-	vamos(t, project(t, helloBuild), "load", "app", image, "-C", projectDir).succeeds(t)
-
-	out, err := exec.Command("docker", "run", "--rm", image).CombinedOutput()
-	if err != nil {
-		t.Fatalf("docker run %s: %v\n%s", image, err, out)
-	}
-	if got := strings.TrimSpace(string(out)); got != "hello from vamos" {
-		t.Errorf("docker run %s printed %q, want %q", image, got, "hello from vamos")
 	}
 }
 

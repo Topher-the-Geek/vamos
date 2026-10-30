@@ -68,7 +68,9 @@ docker run --rm app:dev
 
 Loads the image into Docker with the given name, defaulting its tag to `:latest`;
 the name is a lowercase image reference without a digest.
-It uses `$DOCKER_HOST`, or `/var/run/docker.sock`, with TLS settings from `$DOCKER_CERT_PATH` and `$DOCKER_TLS_VERIFY`.
+It uses `$DOCKER_HOST`, or `/var/run/docker.sock`, with TLS settings from `$DOCKER_CERT_PATH` and `$DOCKER_TLS_VERIFY`,
+once the image is built, or for an index, first, to ask its platform:
+a daemon that can't be reached, or refuses the image, fails the load, saying why.
 When the target is an index, it selects and builds only the image matching the Docker daemon's platform.
 For a single-image target, the build platform defaults to the host unless `--platform` overrides it.
 

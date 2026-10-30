@@ -2,6 +2,8 @@ package features
 
 import (
 	"cmp"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -48,7 +50,7 @@ type commandLine struct {
 var sendingCommands = []string{"save", "export"}
 
 // everyCommand are the commands that When steps run with options.
-var everyCommand = []string{"save", "export", "build", "push"}
+var everyCommand = []string{"save", "export", "build", "push", "load"}
 
 // to sends to the path name, relative to the folder that the command sends to,
 // rather than to the target's name, with .tar for save. Save and export take it.
@@ -286,15 +288,9 @@ func (w *world) WhenIPush(target, image string, options ...option) {
 	image = w.atRegistry(image)
 	w.sent = " built! " // "Image built!" or "Index built!", once what was pushed says which
 	w.run(append([]string{"push", target, image}, c.flags...)...)
-	named, err := reference.ParseNormalizedNamed(image)
-	if err != nil {
-		if w.err == nil {
-			w.t.Fatalf("pushed to %s, which isn't an image name: %v", image, err)
-		}
+	if w.sentAs = w.sentName(image); w.sentAs == "" {
 		return // a name that push refused, rightly, for a scenario to check
 	}
-	// As push names it, with the tag that it gives a name without one.
-	w.pushedTo = reference.FamiliarString(reference.TagNameOnly(named))
 	if w.err != nil {
 		w.sent = ""
 		return
@@ -317,6 +313,72 @@ func (w *world) WhenIPush(target, image string, options ...option) {
 	if err != nil {
 		w.t.Fatalf("reading what was pushed: %v", err)
 	}
+}
+
+// WhenILoad loads target into Docker as the image name image, with :latest if it gives no tag, and, from the
+// scenario's own daemon, reads back what it loaded, for the steps about the image to check: the archive that the
+// daemon loaded, whose names ThenTheArchiveNames checks. It fails the scenario if a load that succeeds loaded
+// anything but one image into the scenario's daemon. What it loads into the host's daemon is removed once the
+// scenario ends.
+func (w *world) WhenILoad(target, image string, options ...option) {
+	w.t.Helper()
+	c := w.apply("load", options)
+	if w.daemon == "" {
+		w.t.Fatal("no Given step gave a Docker daemon to load into")
+	}
+	w.sendsNothing("WhenILoad")
+	w.loadedBefore = 0
+	if w.docker != nil {
+		w.loadedBefore = len(w.docker())
+	}
+	if w.daemon == "host" {
+		if named, err := reference.ParseNormalizedNamed(image); err == nil {
+			host, name := w.dockerHost, reference.FamiliarString(reference.TagNameOnly(named))
+			w.t.Cleanup(func() {
+				rmi := exec.Command("docker", "--host", host, "rmi", "--force", name)
+				if out, err := rmi.CombinedOutput(); err != nil {
+					w.t.Logf("removing %s from Docker: %v\n%s", name, err, out)
+				}
+			})
+		}
+	}
+	w.sent = imageBuilt
+	w.run(append([]string{"load", target, image}, c.flags...)...)
+	w.loadRan = true
+	if w.sentAs = w.sentName(image); w.err != nil {
+		w.sent = ""
+		return
+	}
+	if w.docker == nil {
+		return // the host's daemon, which keeps what it loads
+	}
+	loaded := w.docker()[w.loadedBefore:]
+	if len(loaded) != 1 {
+		w.t.Fatalf("Docker loaded %d images, want 1", len(loaded))
+	}
+	w.archive = filepath.Join(w.t.TempDir(), "loaded.tar")
+	if err := os.WriteFile(w.archive, loaded[0], 0o644); err != nil {
+		w.t.Fatal(err)
+	}
+	img, err := tarball.ImageFromPath(w.archive, nil)
+	if err != nil {
+		w.t.Fatalf("reading what Docker loaded: %v", err)
+	}
+	w.image = img
+}
+
+// sentName returns image as push and load name it, with the tag that they give a name without one,
+// or nothing for a name they rightly refuse, failing the scenario if the command took it.
+func (w *world) sentName(image string) string {
+	w.t.Helper()
+	named, err := reference.ParseNormalizedNamed(image)
+	if err != nil {
+		if w.err == nil {
+			w.t.Fatalf("sent as %s, which isn't an image name: %v", image, err)
+		}
+		return ""
+	}
+	return reference.FamiliarString(reference.TagNameOnly(named))
 }
 
 // WhenIExport exports target to the folder target, in a folder of the command's own, unless options say where.

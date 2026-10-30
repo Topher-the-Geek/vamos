@@ -90,6 +90,15 @@ func DiskProject(t *testing.T, files, links map[string]string) (fsys afero.Fs, r
 	return fsys, root
 }
 
+// Unsetenv unsets the environment variable name for the rest of the test, restoring it once the test ends.
+func Unsetenv(t *testing.T, name string) {
+	t.Helper()
+	t.Setenv(name, "") // which restores it once the test ends
+	if err := os.Unsetenv(name); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Must fails the test at once if err isn't nil.
 func Must(t *testing.T, err error) {
 	t.Helper()

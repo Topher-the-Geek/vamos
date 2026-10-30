@@ -4,16 +4,11 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/Topher-the-Geek/vamos/internal/testenv"
@@ -237,83 +232,4 @@ func walkImage(t *testing.T, img v1.Image, visit func(*tar.Header, io.Reader) bo
 // imagePath returns the absolute path within the image of a layer entry.
 func imagePath(hdr *tar.Header) string {
 	return testenv.ImagePath(hdr.Name)
-}
-
-// fakeDocker serves the parts of the Docker Engine API that loading an image uses, on an amd64 machine,
-// over plain HTTP on a "unix" socket or a "tcp" port, and points DOCKER_HOST at it.
-// It answers loads with reply, a stream of JSON messages, or reports success if reply is empty.
-// It returns the tarballs loaded.
-func fakeDocker(t *testing.T, network, reply string) func() [][]byte {
-	t.Helper()
-	return fakeDockerOn(t, network, reply, "x86_64")
-}
-
-// fakeDockerOn is fakeDocker on a machine whose architecture uname names machine, such as "armv7l".
-func fakeDockerOn(t *testing.T, network, reply, machine string) func() [][]byte {
-	t.Helper()
-	var listener net.Listener
-	var err error
-	switch network {
-	case "unix":
-		// Unix socket paths are limited to about 100 bytes, so avoid t.TempDir's long names.
-		dir, err := os.MkdirTemp("", "vamos-docker-")
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { os.RemoveAll(dir) })
-		sock := filepath.Join(dir, "docker.sock")
-		listener, err = net.Listen("unix", sock)
-		t.Setenv("DOCKER_HOST", "unix://"+sock)
-	case "tcp":
-		listener, err = net.Listen("tcp", "127.0.0.1:0")
-		if err == nil {
-			t.Setenv("DOCKER_HOST", "tcp://"+listener.Addr().String())
-		}
-	default:
-		t.Fatalf("fakeDocker: unknown network %q", network)
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var mu sync.Mutex
-	var loaded [][]byte
-	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case strings.HasSuffix(r.URL.Path, "/_ping"):
-			w.Header().Set("API-Version", "1.45")
-			io.WriteString(w, "OK")
-		case strings.HasSuffix(r.URL.Path, "/info"):
-			// The daemon runs on machine, as uname names it, whatever machine the tests run on.
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprintf(w, `{"OSType":"linux","Architecture":%q}`, machine)
-		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/images/load"):
-			b, err := io.ReadAll(r.Body)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			mu.Lock()
-			loaded = append(loaded, b)
-			mu.Unlock()
-			body := reply
-			if body == "" {
-				body = `{"stream":"Loaded image\n"}`
-			}
-			w.Header().Set("Content-Type", "application/json")
-			io.WriteString(w, body)
-		default:
-			t.Errorf("fake Docker daemon got unexpected request %s %s", r.Method, r.URL.Path)
-			http.NotFound(w, r)
-		}
-	}))
-	server.Listener = listener
-	server.Start()
-	t.Cleanup(server.Close)
-
-	return func() [][]byte {
-		mu.Lock()
-		defer mu.Unlock()
-		return loaded
-	}
 }

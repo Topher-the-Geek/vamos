@@ -284,3 +284,26 @@ func copyImageData(t *testing.T, store storage.Store, img *storage.Image, to str
 		must(t, store.SetImageBigData(to, key, data, manifest.Digest))
 	}
 }
+
+// indexBuild has an index of a layer on scratch,
+// which runs nothing, for the host's platform and another, listed in that order.
+// The index passes its own parameter on to the layer.
+// nonce makes the targets unique to a test run.
+func indexBuild(nonce string) string {
+	return fmt.Sprintf(`
+glob(name="code", include=["app.sh"])
+layer(
+    name="app",
+    params={"greeting": "hi"},
+    base="scratch",
+    steps=[add("code", "/")],
+    command=lambda ctx: ["/app.sh", "%s", ctx.greeting],
+)
+index(
+    name="server",
+    params={"greeting": "hi"},
+    layer=dep("app", greeting=arg("greeting")),
+    platforms=["%s", "%s"],
+)
+`, nonce, native, foreign())
+}

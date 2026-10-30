@@ -39,11 +39,9 @@ Delete this file when every box is ticked.
   `TestPush`, `TestPushWithAuthFile`, `TestTLSVerifyIsTheClients`, `TestPushFailures`, `TestMissingAuthFile`,
   `TestIndexMistakes`, `TestIndexByPlatform`, and the push and save parts of `TestIndex`, `TestIndexChoosesManifest`
   and `TestPlatformVariants` are scenarios of the push, index and platforms features.
-- [ ] **Load into Docker.**
+- [x] **Load into Docker.**
   `TestLoad`, `TestLoadRejected`, `TestLoadWithoutDocker`, `TestLoadIntoDocker`, the load parts of `TestIndex`,
-  `TestIndexChoosesManifest` and `TestPlatformVariants`, and load refusing a task,
-  which `TestWorkspaceTargetMistakes` checked.
-  A load feature; the fake daemon goes behind steps, and the real one skips where there is none.
+  `TestIndexChoosesManifest` and `TestPlatformVariants`, and load refusing a task are scenarios of the load feature.
 - [ ] **Pulls by tag.**
   `TestPullTag`, `TestPullTagMistakes`, `TestPullerPinnedIndex`, `TestMaterializeFromRegistry`.
   The pull feature, from the in-process registry.

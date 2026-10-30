@@ -1,13 +1,16 @@
 package features
 
 import (
+	"cmp"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"log"
 	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
@@ -145,10 +148,7 @@ func (w *world) GivenTheEnvironmentSets(name, value string) {
 // scenario.
 func (w *world) GivenTheEnvironmentDoesNotSet(name string) {
 	w.t.Helper()
-	w.t.Setenv(name, "") // which restores it once the scenario ends
-	if err := os.Unsetenv(name); err != nil {
-		w.t.Fatal(err)
-	}
+	testenv.Unsetenv(w.t, name)
 }
 
 // GivenAFileOutsideTheProjectHolds writes content to the file name, a path, in a folder outside the project,
@@ -249,4 +249,70 @@ func (w *world) GivenTheAuthFileLogsIn(user, password string) {
 		w.t.Fatal(err)
 	}
 	w.GivenTheEnvironmentSets("REGISTRY_AUTH_FILE", file)
+}
+
+// GivenADockerDaemon starts a Docker daemon of the scenario's own, on an amd64 machine, at a Unix socket that
+// DOCKER_HOST names: a fake of the API that loading an image uses, which keeps what it loads, and accepts it.
+func (w *world) GivenADockerDaemon() {
+	w.t.Helper()
+	w.startDocker("unix", "", "x86_64")
+}
+
+// GivenADockerDaemonListeningOn starts a Docker daemon as GivenADockerDaemon does, at a "unix" socket or a "tcp" port,
+// as network says, that DOCKER_HOST names: over TCP, plain HTTP, as Docker serves one without $DOCKER_CERT_PATH.
+func (w *world) GivenADockerDaemonListeningOn(network string) {
+	w.t.Helper()
+	w.startDocker(network, "", "x86_64")
+}
+
+// GivenADockerDaemonOn starts a Docker daemon as GivenADockerDaemon does, on a machine that uname names machine,
+// such as armv7l.
+func (w *world) GivenADockerDaemonOn(machine string) {
+	w.t.Helper()
+	w.startDocker("unix", "", machine)
+}
+
+// GivenADockerDaemonThatRefusesLoads starts a Docker daemon as GivenADockerDaemon does, which refuses each load,
+// saying why, as a daemon whose disk is full does.
+func (w *world) GivenADockerDaemonThatRefusesLoads(why string) {
+	w.t.Helper()
+	w.startDocker("unix", fmt.Sprintf(`{"errorDetail":{"message":%q},"error":%q}`, why, why), "x86_64")
+}
+
+// startDocker starts the scenario's fake Docker daemon, on network, which answers loads with reply, on machine.
+func (w *world) startDocker(network, reply, machine string) {
+	w.t.Helper()
+	w.givesTheDaemon("fake")
+	w.docker = testenv.FakeDocker(w.t, network, reply, machine)
+}
+
+// givesTheDaemon records which Docker daemon the scenario loads into, failing it if a Given step has given one.
+func (w *world) givesTheDaemon(daemon string) {
+	w.t.Helper()
+	if w.daemon != "" {
+		w.t.Fatalf("a Given step gave the %s Docker daemon already", w.daemon)
+	}
+	w.daemon = daemon
+}
+
+// GivenNoDockerDaemon makes DOCKER_HOST, for the rest of the scenario, a socket that nothing listens at,
+// /nonexistent/docker.sock, without TLS, which the environment might otherwise ask of it.
+func (w *world) GivenNoDockerDaemon() {
+	w.t.Helper()
+	w.givesTheDaemon("none")
+	w.GivenTheEnvironmentSets("DOCKER_HOST", "unix:///nonexistent/docker.sock")
+	w.GivenTheEnvironmentDoesNotSet("DOCKER_TLS_VERIFY")
+	w.GivenTheEnvironmentDoesNotSet("DOCKER_CERT_PATH")
+}
+
+// GivenTheHostsDockerDaemon makes the scenario load into the host's own Docker daemon, at $DOCKER_HOST or
+// /var/run/docker.sock, as vamos finds it, and skips the scenario without one, even where VAMOS_REQUIRE_INTEGRATION
+// is set: a host that runs the whole suite needs buildah, but not Docker.
+func (w *world) GivenTheHostsDockerDaemon() {
+	w.t.Helper()
+	w.givesTheDaemon("host")
+	w.dockerHost = cmp.Or(os.Getenv("DOCKER_HOST"), "unix:///var/run/docker.sock")
+	if err := exec.Command("docker", "--host", w.dockerHost, "info").Run(); err != nil {
+		w.t.Skipf("needs a Docker daemon at %s: %v", w.dockerHost, err)
+	}
 }

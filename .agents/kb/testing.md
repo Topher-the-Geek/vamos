@@ -129,6 +129,8 @@ A workspace's packages are declared with `GivenThePackageDeclares`, and commands
 Observe a layer's image with `WhenISave` and a task's files with `WhenIExport`;
 a push, with `WhenIPush` to a registry of the scenario's own that `GivenARegistry` starts, and `<registry>` stands for,
 reads back what it pushed, for the steps about the image, or `ThenTheIndexManifestsAre` for an index;
+a load, with `WhenILoad` into a fake Docker daemon of the scenario's own that `GivenADockerDaemon` starts,
+reads back what the daemon loaded, and `GivenTheHostsDockerDaemon` loads into the host's, where there is one;
 see a glob's files in a layer that adds them, which the scenario declares, such as
 `layer(name="app", base="busybox", steps=[add("code", "/app")])`.
 A scenario shows its input, its BUILD file and project, in its own text or in a fixture of its feature:

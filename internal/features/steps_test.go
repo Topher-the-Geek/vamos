@@ -61,19 +61,24 @@ type world struct {
 	registry string              // the host of the scenario's registry, <registry>, once a Given step starts it
 	login    authn.Authenticator // that the scenario's registry needs, which steps that read from it use
 
-	stdout    string
-	stderr    string
-	err       error            // the last command's
-	dest      string           // the folder that the last command sent to, its own, if it sends
-	inProject bool             // whether the last command saved into the project, whose other files it didn't send
-	archive   string           // the archive that the last command saved, if it saved one
-	sent      string           // what the last command reports once it has sent its image or files, if it sends any
-	image     v1.Image         // the image that the last command saved or pushed, if it sent one
-	index     v1.ImageIndex    // the index that the last command pushed, if it pushed one
-	pushedTo  string           // the image name that the last command pushed to, if it pushed
-	first     v1.Image         // the first image that the scenario saved
-	entries   map[string]entry // the image's files, once a step has read them
-	exported  string           // the folder that the last command exported to, if it exported
+	stdout       string
+	stderr       string
+	err          error            // the last command's
+	dest         string           // the folder that the last command sent to, its own, if it sends
+	inProject    bool             // whether the last command saved into the project, whose other files it didn't send
+	archive      string           // the archive that the last command saved, if it saved one
+	sent         string           // what the last command reports once it has sent its image or files, if it sends any
+	image        v1.Image         // the image that the last command saved or pushed, if it sent one
+	index        v1.ImageIndex    // the index that the last command pushed, if it pushed one
+	sentAs       string           // the image name that the last command pushed or loaded as, if it pushed or loaded
+	docker       func() [][]byte  // the images that the scenario's own Docker daemon has loaded, if it has one
+	daemon       string           // which Docker daemon a Given step gave: "fake", "none" or "host"
+	dockerHost   string           // the host's Docker daemon, as vamos finds it, if the scenario loads into it
+	loadedBefore int              // how many images the scenario's own daemon had loaded before the last command
+	loadRan      bool             // whether the last command loaded into Docker, or tried to
+	first        v1.Image         // the first image that the scenario saved
+	entries      map[string]entry // the image's files, once a step has read them
+	exported     string           // the folder that the last command exported to, if it exported
 }
 
 // newBuildingWorld starts a scenario that builds, which it skips where buildah can't,
@@ -120,7 +125,8 @@ func (w *world) runIn(fsys afero.Fs, args ...string) {
 // execute runs the vamos command line with exactly args, none for none, in the project fsys, as main does.
 func (w *world) execute(fsys afero.Fs, args []string) {
 	w.t.Helper()
-	w.image, w.index, w.archive, w.entries, w.exported, w.pushedTo = nil, nil, "", nil, "", ""
+	w.image, w.index, w.archive, w.entries, w.exported, w.sentAs = nil, nil, "", nil, "", ""
+	w.loadRan = false
 	cmd := cli.NewRootCommand(cli.Config{Fs: fsys, Store: &w.stores.Options})
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)

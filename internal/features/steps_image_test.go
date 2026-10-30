@@ -9,6 +9,7 @@ import (
 	"maps"
 	"net/http"
 	"os"
+	"os/exec"
 	"path"
 	"runtime"
 	"slices"
@@ -495,10 +496,10 @@ func (w *world) config(img v1.Image) *v1.ConfigFile {
 // ThenNothingIsPushed checks that the registry has nothing at the image name that the last command pushed to.
 func (w *world) ThenNothingIsPushed() {
 	w.t.Helper()
-	if w.pushedTo == "" {
+	if w.sentAs == "" {
 		w.t.Fatal("no command has run that pushes to an image name")
 	}
-	ref, err := name.ParseReference(w.pushedTo, name.Insecure)
+	ref, err := name.ParseReference(w.sentAs, name.Insecure)
 	if err != nil {
 		w.t.Fatal(err)
 	}
@@ -506,9 +507,9 @@ func (w *world) ThenNothingIsPushed() {
 	var terr *transport.Error
 	switch {
 	case err == nil:
-		w.t.Errorf("the registry has %s at %s, want nothing", desc.Digest, w.pushedTo)
+		w.t.Errorf("the registry has %s at %s, want nothing", desc.Digest, w.sentAs)
 	case !errors.As(err, &terr) || terr.StatusCode != http.StatusNotFound:
-		w.t.Fatalf("asking the registry for %s: %v, want it not found", w.pushedTo, err)
+		w.t.Fatalf("asking the registry for %s: %v, want it not found", w.sentAs, err)
 	}
 }
 
@@ -600,4 +601,32 @@ func (w *world) ThenTheIndexManifestsAre(want ...manifest) {
 		}
 	}
 	w.check(errors.Join(errs...))
+}
+
+// ThenNothingIsLoaded checks that the scenario's Docker daemon loaded nothing as the last command ran.
+func (w *world) ThenNothingIsLoaded() {
+	w.t.Helper()
+	if w.daemon != "fake" || !w.loadRan {
+		w.t.Fatal("no command has run that loads into a Docker daemon of the scenario's own")
+	}
+	if loaded := w.docker()[w.loadedBefore:]; len(loaded) > 0 {
+		w.t.Errorf("Docker loaded %d images, want none", len(loaded))
+	}
+}
+
+// ThenDockerRunningTheImagePrints runs the image that the last command loaded as, in the host's Docker daemon,
+// and checks that it prints want, less surrounding space.
+func (w *world) ThenDockerRunningTheImagePrints(want string) {
+	w.t.Helper()
+	if w.daemon != "host" || !w.loadRan || w.err != nil {
+		w.t.Fatal("no command has loaded an image into the host's Docker daemon")
+	}
+	image := w.sentAs
+	out, err := exec.Command("docker", "--host", w.dockerHost, "run", "--rm", image).CombinedOutput()
+	if err != nil {
+		w.t.Fatalf("docker run %s: %v\n%s", image, err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != want {
+		w.t.Errorf("docker run %s printed %q, want %q", image, got, want)
+	}
 }

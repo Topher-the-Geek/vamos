@@ -46,8 +46,8 @@ func (w *world) ThenItSucceeds() {
 	if id != "" && (len(fields) == 0 || fields[len(fields)-1] != id) {
 		w.t.Errorf("stdout = %q, want it to report the sent image's ID, %s", w.stdout, id)
 	}
-	if w.pushedTo != "" && (len(fields) < 2 || fields[len(fields)-2] != w.pushedTo) {
-		w.t.Errorf("stdout = %q, want it to name the image pushed to, %s", w.stdout, w.pushedTo)
+	if w.sentAs != "" && (len(fields) < 2 || fields[len(fields)-2] != w.sentAs) {
+		w.t.Errorf("stdout = %q, want it to name the image sent as, %s", w.stdout, w.sentAs)
 	}
 }
 
