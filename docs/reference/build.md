@@ -48,6 +48,8 @@ Use fully qualified repository names to make the source explicit.
 An image's tag belongs in `tag`, rather than inside `image`.
 Pull targets have no user parameters; only their platform configures them.
 Previously resolved tags are reused until explicitly [rebuilt](cache.md#refreshing-results).
+A pull whose image its registry doesn't have, or won't give, fails, suggesting to check the name,
+and to log in if the image is private; one whose registry can't be reached fails, saying why.
 
 ## `glob()`
 
@@ -195,6 +197,10 @@ Names refer to users and groups in the image.
 Both arguments require strings, including numeric IDs such as `owner = "1000"`.
 With only `owner`, the group is that user's group; with only `group`, the owner remains root.
 New parent directories receive the selected ownership too.
+Directories the image already has keep their modes and owners,
+unless the fileset selects them itself, as `include = ["."]` selects every directory beneath it:
+a selected directory brings its own masked mode and the selected ownership,
+so a project directory added over `/tmp` replaces its mode, sticky bit and all.
 Create a destination first with `workdir()` when it should keep root ownership.
 
 ### `run(argv)`
@@ -218,6 +224,8 @@ such as the services of a Docker Compose network that the devcontainer is on, by
 on a [coordinator's](cli.md#coordinator) workers, it reaches what the worker's container reaches.
 The step gets a hostname of its own and an `/etc/hosts` that names it and `host.containers.internal`,
 neither of which stays in the image.
+Unlike podman's, it gets none of the host's `mounts.conf` mounts, such as subscription secrets at `/run/secrets`,
+though on a host in FIPS mode buildah still mounts the host's FIPS settings for bases that use them.
 Network access is not an input of a target's [cache key](cache.md#what-changes-a-result):
 a step that downloads, or talks to a service, is reused like any other until its inputs change.
 
@@ -242,7 +250,8 @@ A build that reaches a step whose secret the command line doesn't give fails whe
 before anything runs.
 
 A secret's value never enters an image, the build cache, a trace or the graph.
-The step's cache key covers each secret's ID and where it is given, but not its value,
+The step's cache key covers each secret's ID and the variable or file that the step names for it,
+but not its value, nor where `--secret` reads it,
 so a new value doesn't run the step again, and a cached step's replayed output is from the run that made it.
 A step that must run again, such as an upload for each release, should depend on what identifies the release,
 such as a parameter, `build_env(VERSION = ctx.version)`.

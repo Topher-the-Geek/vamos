@@ -13,7 +13,7 @@ import (
 
 // ActionVersion changes whenever what a key covers, or how a target is built, changes,
 // so that results built the old way aren't reused.
-const ActionVersion = 9 // 9: a layer's entrypoint, and run() steps' secrets
+const ActionVersion = 10 // 10: no mounts from the host's mounts.conf in run() steps
 
 // The kinds of Action.
 const (
@@ -58,7 +58,8 @@ type Step struct {
 	Owner string      `json:"owner,omitempty"` // add
 	Group string      `json:"group,omitempty"` // add
 	Argv  []string    `json:"argv,omitempty"`  // run
-	// Secrets are a run step's, by ID and how it is given, never by value, so that a new value builds nothing anew.
+	// Secrets are a run step's, by ID and the variable or file the step names, never by value nor by where --secret
+	// reads it, so that a new value builds nothing anew.
 	Secrets []graph.Secret `json:"secrets,omitempty"`
 	Vars    []string       `json:"vars,omitempty"` // env and build_env: NAME=value, sorted
 	Dir     string         `json:"dir,omitempty"`  // workdir

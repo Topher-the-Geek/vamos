@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,25 +33,12 @@ import (
 
 	"github.com/containerd/platforms"
 	"github.com/google/go-containerregistry/pkg/registry"
-	"go.podman.io/buildah"
 	"go.podman.io/image/v5/types"
 	"go.podman.io/storage"
 )
 
 func TestMain(m *testing.M) {
-	// buildah re-executes the test binary to run build steps, and a worker runs it as an attempt's subprocess.
-	if buildah.InitReexec() || ChildFromEnv() {
-		return
-	}
-	if os.Getenv("BUILDAH_ISOLATION") == "" {
-		os.Setenv("BUILDAH_ISOLATION", "chroot")
-	}
-	code := m.Run()
-	if err := testenv.RemoveSuiteStores(); err != nil {
-		fmt.Fprintf(os.Stderr, "removing the suite's stores: %v\n", err)
-		code = 1
-	}
-	os.Exit(code)
+	testenv.Main(m, ChildFromEnv)
 }
 
 // fixture is a coordinator with stores in memory, served over HTTP, with a cache registry of its own.
@@ -464,7 +452,7 @@ func TestWorkerFencesItself(t *testing.T) {
 	case <-time.After(2 * time.Minute):
 		t.Fatal("the layer never started building")
 	}
-	attempt := waitForAttempt(t, w)
+	attempt, done := waitForContainedAttempt(t, w, stores)
 	hanging.Store(true)
 	fenced := time.Now()
 	// The fence is at 80% of the lease; the kill and cleanup follow. The coordinator's view of the lease,
@@ -479,8 +467,17 @@ func TestWorkerFencesItself(t *testing.T) {
 		t.Fatalf("attempt %s's cgroup still exists %s after its heartbeats stopped answering; want it killed within "+
 			"the lease", attempt, time.Since(fenced).Round(time.Millisecond))
 	}
-	if err := run.RemoveAttempt(ctx, stores.Options, attempt); err != nil {
-		t.Errorf("after the kill, the attempt's container: %v", err)
+	// The worker removes the attempt's container once it has killed the attempt, and only then forgets it.
+	select {
+	case <-done:
+	case <-time.After(2 * time.Minute):
+		t.Fatalf("the worker still hasn't finished with attempt %s, killing it, removing its container and "+
+			"reporting it, two minutes after its kill", attempt)
+	}
+	leftover, err := run.LeftoverAttempts(stores.Options)
+	testenv.Must(t, err)
+	if slices.Contains(leftover, attempt) {
+		t.Errorf("attempt %s's container is still in the store after the worker finished with it", attempt)
 	}
 	testenv.Must(t, f.c.Cancel(ctx, id))
 }
@@ -530,20 +527,23 @@ func TestWorkerRenewsBeforeStarting(t *testing.T) {
 	}
 }
 
-// waitForAttempt returns the ID of the attempt w runs, once it runs exactly one.
-func waitForAttempt(t *testing.T, w *Worker) string {
+// waitForContainedAttempt returns the ID of an attempt that w runs whose container is in its store,
+// and a channel closed once w has finished with it.
+func waitForContainedAttempt(t *testing.T, w *Worker, stores *testenv.Stores) (string, <-chan struct{}) {
 	t.Helper()
 	for start := time.Now(); ; {
+		leftover, err := run.LeftoverAttempts(stores.Options)
+		testenv.Must(t, err)
 		w.mu.Lock()
-		if len(w.attempts) == 1 {
-			for id := range w.attempts {
+		for _, id := range leftover {
+			if r, ok := w.attempts[id]; ok {
 				w.mu.Unlock()
-				return id
+				return id, r.done
 			}
 		}
 		w.mu.Unlock()
 		if time.Since(start) > 30*time.Second {
-			t.Fatal("the worker never ran an attempt")
+			t.Fatal("the worker never ran an attempt with a container")
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

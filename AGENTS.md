@@ -7,6 +7,7 @@ Read the routes relevant to the change before editing.
 | CLI usage and BUILD language | [docs/README.md](docs/README.md) |
 | Any code change: workflow, errors, dependencies | [.agents/kb/development.md](.agents/kb/development.md) |
 | Validation and test design | [.agents/kb/testing.md](.agents/kb/testing.md) |
+| Behavior specifications: `internal/features/`, features, rules and scenarios | [.agents/kb/testing.md](.agents/kb/testing.md) |
 | Manual build, destination, example and release checks | [.agents/kb/smoke-checks.md](.agents/kb/smoke-checks.md) |
 | Documentation changes and `doc.go` template | [.agents/kb/documentation.md](.agents/kb/documentation.md) |
 | Phase boundaries, imports, new steps | [.agents/kb/architecture.md](.agents/kb/architecture.md) |

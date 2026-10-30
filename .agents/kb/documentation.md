@@ -19,6 +19,7 @@ The [example index](../../examples/README.md) helps users choose projects and bu
 Example project READMEs own project-specific setup and checks, including non-Go toolchains,
 and link to the tutorial for shared vamos setup.
 The root command and Go example also have `doc.go`.
+[features](../../internal/features/) holds only tests, so its package comment is in `features_test.go`.
 `internal/` contains only a dependency test, so its architectural context belongs in [architecture.md](architecture.md),
 without adding a production package just for documentation.
 

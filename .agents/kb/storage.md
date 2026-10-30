@@ -53,18 +53,22 @@ Changes to execution semantics must review [action.go](../../internal/sched/acti
 and `localRunner.Check` in [runner.go](../../internal/run/runner.go).
 `sched.ActionVersion` invalidates results built under old semantics;
 `graph.Version` addresses a different compatibility boundary.
-A `run()` step's secrets are part of its key by ID and by the variable or file that gives them, never by value,
+A `run()` step's secrets are part of its key by ID and by the variable or file the step gets them as, never by value
+nor by where `--secret` reads them,
 so a rotated secret reuses results, and their replayed output is from the run that made them.
 Values travel only in `api.GraphRequest.Secrets` and `sched.Request.Secrets`, which are never encoded,
 so no record, trace, graph or transport holds one, and `--secret` is refused with `--coordinator`;
 the runner writes each value to a file only its process reads, for buildah's secret mount, and removes it after the
-step. `TestSecrets` checks the image, the trace and reuse, and `TestRequestSecretsNotEncoded` the encoding.
+step. The secrets feature, [secrets_test.go](../../internal/features/secrets_test.go),
+checks the steps, the image and reuse,
+`TestSecretsNotInTrace` the trace, and `TestRequestSecretsNotEncoded` the encoding.
 
 Reproducible layer metadata spans both stores: trees omit times, but action results carry an epoch.
 Review `Scheduler.epoch`, `commitLayer` and `sched.Step.Epoch` together.
 `--timestamp` controls newly executed work; it does not invalidate a cached target.
-`TestTaskEpochInKey` and the timestamp cases
-in [build_cache_test.go](../../internal/cli/build_cache_test.go) guard this distinction.
+The timestamp rules of the cache feature, `TestCache_TimestampsComeFromBasesAndTasks`,
+`TestCache_AddedTasksTimestampIsAnInput` and `TestCache_TimestampIsAMinimumForTargetsThatRun`
+in [cache_test.go](../../internal/features/cache_test.go), guard this distinction.
 
 Tag freshness is separate from action reuse.
 `cache.TagRecord` and `puller` in [pull.go](../../internal/run/pull.go) own resolution across builds,

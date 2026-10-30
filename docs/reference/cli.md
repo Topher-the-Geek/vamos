@@ -76,10 +76,11 @@ docker load -i app.tar
 docker run --rm app:dev
 ```
 
-Writes an archive that `docker load` can import.
+Writes an archive that `docker load` can import, at any path, colons and all,
+even inside the project, whose globs never read the archive being written.
 `--tag <image>`, or `-t <image>`, records an image name; without it, the archive has no image name.
 An existing output file is replaced only after the new image is complete.
-The output file's parent directory must already exist.
+The output file's parent directory must already exist, and the output path must not be a directory.
 For an index, only the image matching the host's platform is built and saved.
 To save another platform, name a pull or layer directly and pass `--platform`.
 
@@ -105,7 +106,7 @@ Its parent directory must already exist.
 
 When vamos runs as root, exported files receive the owner and group of the destination's parent directory.
 Otherwise, files belong to the user running vamos, with the filesystem's usual group assignment.
-They receive the task's timestamp.
+They receive the task's timestamp, and keep the modes the task selected them with.
 Symbolic links are written as links, never followed.
 
 ### `prune`

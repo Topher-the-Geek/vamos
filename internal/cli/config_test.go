@@ -1,8 +1,6 @@
 package cli
 
 import (
-	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -193,19 +191,6 @@ func TestSetMistakes(t *testing.T) {
 			args := append(append([]string{"build"}, targets...), "-C", projectDir)
 			vamos(t, fsys, append(args, tt.args...)...).failsWith(t, false, tt.want)
 		})
-	}
-}
-
-// TestSetSeveralTargets checks that building several targets gives each --set flag to those that have the parameter,
-// and leaves out the others.
-func TestSetSeveralTargets(t *testing.T) {
-	requireBuildah(t)
-	fsys := project(t, map[string]string{"BUILD": paramsBuild})
-	r := vamos(t, fsys, "build", "tests", "app", "lib", "--set", "mode=debug", "-C", projectDir).ran(t)
-	for _, target := range []string{`layer "tests" (mode="debug")`, `layer "app" (mode="debug")`, `layer "lib"`} {
-		if !strings.Contains(r.stdout, target+": ") {
-			t.Errorf("stdout = %q, want %s built or cached", r.stdout, target)
-		}
 	}
 }
 
@@ -593,164 +578,5 @@ layer(name="app", base=BASE)`,
 			}
 			vamos(t, project(t, files), "build", "app", "-C", projectDir).failsWith(t, false, tt.want...)
 		})
-	}
-}
-
-// paramBuild has targets that take parameters: a glob reads languages, and a task mode, while another task takes none.
-// app passes its own parameters on to them, and names "mode" with an argument of its own too.
-// nonce makes the targets unique to a test run.
-func paramBuild(nonce string) string {
-	return pullBusybox + `
-glob(
-    name="messages",
-    params={"languages": ["en"]},
-    include=lambda ctx: ["locales/%s" % l for l in ctx.languages],
-)
-
-task(
-    name="plain",
-    base="busybox",
-    steps=[run(["sh", "-c", "mkdir /out && echo ` + nonce + ` > /out/plain.txt"])],
-    source="/out",
-    include=["plain.txt"],
-)
-
-task(
-    name="mode",
-    params={"mode": param(default="release", values=["debug", "release"])},
-    base="busybox",
-    steps=lambda ctx: [run(["sh", "-c", "mkdir /out && echo ` + nonce + ` %s > /out/mode.txt" % ctx.mode])],
-    source="/out",
-    include=["mode.txt"],
-)
-
-layer(
-    name="app",
-    params={"mode": "release", "languages": ["en"]},
-    base="busybox",
-    steps=[
-        add("plain", "/app"),
-        add(dep("mode", mode=arg("mode")), "/app"),
-        add(dep("mode", mode="release"), "/release"),
-        add(dep("messages", languages=arg("languages")), "/app"),
-    ],
-)
-`
-}
-
-// TestParams builds a target with the arguments that the command line and dep() give:
-// they reach the functions of ctx of the targets they're passed to, a target that takes none is built once,
-// and one named with two arguments is built with each.
-func TestParams(t *testing.T) {
-	requireBuildah(t)
-	nonce := newNonce()
-	fsys := project(t, map[string]string{
-		"BUILD":               paramBuild(nonce),
-		"locales/en/hi.json":  "hello",
-		"locales/es/hi.json":  "hola",
-		"locales/fr/hi.json":  "salut",
-		"locales/README.txt":  "not a language",
-		"locales/de/hi.json":  "hallo",
-		"locales/jp/hi.json":  "konnichiwa",
-		"locales/es/bye.json": "adios",
-	})
-	dir := t.TempDir()
-
-	// By default, mode is release, so "mode" with app's mode is the same target as with "release".
-	r := vamos(t, fsys, "save", "app", filepath.Join(dir, "1.tar"), "-C", projectDir).succeeds(t)
-	assertTargets(t, r, map[string]string{
-		`task "plain"`: "building",
-		`task "mode"`:  "building",
-		`layer "app"`:  "building",
-	})
-	if strings.Count(r.stdout, `task "mode"`) != 1 {
-		t.Errorf("stdout = %q, want the task in release mode built once", r.stdout)
-	}
-	img := readImage(t, filepath.Join(dir, "1.tar"))
-	for path, want := range map[string]string{
-		"/app/plain.txt":          nonce + "\n",
-		"/app/mode.txt":           nonce + " release\n",
-		"/release/mode.txt":       nonce + " release\n",
-		"/app/locales/en/hi.json": "hello",
-	} {
-		if got := imageFile(t, img, path); got != want {
-			t.Errorf("1.tar: %s = %q, want %q", path, got, want)
-		}
-	}
-
-	// In debug mode, the task that app passes mode to runs again, and the one named in release mode stays.
-	// Lists keep their order, so en,es names other files in the same order.
-	r = vamos(t, fsys, "save", "app", filepath.Join(dir, "2.tar"), "-C", projectDir,
-		"--set", "mode=debug", "--set", "languages=es,en").succeeds(t)
-	assertTargets(t, r, map[string]string{
-		`task "plain"`:               "cached",
-		`task "mode" (mode="debug")`: "building",
-		`task "mode"`:                "cached",
-		`layer "app" (mode="debug", languages=["es", "en"])`: "building",
-	})
-	img = readImage(t, filepath.Join(dir, "2.tar"))
-	for path, want := range map[string]string{
-		"/app/mode.txt":            nonce + " debug\n",
-		"/release/mode.txt":        nonce + " release\n",
-		"/app/locales/en/hi.json":  "hello",
-		"/app/locales/es/bye.json": "adios",
-	} {
-		if got := imageFile(t, img, path); got != want {
-			t.Errorf("2.tar: %s = %q, want %q", path, got, want)
-		}
-	}
-	if got := imagePaths(t, img, "/app/locales"); len(got) != 5 {
-		t.Errorf("files in /app/locales = %q, want en's and es's alone", got)
-	}
-}
-
-// TestLoadStarFile builds a target whose BUILD file loads helpers from a .star file:
-// a function that declares a target, and one that gives an attribute as a function of ctx.
-// Relative labels in either name targets of the package of the BUILD file that calls them.
-func TestLoadStarFile(t *testing.T) {
-	requireBuildah(t)
-	nonce := newNonce()
-	fsys := project(t, map[string]string{
-		"WORKSPACE": "",
-		"defs.star": `load("//:more.star", "MODES")
-
-def in_mode(label, mode):
-    """Names label in mode, which must be one of MODES."""
-    if mode not in MODES:
-        fail("unknown mode " + mode)
-    return lambda ctx: dep(label, mode = mode)
-
-def echo_task(name, text):
-    task(
-        name = name,
-        params = {"mode": "release"},
-        base = "busybox",
-        steps = lambda ctx: [run(["sh", "-c", "mkdir /out && echo %s %s > /out/echo.txt" % (text, ctx.mode)])],
-        source = "/out",
-        include = ["echo.txt"],
-    )
-`,
-		"more.star": `MODES = ["debug", "release"]`,
-		"app/BUILD": `load("//:defs.star", "echo_task", "in_mode")
-` + pullBusybox + `
-echo_task("echo", "` + nonce + `")
-
-layer(name="debug", params={"mode": "release"}, base="busybox")
-
-layer(
-    name="app",
-    base=in_mode("debug", "debug"),
-    steps=[add("echo", "/app")],
-)
-`,
-	})
-	out := filepath.Join(t.TempDir(), "app.tar")
-	r := vamos(t, fsys, "save", "app", out, "-C", filepath.Join(projectDir, "app")).succeeds(t)
-	// The layer has no steps, so its key is the same in every run.
-	if !strings.Contains(r.stdout, `layer "debug" (mode="debug"): `) {
-		t.Errorf("stdout = %q, want the base built in debug mode", r.stdout)
-	}
-	if got := imageFile(t, readImage(t, out), "/app/echo.txt"); got != nonce+" release\n" {
-		t.Errorf("/app/echo.txt = %q, want the task with its default", got)
 	}
 }

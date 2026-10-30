@@ -1,6 +1,9 @@
 package testenv
 
 import (
+	"fmt"
+	"io/fs"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,6 +13,15 @@ import (
 
 // ProjectDir is where in-memory test projects live.
 const ProjectDir = "/project"
+
+// PullBusybox declares the base image for tests, as the target "busybox", in one line.
+// Tests that build pull it once into their suite's store, and later builds find it there.
+const PullBusybox = `pull(name="busybox", image="docker.io/library/busybox", tag="1.36")` + "\n"
+
+// NewNonce returns a value new to each call, for actions that must run rather than come from the cache.
+func NewNonce() string {
+	return fmt.Sprintf("%016x", rand.Uint64())
+}
 
 // Project returns an in-memory filesystem holding files, keyed by their path within ProjectDir.
 func Project(t *testing.T, files map[string]string) afero.Fs {
@@ -38,6 +50,9 @@ func DiskProject(t *testing.T, files, links map[string]string) (fsys afero.Fs, r
 	t.Helper()
 	root = t.TempDir()
 	fsys = afero.NewBasePathFs(afero.NewOsFs(), root)
+	if err := fsys.MkdirAll(ProjectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	for name, content := range files {
 		path := filepath.Join(ProjectDir, name)
 		if err := fsys.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -55,6 +70,21 @@ func DiskProject(t *testing.T, files, links map[string]string) (fsys afero.Fs, r
 		if err := os.Symlink(target, path); err != nil {
 			t.Fatal(err)
 		}
+	}
+	// Give files and folders the modes that Project does, whatever the umask took from them.
+	err := filepath.WalkDir(filepath.Join(root, ProjectDir), func(path string, d fs.DirEntry, err error) error {
+		switch {
+		case err != nil:
+			return err
+		case d.IsDir():
+			return os.Chmod(path, 0o755)
+		case d.Type().IsRegular():
+			return os.Chmod(path, 0o644)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 	return fsys, root
 }

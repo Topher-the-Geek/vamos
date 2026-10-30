@@ -27,25 +27,12 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	gcrtypes "github.com/google/go-containerregistry/pkg/v1/types"
 	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
-	"go.podman.io/buildah"
 	"go.podman.io/image/v5/docker/reference"
 	"go.podman.io/image/v5/types"
 )
 
 func TestMain(m *testing.M) {
-	// buildah re-executes the test binary to run build steps.
-	if buildah.InitReexec() {
-		return
-	}
-	if os.Getenv("BUILDAH_ISOLATION") == "" {
-		os.Setenv("BUILDAH_ISOLATION", "chroot")
-	}
-	code := m.Run()
-	if err := testenv.RemoveSuiteStores(); err != nil {
-		os.Stderr.WriteString("removing the suite's stores: " + err.Error() + "\n")
-		code = 1
-	}
-	os.Exit(code)
+	testenv.Main(m)
 }
 
 // newExecutor returns an executor on private stores, which t's cleanup closes, and its content store.

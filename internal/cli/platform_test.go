@@ -206,10 +206,8 @@ func TestExecPlatformChoice(t *testing.T) {
 	vamos(t, fsys, "build", "app", "--exec-platform", native, "-C", projectDir).ran(t)
 }
 
-// platformBuild has a layer that runs a command for its platform,
-// a task that runs on the exec platform but reads the target platform, as a cross-compiler does,
-// a task that runs there and reads neither, and a layer on scratch that adds their files.
-// nonce makes the targets unique to a test run.
+// platformBuild has a layer that runs a command for its platform.
+// nonce makes the target unique to a test run.
 func platformBuild(nonce string) string {
 	return pullBusybox + `
 layer(
@@ -217,26 +215,6 @@ layer(
     base="busybox",
     steps=[run(["sh", "-c", "echo ` + nonce + ` $(uname -m) > /machine.txt"])],
 )
-
-task(
-    name="cross",
-    base=dep("busybox", platform=EXEC_PLATFORM),
-    steps=lambda ctx: [
-        run(["sh", "-c", "mkdir /out && echo ` + nonce + ` $(uname -m) %s > /out/cross.txt" % ctx.arch]),
-    ],
-    source="/out",
-    include=["cross.txt"],
-)
-
-task(
-    name="shared",
-    base=lambda ctx: dep("busybox", platform=ctx.exec_platform),
-    steps=[run(["sh", "-c", "mkdir /out && echo ` + nonce + ` $(uname -m) > /out/shared.txt"])],
-    source="/out",
-    include=["shared.txt"],
-)
-
-layer(name="files", base="scratch", steps=[add("cross", "/"), add("shared", "/")])
 `
 }
 
@@ -285,35 +263,6 @@ func emulatedResults(t *testing.T) map[bool]int {
 		counts[result.Provenance != nil && result.Provenance.Emulated]++
 	}
 	return counts
-}
-
-// TestCrossPlatformTasks builds a layer on scratch for the host's platform
-// and another, from tasks given a base on the exec platform: they run natively,
-// so need no emulator, and are shared by both platforms unless they read the target's.
-func TestCrossPlatformTasks(t *testing.T) {
-	requireBuildah(t)
-	nonce := newNonce()
-	fsys := project(t, map[string]string{"BUILD": platformBuild(nonce)})
-	dir := t.TempDir()
-
-	for i, platform := range []string{native, foreign()} {
-		out := filepath.Join(dir, fmt.Sprintf("files-%d.tar", i))
-		r := vamos(t, fsys, "save", "files", out, "--platform", platform, "-C", projectDir).succeeds(t)
-		want := map[string]string{`task "cross"`: "building", `task "shared"`: "building", `layer "files"`: "building"}
-		if platform != native {
-			want[`task "shared"`] = "cached" // it reads neither platform, so the host's build serves
-		}
-		assertTargets(t, r, want)
-		img := readImage(t, out)
-		assertPlatform(t, img, platform)
-		arch := strings.TrimPrefix(platform, "linux/")
-		if got, want := imageFile(t, img, "/cross.txt"), nonce+" "+uname(native)+" "+arch+"\n"; got != want {
-			t.Errorf("%s: /cross.txt = %q, want %q, made natively", platform, got, want)
-		}
-		if got, want := imageFile(t, img, "/shared.txt"), nonce+" "+uname(native)+"\n"; got != want {
-			t.Errorf("%s: /shared.txt = %q, want %q, made natively", platform, got, want)
-		}
-	}
 }
 
 // TestPlatformFailures checks the errors for layers that can't be built for their platform.

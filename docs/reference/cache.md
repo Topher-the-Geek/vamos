@@ -10,7 +10,8 @@ An added task's timestamp is also an input, even when its file contents are unch
 Target names and source modification times are not inputs.
 Touching a file or renaming a target therefore does not force it to run again.
 Changing a parameter matters when it changes what the target actually does or consumes.
-A [secret](build.md#secrets)'s value is not an input; its ID and where it is given are.
+A [secret](build.md#secrets)'s value is not an input, nor where `--secret` reads it;
+its ID and the variable or file that the step names for it are.
 
 The CLI reports reuse and replays a cached target's previous output:
 

@@ -36,7 +36,7 @@ func unavailable(t *testing.T, what string, err error) {
 // and otherwise checks that they can be built here: as root, in a container store that opens,
 // with a container that buildah can make and mount.
 // Where they can't, the test is skipped, or fails if RequireIntegrationEnv is set.
-// The test binary's TestMain must call buildah.InitReexec first, as for any test that builds.
+// The test binary's TestMain must be Main, as for any test that builds.
 func RequireBuildah(t *testing.T) {
 	t.Helper()
 	if testing.Short() {
@@ -116,6 +116,41 @@ var ownershipAvailable = sync.OnceValue(func() error {
 type Stores struct {
 	Dir     string               // holds storage/, the store, run/, its run root, and vamos/, the build cache
 	Options storage.StoreOptions // the store's, which a local executor opens it with
+}
+
+// UnnamedImages returns the IDs of the images in the container store that have no name,
+// such as an image a failed target might leave behind; cached layers' images are named.
+func (s *Stores) UnnamedImages() (map[string]bool, error) {
+	return s.ImageIDs(func(img storage.Image) bool { return len(img.Names) == 0 })
+}
+
+// ImageIDs returns the IDs of the images in the container store for which keep is true.
+func (s *Stores) ImageIDs(keep func(storage.Image) bool) (map[string]bool, error) {
+	ids := map[string]bool{}
+	err := s.WithStore(func(store storage.Store) error {
+		images, err := store.Images()
+		if err != nil {
+			return err
+		}
+		for _, img := range images {
+			if keep(img) {
+				ids[img.ID] = true
+			}
+		}
+		return nil
+	})
+	return ids, err
+}
+
+// WithStore calls use with the container store, open only until use returns,
+// since each vamos run opens and shuts it too.
+func (s *Stores) WithStore(use func(storage.Store) error) error {
+	store, err := storage.GetStore(s.Options)
+	if err != nil {
+		return err
+	}
+	defer store.Shutdown(false)
+	return use(store)
 }
 
 // suiteStores makes the stores that a test binary's tests share, once.

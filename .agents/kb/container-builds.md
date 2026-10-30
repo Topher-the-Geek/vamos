@@ -6,8 +6,10 @@ then resolves pulls before running targets in dependency order.
 It does not validate unrelated workspace packages.
 Source bytes used by execution must be the cached bytes used to identify its inputs:
 never optimize an `add()` by reading the live project again.
-Regression coverage is `TestCacheSourceEditedDuringBuild`
-in [build_cache_test.go](../../internal/cli/build_cache_test.go).
+Regression coverage is the scenario of every target that adds a glob getting its files as they were first read,
+in `TestGlob_ReadBeforeExecution` in [glob_test.go](../../internal/features/glob_test.go),
+and that of a file edited while the build reads it, cached under the key of what was read,
+in `TestCache_ChangedInputsRunAgain` in [cache_test.go](../../internal/features/cache_test.go).
 
 The result kinds have different lifetimes: a layer produces an image in the executor's container store;
 a task discards its container and may retain a tree of files; an index assembles images for several platforms.
@@ -71,6 +73,7 @@ and the distinction between an unset TLS override and explicit `--tls-verify=fal
 For host/container path isolation, start with `cache.Checkout`,
 `fileset.Walk`, `targetState.addSource` and `collectOutput`.
 Their symbol comments own link handling and directory metadata rules.
-The end-to-end guards are `TestDestinationModes`, `TestTaskOutputLinks`
-and `TestTaskFailures` in [build_test.go](../../internal/cli/build_test.go),
+The end-to-end guards are `TestTaskOutputLinks` in [build_test.go](../../internal/cli/build_test.go),
+the rule that existing directories keep their modes and owners, in [add_test.go](../../internal/features/add_test.go),
+the rule that output which can't be selected fails, in [task_test.go](../../internal/features/task_test.go),
 and [export_test.go](../../internal/finish/export_test.go).

@@ -12,70 +12,8 @@ import (
 
 	"github.com/Topher-the-Geek/vamos/internal/testenv"
 
-	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	"github.com/spf13/afero"
 )
-
-// TestWorkspace builds a target whose BUILD file uses targets of another package's:
-// its base, a glob's files, relative to that package, and a task's.
-// Targets nothing needs are neither run nor checked.
-func TestWorkspace(t *testing.T) {
-	requireBuildah(t)
-	nonce := newNonce()
-	fsys := project(t, map[string]string{
-		"WORKSPACE": "",
-		"lib/BUILD": pullBusybox + `
-glob(name="code", include=["lib.sh"])
-glob(name="docs", include=["README"]) # missing, but nothing needs it
-
-task(
-    name="make",
-    base="busybox",
-    steps=[add("code", "/src"), run(["sh", "-c", "mkdir /out && cp /src/lib.sh /out/made.sh"])],
-    source="/out",
-    include=["made.sh"],
-)
-`,
-		"lib/lib.sh": "echo " + nonce,
-		"app/BUILD": `
-glob(name="code", include=["app.sh"])
-
-layer(
-    name="app",
-    base="//lib:busybox",
-    steps=[add("code", "/app"), add("//lib:make", "/app"), add("//lib:code", "/lib")],
-)
-
-task(name="test", base="app", steps=[run(["false"])], source="/app", include=["app.sh"])
-`,
-		"app/app.sh": "echo app",
-	})
-	out := filepath.Join(t.TempDir(), "app.tar")
-
-	r := vamos(t, fsys, "save", "app", out, "-C", filepath.Join(projectDir, "app")).succeeds(t)
-
-	if !strings.Contains(r.stdout, `task "//lib:make": building`) {
-		t.Errorf("stdout = %q, want another package's target named by its label", r.stdout)
-	}
-	if strings.Contains(r.stdout, `task "test"`) {
-		t.Errorf("stdout = %q, want the task nothing needs left out", r.stdout)
-	}
-	img, err := tarball.ImageFromPath(out, nil)
-	must(t, err)
-	want := []string{"/app/app.sh", "/app/made.sh"}
-	if got := imagePaths(t, img, "/app"); !slices.Equal(got, want) {
-		t.Errorf("files in /app = %q, want %q", got, want)
-	}
-	if got := imageFile(t, img, "/lib/lib.sh"); got != "echo "+nonce {
-		t.Errorf("/lib/lib.sh = %q, want the file from lib/", got)
-	}
-
-	// From the root, every target is named by its label.
-	r = vamos(t, fsys, "build", "//app:app", "-C", projectDir).ran(t)
-	if !strings.Contains(r.stdout, `layer "//app:app": cached`) {
-		t.Errorf("stdout = %q, want the layer reused", r.stdout)
-	}
-}
 
 // TestWorkspaceRoot checks which directory labels are relative to:
 // the nearest one with a WORKSPACE file at or above -C, or else -C itself.

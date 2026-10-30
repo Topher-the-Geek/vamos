@@ -255,12 +255,6 @@ func TestIndex(t *testing.T) {
 		}
 	})
 
-	t.Run("save", func(t *testing.T) {
-		out := filepath.Join(t.TempDir(), "server.tar")
-		vamos(t, fsys, "save", "server", out, "-C", projectDir).succeeds(t)
-		assertPlatform(t, readImage(t, out), native)
-	})
-
 	t.Run("load", func(t *testing.T) {
 		loaded := fakeDocker(t, "unix", "")
 		vamos(t, fsys, "load", "server", "server:dev", "-C", projectDir).succeeds(t)

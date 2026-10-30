@@ -4,7 +4,6 @@ import (
 	"io"
 	"log"
 	"net/http/httptest"
-	"os"
 	"testing"
 
 	"github.com/Topher-the-Geek/vamos/internal/api"
@@ -14,23 +13,10 @@ import (
 	"github.com/Topher-the-Geek/vamos/internal/testenv"
 
 	"github.com/google/go-containerregistry/pkg/registry"
-	"go.podman.io/buildah"
 )
 
 func TestMain(m *testing.M) {
-	// buildah re-executes the test binary to run build steps.
-	if buildah.InitReexec() {
-		return
-	}
-	if os.Getenv("BUILDAH_ISOLATION") == "" {
-		os.Setenv("BUILDAH_ISOLATION", "chroot")
-	}
-	code := m.Run()
-	if err := testenv.RemoveSuiteStores(); err != nil {
-		os.Stderr.WriteString("removing the suite's stores: " + err.Error() + "\n")
-		code = 1
-	}
-	os.Exit(code)
+	testenv.Main(m)
 }
 
 // retention is how many events the contract's executors retain, few enough for the retention tests.

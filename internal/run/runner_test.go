@@ -101,3 +101,11 @@ func TestGiveSecrets(t *testing.T) {
 		t.Errorf("a secret without a value = %v, want it refused", err)
 	}
 }
+
+// TestBuilderOptionsNoHostMounts checks that a target's builder takes its mounts from an empty file,
+// rather than the host's mounts.conf, whose mounts would make a target depend on the host.
+func TestBuilderOptionsNoHostMounts(t *testing.T) {
+	if got := builderOptions("scratch", nil, nil).DefaultMountsFilePath; got != os.DevNull {
+		t.Errorf("the builder's mounts file = %q, want %s", got, os.DevNull)
+	}
+}

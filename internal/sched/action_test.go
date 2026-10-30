@@ -44,7 +44,7 @@ func TestActionKeyStable(t *testing.T) {
 		Source:     "/out",
 		Output:     testSelection(t, []string{"dist"}, []string{"dist/*.map"}),
 	}
-	want := `{"version":9,"kind":"layer","base":"0123abcd","platform":"linux/arm64","steps":[` +
+	want := `{"version":10,"kind":"layer","base":"0123abcd","platform":"linux/arm64","steps":[` +
 		`{"op":"add","files":{"digest":"` + files.Digest.String() + `","size":5},"epoch":7,"dest":"/app",` +
 		`"owner":"app","group":"staff"},{"op":"run","argv":["make","all"],"secrets":[{"id":"token","env":"TOKEN"},` +
 		`{"id":"key","file":"/run/secrets/key"}]},{"op":"env","vars":["A=1","B=2"]},` +

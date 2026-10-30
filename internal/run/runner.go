@@ -65,6 +65,19 @@ type localRunner struct {
 	pullThrough map[string]string
 }
 
+// builderOptions returns the options of a target's builder, from the image from.
+func builderOptions(from string, capabilities []string, sys *types.SystemContext) buildah.BuilderOptions {
+	return buildah.BuilderOptions{
+		FromImage:     from,
+		PullPolicy:    buildah.PullNever, // only resolve actions reach registries
+		Capabilities:  capabilities,
+		SystemContext: sys,
+		// No mounts from the host's mounts.conf, such as its /usr/share/rhel/secrets at /run/secrets, which would make
+		// a target's files depend on the host, and in whose copy a file secret's mount point would outlive its step.
+		DefaultMountsFilePath: os.DevNull,
+	}
+}
+
 // attemptPrefix starts the name of an attempt's container, so that a worker finds what a killed attempt left.
 const attemptPrefix = "vamos-attempt-"
 
@@ -335,12 +348,7 @@ func (r *localRunner) start(
 			return nil, fmt.Errorf("base image %s: %w", shortID(a.Base), err)
 		}
 	}
-	options := buildah.BuilderOptions{
-		FromImage:     from,
-		PullPolicy:    buildah.PullNever, // only resolve actions reach registries
-		Capabilities:  r.capabilities,
-		SystemContext: sys,
-	}
+	options := builderOptions(from, r.capabilities, sys)
 	if r.attempt != "" {
 		options.Container = attemptPrefix + r.attempt
 	}

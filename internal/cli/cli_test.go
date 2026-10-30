@@ -911,66 +911,11 @@ layer(name="app", base="busybox", steps=[add("code", "/app")])
 	}
 }
 
-func TestWriteDestinationMistakes(t *testing.T) {
-	dir := t.TempDir()
-	t.Run("missing directory", func(t *testing.T) {
-		path := filepath.Join(dir, "nope", "app.tar")
-		vamos(t, project(t, validBuild), "save", "app", path, "-C", projectDir).
-			failsWith(t, false, "cannot write "+path+": directory "+filepath.Join(dir, "nope")+" does not exist")
-	})
-	t.Run("path is a directory", func(t *testing.T) {
-		vamos(t, project(t, validBuild), "save", "app", dir, "-C", projectDir).
-			failsWith(t, false, "cannot write "+dir+": it is a directory")
-	})
-	t.Run("parent is a file", func(t *testing.T) {
-		file := filepath.Join(dir, "file")
-		if err := os.WriteFile(file, nil, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		vamos(t, project(t, validBuild), "save", "app", filepath.Join(file, "app.tar"), "-C", projectDir).
-			failsWith(t, false, file+" is not a directory")
-	})
-}
-
 func TestMissingAuthFile(t *testing.T) {
 	t.Setenv("REGISTRY_AUTH_FILE", "/nonexistent/auth.json")
 
 	vamos(t, project(t, validBuild), "push", "app", "app", "-C", projectDir).
 		failsWith(t, false, "REGISTRY_AUTH_FILE", "/nonexistent/auth.json", "no such file")
-}
-
-// TestSymlinkSource rejects an include that is itself a link.
-func TestSymlinkSource(t *testing.T) {
-	fsys, _ := diskProject(t, map[string]string{
-		"BUILD": `glob(name="code", include=["lib"])` + "\n" + pullBusybox + addCode,
-	}, map[string]string{"lib": "../shared"})
-	out := t.TempDir()
-
-	vamos(t, fsys, "save", "app", filepath.Join(out, "app.tar"), "-C", projectDir).
-		failsWith(t, false, "/project/BUILD:1:5:", `include "lib" is a symbolic link`)
-	assertNoFiles(t, out)
-}
-
-// TestSymlinkSourceParent rejects links at every depth of an included path.
-func TestSymlinkSourceParent(t *testing.T) {
-	external := t.TempDir()
-	if err := os.WriteFile(filepath.Join(external, "secret"), []byte("private"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	for _, parent := range []string{"external", "nested/external"} {
-		t.Run(parent, func(t *testing.T) {
-			src := parent + "/secret"
-			fsys, _ := diskProject(t, map[string]string{
-				"BUILD": `glob(name="code", include=["` + src + `"])` + "\n" + pullBusybox + addCode,
-			}, map[string]string{parent: external})
-			out := t.TempDir()
-
-			vamos(t, fsys, "save", "app", filepath.Join(out, "app.tar"), "-C", projectDir).
-				failsWith(t, false, "/project/BUILD:1:5:",
-					`include "`+src+`" has symbolic link parent "`+filepath.Join(projectDir, parent)+`"`)
-			assertNoFiles(t, out)
-		})
-	}
 }
 
 // assertNoFiles fails the test if dir holds anything, such as a partly written image.
