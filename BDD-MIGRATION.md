@@ -44,9 +44,10 @@ Delete this file when every box is ticked.
   `TestIndexChoosesManifest` and `TestPlatformVariants`, and load refusing a task are scenarios of the load feature.
 - [x] **Pulls by tag.**
   `TestPullTag` and `TestPullTagMistakes` are scenarios of the pull feature, from a registry of the scenario's own.
-- [ ] **Platforms and emulation.**
-  `TestPlatformMistakes`, `TestExecPlatformChoice`, `TestPlatforms`, `TestPlatformFailures`, `TestGraphConfigurations`.
-  The platforms feature, skipping where the host can't emulate.
+- [x] **Platforms and emulation.**
+  `TestPlatformMistakes`, `TestPlatformFailures` and what `TestPlatforms` builds are scenarios of the platforms
+  feature. `TestPlatforms` itself stays, for the provenance it reads from the cache's files, until the cache moves;
+  `TestExecPlatformChoice`, a choice among a coordinator's platforms, moves with remote work.
 - [ ] **Steps and task outputs.**
   `TestIncludeProject`, `TestSteps`, `TestWorkdirUser`, `TestTaskOutputLinks`.
   Tables of examples in the run, add and task features; rows that don't build run without buildah.
@@ -56,7 +57,8 @@ Delete this file when every box is ticked.
   The export feature; owners skip where the host can't `chown`.
 - [ ] **The cache as a user sees it.**
   `TestCacheCorruption`, `TestCacheEntryRemoved`, `TestMovedCacheName`, `TestUnverifiedLayers`,
-  `TestResultProvenance`, `TestExportRepairsCorruptBlob`, and the store's names in `TestImageIdentityRoundTrip`,
+  `TestResultProvenance`, including whether a result's commands ran under emulation, `TestExportRepairsCorruptBlob`,
+  and the store's names in `TestImageIdentityRoundTrip`,
   whose reported ID the push feature checks.
   The cache feature: a Given step damages the cache, and the scenario sees it rebuild or recover.
 - [ ] **Prune and store roots.**
@@ -75,6 +77,7 @@ Delete this file when every box is ticked.
   Scenarios with a step that makes standard output fail.
 - [ ] **How a user sees remote work and its failures.**
   `TestRemoteBuild`, `TestRemoteMistakes`, `TestCoordinatorCommand`, `TestCoordinatorWithWorker`,
+  `TestExecPlatformChoice`,
   `TestUsesContainerStore`, `TestCheckRegistryHost`, `TestCoordinatorFlagMistakes`.
   A few scenarios with a coordinator and worker in process: a build, a mistake, and what an unreachable or failing
   coordinator reports. The failure modes themselves stay below.
@@ -99,6 +102,7 @@ Delete this file when every box is ticked.
 - [ ] **Mechanisms beneath a feature.**
   `internal/sched` (action keys, sharing, job limits, the scheduler's reuse and regeneration),
   `internal/fileset` (patterns, tree walks, edits during capture), `internal/cache` (logs, locks, generations),
+  `internal/cli`'s `TestGraphConfigurations`, of the graph an index of two platforms configures,
   `internal/finish`'s delivery from separate stores, `internal/run`'s runner and its puller (`TestPullerPinnedIndex`,
   `TestMaterializeFromRegistry`, whose refusals of a mismatched manifest, a wrong image ID or a location that can't
   be parsed the pull feature doesn't reach), and `internal/tracing`.

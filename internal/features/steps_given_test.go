@@ -95,6 +95,18 @@ func (w *world) GivenTheCommandRunsIn(dir string) {
 	w.cDir = dir
 }
 
+// GivenThisMachineEmulates says that the scenario runs platform's programs, another's than this machine's,
+// such as linux/amd64's on an arm64 machine, under an emulator, without which, as "exec format error" says,
+// ThenItSucceeds skips the scenario:
+// whether the kernel has one shows only as a command runs.
+func (w *world) GivenThisMachineEmulates(platform string) {
+	w.t.Helper()
+	if platform == thisPlatform() {
+		w.t.Fatalf("%s is this machine's platform, whose programs it runs itself", platform)
+	}
+	w.emulating = platform
+}
+
 // GivenTheProjectHolds adds files to the project, by path, replacing any it held at those paths.
 func (w *world) GivenTheProjectHolds(project files) {
 	w.t.Helper()

@@ -154,6 +154,14 @@ func (c *commandLine) verifyTLS(w *world, by string) {
 	c.tlsBy = by
 }
 
+// onTheExecPlatform runs commands on platform, which EXEC_PLATFORM names, with --exec-platform. Every command
+// takes it.
+func onTheExecPlatform(platform string) option {
+	return option{"onTheExecPlatform", everyCommand, func(_ *world, c *commandLine) {
+		c.flags = append(c.flags, "--exec-platform", platform)
+	}}
+}
+
 // replacing replaces what the folder exported to holds, with --replace. Export takes it.
 func replacing() option {
 	return option{"replacing", []string{"export"}, func(_ *world, c *commandLine) {
@@ -197,18 +205,19 @@ func withFlags(flags ...string) option {
 
 // namedFlags are the options that give flags, by flag, and the step that gives -C.
 var namedFlags = map[string]string{
-	"--tag":        "tagged",
-	"-t":           "tagged",
-	"--timestamp":  "stampedAt",
-	"--set":        "setting",
-	"--secret":     "withSecrets",
-	"--platform":   "forPlatform",
-	"--replace":    "replacing",
-	"--rebuild":    "rebuilding",
-	"--push-from":  "fromTheClient",
-	"--tls-verify": "withTLSVerification or withoutTLSVerification",
-	"-C":           "GivenIWorkIn",
-	"--dir":        "GivenIWorkIn",
+	"--tag":           "tagged",
+	"-t":              "tagged",
+	"--timestamp":     "stampedAt",
+	"--set":           "setting",
+	"--secret":        "withSecrets",
+	"--platform":      "forPlatform",
+	"--exec-platform": "onTheExecPlatform",
+	"--replace":       "replacing",
+	"--rebuild":       "rebuilding",
+	"--push-from":     "fromTheClient",
+	"--tls-verify":    "withTLSVerification or withoutTLSVerification",
+	"-C":              "GivenIWorkIn",
+	"--dir":           "GivenIWorkIn",
 }
 
 // apply applies options to the command line of command, failing the scenario if command doesn't take one.

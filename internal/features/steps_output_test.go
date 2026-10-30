@@ -14,11 +14,16 @@ import (
 // the others report their failure and let the scenario go on.
 
 // ThenItSucceeds checks that the command succeeded and reported sending its image or files if it sends any,
+// skipping the scenario if it failed for want of the emulator that GivenThisMachineEmulates says it needs,
+// as "exec format error" says,
 // and nothing sent if it doesn't, that a save or a push reported the image's ID, or an index's digest,
 // and that a push named the image it pushed to.
 // It stops the scenario if the command failed or reported sending wrongly.
 func (w *world) ThenItSucceeds() {
 	w.t.Helper()
+	if w.err != nil && w.emulating != "" && w.reported("exec format error") {
+		w.t.Skipf("no emulator runs %s's programs here: %v", w.emulating, w.err)
+	}
 	if w.err != nil {
 		w.t.Fatalf("vamos failed: %v\n%s", w.err, w.outputs())
 	}

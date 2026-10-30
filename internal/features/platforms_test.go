@@ -13,7 +13,7 @@ import (
 
 // newPlatformWorld starts a scenario of the platforms feature, from its background: a project that pulls busybox.
 // Scenarios build for this machine's platform and another, but run commands only natively,
-// so that they need no emulator.
+// so that they need no emulator, but for one that GivenThisMachineEmulates skips without one.
 func newPlatformWorld(t *testing.T) *world {
 	t.Helper()
 	w := newBuildingWorld(t)
@@ -31,17 +31,17 @@ func newPlatformMistakeWorld(t *testing.T) *world {
 	return w
 }
 
+// machineNames are what uname -m prints, by platform.
+var machineNames = map[string]string{"linux/amd64": "x86_64", "linux/arm64": "aarch64"}
+
 // machine returns what `uname -m` prints on this machine, or skips the scenario on a machine the scenarios don't know.
 func machine(t *testing.T) string {
 	t.Helper()
-	switch runtime.GOARCH {
-	case "amd64":
-		return "x86_64"
-	case "arm64":
-		return "aarch64"
+	name, ok := machineNames["linux/"+runtime.GOARCH]
+	if !ok {
+		t.Skipf("no machine name for %s", runtime.GOARCH)
 	}
-	t.Skipf("no machine name for %s", runtime.GOARCH)
-	return ""
+	return name
 }
 
 // platformInTheEnvironment declares the layer "app", which sets its image's variables to what ctx reads of the
@@ -115,6 +115,19 @@ func TestPlatforms_FunctionsOfCtxReadThePlatform(t *testing.T) {
 				"VARIANT":  cmp.Or(p.Variant, "none"),
 				"EXEC":     thisPlatform(),
 			})
+		})
+
+	t.Run("A platform without its variant is read with the variant it means, as strings that compare as such",
+		func(t *testing.T) {
+			// fail() shows what the function read, as the BUILD file loads.
+			w := newPlatformMistakeWorld(t)
+			w.GivenTheBuildFileDeclares(fmt.Sprintf(`
+				layer(name="app", base="scratch", command=lambda ctx: fail(
+				    ctx.platform == "linux/arm/v7", ctx.os, ctx.arch, ctx.variant, ctx.exec_platform == %q))
+			`, thisPlatform()))
+			w.WhenIBuild("app", forPlatform("linux/arm"))
+			w.ThenItFailsWith("True linux arm v7 True")
+			w.ThenNoTargetRan()
 		})
 
 	t.Run("With --platform, a layer reads that platform, and this machine's as the exec platform", func(t *testing.T) {
@@ -308,5 +321,104 @@ func TestPlatforms_VariantsReachTheImage(t *testing.T) {
 		w.ThenItSucceeds()
 		w.ThenTheImageIsFor("linux/arm/v7")
 		w.ThenTheImageCommandIs("app", nonce, "v7")
+	})
+}
+
+// TestPlatforms_TheCommandLineGivesPlatforms specifies that --platform and --exec-platform give a platform,
+// os/arch or os/arch/variant, and that the exec platform is one the executor offers, which for the executor built
+// into vamos is this machine's, so that naming it builds as without the flag.
+func TestPlatforms_TheCommandLineGivesPlatforms(t *testing.T) {
+	for _, example := range []struct {
+		name    string
+		options []option
+		error   string
+	}{
+		{
+			name:    "A --platform without an architecture fails",
+			options: []option{forPlatform("linux")},
+			error:   `--platform linux: platform "linux": want os/arch or os/arch/variant`,
+		},
+		{
+			name:    "A --platform with a part after its variant fails",
+			options: []option{forPlatform("linux/amd64/v3/x")},
+			error:   `--platform linux/amd64/v3/x: platform "linux/amd64/v3/x": want os/arch`,
+		},
+		{
+			name:    "An --exec-platform without an architecture fails",
+			options: []option{onTheExecPlatform("linux")},
+			error:   `--exec-platform linux: platform "linux": want os/arch or os/arch/variant`,
+		},
+		{
+			name:    "An --exec-platform that the executor doesn't offer fails, naming the one it does",
+			options: []option{onTheExecPlatform("linux/s390x")},
+			error: fmt.Sprintf(`--exec-platform linux/s390x: the executor doesn't run commands on linux/s390x; `+
+				"it offers %q", thisPlatform()),
+		},
+	} {
+		t.Run(example.name, func(t *testing.T) {
+			w := newPlatformMistakeWorld(t)
+			w.GivenTheBuildFileDeclares(`layer(name="app", base="scratch")`)
+			w.WhenIBuild("app", example.options...)
+			w.ThenItFailsWith(example.error)
+			w.ThenNoTargetRan()
+		})
+	}
+
+	// That --exec-platform chooses the platform shows only where the executor offers several, as a coordinator does.
+	t.Run("Naming this machine's platform as the exec platform is accepted, and builds as without it",
+		func(t *testing.T) {
+			w := newPlatformWorld(t)
+			w.GivenTheBuildFileDeclares(platformInTheEnvironment)
+			w.WhenISave("app")
+			w.ThenItSucceeds()
+			w.WhenISave("app", onTheExecPlatform(thisPlatform()))
+			w.ThenItSucceeds()
+			w.ThenTheTargetsWere(statuses{layer("app"): reused})
+			w.ThenTheImageIsTheOneSavedFirst()
+		})
+}
+
+// TestPlatforms_ALayersBaseIsForItsPlatform specifies that a layer's base must have the same platform as the layer.
+func TestPlatforms_ALayersBaseIsForItsPlatform(t *testing.T) {
+	t.Run("A layer on a base for another platform fails, saying the base must be for its platform", func(t *testing.T) {
+		w := newPlatformWorld(t)
+		w.GivenTheBuildFileDeclares(fmt.Sprintf(`layer(name="app", base=dep("busybox", platform=%q))`,
+			anotherPlatform()))
+		w.WhenISave("app")
+		w.ThenItFailsWith(fmt.Sprintf(`layer "app": its base busybox is for %s, not %s; `+
+			"a layer's base must be for its platform", anotherPlatform(), thisPlatform()))
+		w.ThenNothingIsSaved()
+	})
+}
+
+// TestPlatforms_AnotherPlatformsProgramsRunUnderEmulation specifies that if a run() executes another
+// architecture's programs, the kernel needs a registered emulator for that architecture,
+// and that otherwise the command fails, saying that exec format error means no emulator is registered.
+func TestPlatforms_AnotherPlatformsProgramsRunUnderEmulation(t *testing.T) {
+	t.Run("A layer for another platform runs its programs under the emulator", func(t *testing.T) {
+		w := newPlatformWorld(t)
+		w.GivenThisMachineEmulates(anotherPlatform())
+		emulated, ok := machineNames[anotherPlatform()]
+		if !ok {
+			t.Fatalf("no machine name for %s", anotherPlatform())
+		}
+		nonce := testenv.NewNonce()
+		w.GivenTheBuildFileDeclares(fmt.Sprintf(`
+			layer(name="machine", base="busybox", steps=[run(["sh", "-c", "echo %s $(uname -m) > /machine.txt"])])
+		`, nonce))
+		w.WhenISave("machine", forPlatform(anotherPlatform()))
+		w.ThenItSucceeds()
+		w.ThenTheImageIsFor(anotherPlatform())
+		w.ThenTheImageHoldsAtLeast(files{"/machine.txt": nonce + " " + emulated + "\n"})
+	})
+
+	t.Run("A failing command for another platform says what exec format error would mean", func(t *testing.T) {
+		w := newPlatformWorld(t)
+		w.GivenTheBuildFileDeclares(fmt.Sprintf(`layer(name="app", base="busybox", steps=[run(["false"])]) # %s`,
+			testenv.NewNonce()))
+		w.WhenIBuild("app", forPlatform(anotherPlatform()))
+		w.ThenItFailsWith(fmt.Sprintf(`layer "app": run(["false"]) failed: exit status 1; the image is for %s, `+
+			`which runs here under emulation: "exec format error" above means no emulator for it is registered`,
+			anotherPlatform()))
 	})
 }

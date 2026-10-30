@@ -83,6 +83,7 @@ type world struct {
 	loadedBefore int              // how many images the scenario's own daemon had loaded before the last command
 	loadRan      bool             // whether the last command loaded into Docker, or tried to
 	ran          bool             // whether any command has run
+	emulating    string           // the platform whose programs the scenario runs under emulation, if any
 	askedDuring  int64            // the requests that the scenario's registry served as the last command ran
 	first        v1.Image         // the first image that the scenario saved
 	entries      map[string]entry // the image's files, once a step has read them
