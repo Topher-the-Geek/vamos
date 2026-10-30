@@ -85,11 +85,11 @@ Delete this file when every box is ticked.
   `TestWatchJobWriteFailure`, of how a cancelled job's events are drained into the trace, are internal contracts,
   below.
 - [ ] **How a user sees remote work and its failures.**
-  `TestRemoteBuild`, `TestRemoteMistakes`, `TestCoordinatorCommand`, `TestCoordinatorWithWorker`,
-  `TestExecPlatformChoice`,
-  `TestUsesContainerStore`, `TestCheckRegistryHost`, `TestCoordinatorFlagMistakes`.
-  A few scenarios with a coordinator and worker in process: a build, a mistake, and what an unreachable or failing
-  coordinator reports. The failure modes themselves stay below.
+  `TestRemoteBuild` and `TestRemoteMistakes` are scenarios of the remote feature.
+  Still to move: `TestCoordinatorCommand`, `TestCoordinatorWithWorker`, `TestExecPlatformChoice`,
+  `TestCheckRegistryHost`, `TestCoordinatorFlagMistakes`.
+  `TestUsesContainerStore`, of which command lines main re-executes in a user namespace, is an internal contract.
+  The failure modes themselves stay below.
 
 ## Keep as Go tests, confirming each one's reason
 
@@ -102,6 +102,7 @@ Delete this file when every box is ticked.
   `TestFailureCrosses`, `TestWorkerFailureCrosses`, `TestReleaseCrosses`, `TestGraphValidate`, `TestGraphRoundTrip`,
   `TestFailedStepLog`, `TestFailedOutputLog`,
   `TestHandlerWithoutRoot`, `TestBuildHandlerWithoutRoot`, `TestPruneHandlerWithoutRoot`, `TestWatchJobWriteFailure`,
+  `TestUsesContainerStore`,
   `TestGraphExamples` and `internal/api`.
 - [ ] **The test harness.**
   `internal/testenv`, and the features package's own tests of its matchers and image reader.

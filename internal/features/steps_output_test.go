@@ -90,8 +90,8 @@ func (w *world) ThenItTriedToPrintOnly(want string) {
 }
 
 // ThenItFailsWith checks that the command failed, at run time, with an error that contains each of wants,
-// printed no usage, and reported sending nothing. In wants, <destination> stands for the folder that the command
-// sent to, <working directory> for the test's, and <registry> for the host of the scenario's registry.
+// printed no usage, and reported sending nothing. In wants, placeholders stand for what atPlaceholders says, such as
+// <destination> for the folder that the command sent to, and <coordinator> for the scenario's coordinator's URL.
 // It stops the scenario if any of these doesn't hold.
 func (w *world) ThenItFailsWith(wants ...string) {
 	w.t.Helper()
@@ -137,11 +137,12 @@ func (w *world) fails(usage bool, wants []string) {
 
 // atPlaceholders returns s with each <destination> replaced by the folder that the last command sent to,
 // each <working directory> by the test's, each <registry> by the host of the scenario's registry,
-// each <outside> by the folder of GivenAFileOutsideTheProjectHolds,
+// each <outside> by the folder of GivenAFileOutsideTheProjectHolds, each <coordinator> by the scenario's coordinator's
+// URL,
 // and each <saved image N> by the short ID of the Nth image the scenario saved, as vamos shows one.
 func (w *world) atPlaceholders(s string) string {
 	w.t.Helper()
-	s = w.atOutside(w.atRegistry(s))
+	s = w.atOutside(w.atRegistry(w.atCoordinator(s)))
 	for i, img := range w.saved {
 		if placeholder := fmt.Sprintf("<saved image %d>", i+1); strings.Contains(s, placeholder) {
 			s = strings.ReplaceAll(s, placeholder, w.imageID(img)[:12])

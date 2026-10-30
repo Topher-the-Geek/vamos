@@ -3,14 +3,11 @@ package cli
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -21,105 +18,8 @@ import (
 	"github.com/Topher-the-Geek/vamos/internal/api"
 	"github.com/Topher-the-Geek/vamos/internal/graph"
 	"github.com/Topher-the-Geek/vamos/internal/remote"
-	"github.com/Topher-the-Geek/vamos/internal/run"
 	"github.com/Topher-the-Geek/vamos/internal/worker"
 )
-
-// coordinatorOf serves a local executor on the test's stores over HTTP, as a coordinator does,
-// and returns its URL.
-func coordinatorOf(t *testing.T) string {
-	t.Helper()
-	local, err := run.NewLocal(stores(t).Options)
-	must(t, err)
-	t.Cleanup(func() { local.Close() })
-	content, err := local.ContentStore()
-	must(t, err)
-	server := httptest.NewServer((&remote.Server{Executor: local, Content: content}).Handler())
-	t.Cleanup(server.Close)
-	return server.URL
-}
-
-// TestRemoteBuild checks that the commands build on a coordinator when --coordinator names one: a layer is saved,
-// its result reused, and a task's files exported, with the client reading everything from the coordinator's store.
-func TestRemoteBuild(t *testing.T) {
-	requireBuildah(t)
-	nonce := newNonce()
-	fsys := project(t, map[string]string{
-		"BUILD": `
-glob(name="src", include=["hello.txt"])
-layer(name="app", base="scratch", steps=[add("src", "/data")])
-task(name="copy", base="scratch", steps=[add("src", "/out")], source="/out", include=["hello.txt"])
-`,
-		"hello.txt": nonce + "\n",
-	})
-	url := coordinatorOf(t)
-	dir := t.TempDir()
-	out := filepath.Join(dir, "app.tar")
-	r := vamos(t, fsys, "save", "app", out, "--coordinator", url, "-C", projectDir).succeeds(t)
-	assertTargets(t, r, map[string]string{`layer "app"`: "building"})
-	if got := imageFile(t, readImage(t, out), "/data/hello.txt"); got != nonce+"\n" {
-		t.Errorf("/data/hello.txt = %q, want the glob's file", got)
-	}
-	r = vamos(t, fsys, "build", "app", "--coordinator", url, "-C", projectDir).ran(t)
-	assertTargets(t, r, map[string]string{`layer "app"`: "cached"})
-
-	exported := filepath.Join(dir, "exported")
-	vamos(t, fsys, "export", "copy", exported, "--coordinator", url, "-C", projectDir).ran(t)
-	if data, err := os.ReadFile(filepath.Join(exported, "hello.txt")); err != nil || string(data) != nonce+"\n" {
-		t.Errorf("exported hello.txt = %q, %v; want the task's file", data, err)
-	}
-
-	// The variable names the coordinator too.
-	t.Setenv("VAMOS_COORDINATOR", url)
-	r = vamos(t, fsys, "build", "app", "-C", projectDir).ran(t)
-	assertTargets(t, r, map[string]string{`layer "app"`: "cached"})
-}
-
-// TestRemoteMistakes checks the errors for a coordinator that can't be used: a URL that isn't one,
-// one that runs other graph versions, and one that can't be reached.
-func TestRemoteMistakes(t *testing.T) {
-	fsys := project(t, map[string]string{"BUILD": `layer(name="app", base="scratch")`})
-	old := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(api.Capabilities{GraphVersions: []int{graph.Version + 1000}})
-	}))
-	t.Cleanup(old.Close)
-	tests := []struct {
-		name        string
-		coordinator string
-		want        []string
-	}{
-		{
-			name:        "not a URL",
-			coordinator: "coordinator:8080",
-			want:        []string{`--coordinator: coordinator "coordinator:8080": want an http or https URL`},
-		},
-		{
-			name:        "other graph version",
-			coordinator: old.URL,
-			want: []string{fmt.Sprintf("the coordinator at %s runs graph versions [%d], not this vamos's, %d; "+
-				"use a vamos of its version", old.URL, graph.Version+1000, graph.Version)},
-		},
-		{
-			// Port 9 is discard, which nothing listens on here: the failure is at once, not after a minute of retries.
-			name:        "can't be reached",
-			coordinator: "http://127.0.0.1:9",
-			want:        []string{"can't reach the coordinator at http://127.0.0.1:9: "},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			vamos(t, fsys, "build", "app", "--coordinator", tt.coordinator, "-C", projectDir).
-				failsWith(t, false, tt.want...)
-		})
-	}
-	// A secret is refused before the coordinator is reached, so nothing carries it there.
-	t.Run("secret", func(t *testing.T) {
-		vamos(t, fsys, "build", "app", "--coordinator", "http://127.0.0.1:9", "--secret", "id=token,env=HOME",
-			"-C", projectDir).
-			failsWith(t, false, "--secret token can't go to a coordinator, which has no authentication or TLS; "+
-				"build in this process, without --coordinator or $VAMOS_COORDINATOR")
-	})
-}
 
 // TestCoordinatorCommand checks that `vamos coordinator --local` serves builds at the address it listens on,
 // to a client that gives --coordinator, until it is interrupted.

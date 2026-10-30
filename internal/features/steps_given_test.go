@@ -195,10 +195,11 @@ func (w *world) GivenFilesOutsideTheProjectHold(written files) {
 	}
 }
 
-// GivenTheEnvironmentSets sets the environment variable name of the vamos process, for the rest of the scenario.
+// GivenTheEnvironmentSets sets the environment variable name of the vamos process, for the rest of the scenario,
+// to value, in which <coordinator> stands for the URL of the scenario's coordinator.
 func (w *world) GivenTheEnvironmentSets(name, value string) {
 	w.t.Helper()
-	w.t.Setenv(name, value)
+	w.t.Setenv(name, w.atCoordinator(value))
 }
 
 // GivenTheEnvironmentDoesNotSet unsets the environment variable name of the vamos process, for the rest of the

@@ -107,7 +107,8 @@ Trace importer coverage skips without `trace_processor_shell`.
 
 [features](../../internal/features/) specifies the behavior of BUILD files and their targets, pulls, globs, layers,
 tasks, their steps, variables and secrets, workspaces, modules, parameters, platforms, indexes, the cache,
-the command line, and the save, export, push, load and prune commands as features, rules and scenarios, in Go:
+the command line, the save, export, push, load and prune commands, traces, interrupts, output that can't be
+written, and building on a coordinator as features, rules and scenarios, in Go:
 a feature is a file, such as `task_test.go`, and each of its rules is a test named `TestFeature_Rule`,
 such as `TestTask_WithoutOutputIsACheck`,
 whose doc comment states the rule's sentence, in the words of the [BUILD reference](../../docs/reference/build.md),
@@ -193,6 +194,7 @@ and its steps' observations;
 [steps_trace_test.go](../../internal/features/steps_trace_test.go) the trace that `--trace` writes, read as Perfetto
 reads it;
 [steps_interrupt_test.go](../../internal/features/steps_interrupt_test.go) interrupting a command, as Ctrl-C does;
+[steps_remote_test.go](../../internal/features/steps_remote_test.go) coordinators that a command builds on;
 and [steps_cache_test.go](../../internal/features/steps_cache_test.go) the build cache and the container store as
 other programs see them: steps that damage or hold them, as something outside vamos might, and see what they hold,
 on stores of the scenario's own.

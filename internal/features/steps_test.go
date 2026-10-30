@@ -32,6 +32,7 @@ import (
 // steps_image_test.go the image saved;
 // steps_destination_test.go the folder a command sends to, and the files exported there;
 // steps_trace_test.go the trace that --trace writes; steps_interrupt_test.go interrupting a command;
+// steps_remote_test.go coordinators that a command builds on;
 // and steps_cache_test.go the build cache and the container store as other programs see them.
 
 // files are regular files' contents, by path: what a project holds, or what to expect of an image or a folder.
@@ -65,15 +66,18 @@ type world struct {
 	root    string          // the folder that holds the project, if it is on disk
 	before  map[string]bool // the store's unnamed images when the scenario began, if it builds
 
-	prepared   string                 // the folder the next command sends to, if Given steps have put something there
-	outside    string                 // a folder outside the project, for files that commands read, such as secrets
-	outsideWas map[string]outsideFile // what GivenAFileOutsideTheProjectHolds wrote there, by name
-	registry   string                 // the host of the scenario's registry, <registry>, once a Given step starts it
-	login      authn.Authenticator    // that the scenario's registry needs, which steps that read from it use
-	server     *httptest.Server       // that serves the scenario's registry, once a Given step starts it
-	asked      atomic.Int64           // the requests that the scenario's registry has served
-	stopped    atomic.Bool            // whether the scenario's registry has stopped answering
-	held       map[string]v1.Image    // the images that Given steps put in the registry, by label and platform
+	prepared    string                 // the folder the next command sends to, if Given steps have put something there
+	outside     string                 // a folder outside the project, for files that commands read, such as secrets
+	outsideWas  map[string]outsideFile // what GivenAFileOutsideTheProjectHolds wrote there, by name
+	registry    string                 // the host of the scenario's registry, <registry>, once a Given step starts it
+	coordinator string                 // the URL of the scenario's coordinator, <coordinator>, once started
+	jobs        atomic.Int64           // the jobs that the scenario's coordinator was given
+	served      atomic.Int64           // the requests that the scenario's coordinator was sent
+	login       authn.Authenticator    // that the scenario's registry needs, which steps that read from it use
+	server      *httptest.Server       // that serves the scenario's registry, once a Given step starts it
+	asked       atomic.Int64           // the requests that the scenario's registry has served
+	stopped     atomic.Bool            // whether the scenario's registry has stopped answering
+	held        map[string]v1.Image    // the images that Given steps put in the registry, by label and platform
 
 	stdout       string
 	stderr       string
@@ -110,6 +114,8 @@ type world struct {
 	cachedAfter  cached            // and as it ended
 	emulating    string            // the platform whose programs the scenario runs under emulation, if any
 	askedDuring  int64             // the requests that the scenario's registry served as the last command ran
+	jobsDuring   int64             // the jobs that the scenario's coordinator was given as the last command ran
+	servedDuring int64             // the requests that the scenario's coordinator was sent as the last command ran
 	first        v1.Image          // the first image that the scenario saved
 	saved        []v1.Image        // the images that the scenario saved, in order
 	entries      map[string]entry  // the image's files, once a step has read them
@@ -216,7 +222,7 @@ func (w *world) execute(fsys afero.Fs, args []string) {
 	if w.ownStores {
 		w.cachedBefore = w.cached()
 	}
-	asked := w.asked.Load()
+	asked, jobs, served := w.asked.Load(), w.jobs.Load(), w.served.Load()
 	if interruptIn > 0 { // as the command starts, after anything slow beforehand
 		timer := time.AfterFunc(interruptIn, cancel)
 		defer timer.Stop()
@@ -224,7 +230,8 @@ func (w *world) execute(fsys afero.Fs, args []string) {
 	start := time.Now()
 	w.err = cmd.ExecuteContext(ctx)
 	w.took = time.Since(start)
-	w.askedDuring = w.asked.Load() - asked
+	w.askedDuring, w.jobsDuring = w.asked.Load()-asked, w.jobs.Load()-jobs
+	w.servedDuring = w.served.Load() - served
 	if w.ownStores {
 		w.cachedAfter = w.cached()
 	}
