@@ -156,6 +156,8 @@ forgets it; `--grace` if shorter.
 
 `load`, `save` and `push --push-from=client` read a built image from the cache repository, and a `pull()` root from
 the pull-through cache, with the client's credentials and `--tls-verify`, so the client must reach both;
+a registry among those two that the coordinator's `registries.conf` marks insecure, the client reads as the
+coordinator does, over plain HTTP, whatever `--tls-verify` and its own `registries.conf` say;
 `push` from the executor runs on a worker, copying from there with the worker's credentials.
 `export` reads a task's files from the coordinator's build cache.
 
@@ -266,7 +268,8 @@ and is available on `build`, `push`, `load`, `save` (including its deprecated `w
 The TLS flag displays `true` in help, and given alone means `true`, but when omitted vamos defers to `registries.conf`,
 including entries with `insecure = true`.
 It applies to what the client itself does: a push with `--push-from=client`, and reading a coordinator's images to
-load, save or push;
+load, save or push, except from a cache registry or pull-through cache that the coordinator marks insecure,
+which the client reads as the coordinator does, while the destination keeps `--tls-verify`;
 the executor, which pulls and pushes otherwise, follows `registries.conf` alone,
 so mark a plain-HTTP registry `insecure = true` there for it.
 

@@ -9,6 +9,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/Topher-the-Geek/vamos/internal/api"
@@ -47,6 +48,9 @@ type Image struct {
 	// Registry is the reference of the image at a registry, such as registry:5000/vamos-cache:<image ID>,
 	// which the client reads with its own credentials and settings.
 	Registry string
+	// Insecure reads Registry over plain HTTP, or without verifying certificates, whatever the client's settings,
+	// as the executor that recorded it does.
+	Insecure bool
 	// Members are the images of an index, each at a registry, in order with their platforms;
 	// the index is assembled here, as the executor's export assembles one.
 	Members []Member
@@ -58,6 +62,7 @@ type Image struct {
 // Member is one image of an index to assemble: its reference at a registry, and the platform the index lists it for.
 type Member struct {
 	Registry string
+	Insecure bool // as Image.Insecure
 	Platform imgspecv1.Platform
 }
 
@@ -68,8 +73,10 @@ func Exported(store cache.ContentStore, exp api.Exported) Image {
 
 // FromLocations returns res's image or index as an image to deliver from the registry locations its result names,
 // or false if it names none for the image, or for one of an index's: then the executor must export it.
+// A location at one of insecure, the hosts that the executor's capabilities name, is read as the executor reads it,
+// over plain HTTP or without verifying certificates.
 // A member whose platform can't be read is an error: the result is no executor's.
-func FromLocations(res api.Result) (Image, bool, error) {
+func FromLocations(res api.Result, insecure []string) (Image, bool, error) {
 	if res.Index != nil {
 		var members []Member
 		for i, m := range res.Index {
@@ -81,7 +88,7 @@ func FromLocations(res api.Result) (Image, bool, error) {
 			if err != nil {
 				return Image{}, false, fmt.Errorf("the result's manifest %d: %w", i, err)
 			}
-			members = append(members, Member{Registry: ref, Platform: platform})
+			members = append(members, Member{Registry: ref, Insecure: atHost(ref, insecure), Platform: platform})
 		}
 		return Image{Members: members}, len(members) > 0, nil
 	}
@@ -89,7 +96,28 @@ func FromLocations(res api.Result) (Image, bool, error) {
 	if !ok {
 		return Image{}, false, nil
 	}
-	return Image{Registry: ref}, true, nil
+	return Image{Registry: ref, Insecure: atHost(ref, insecure)}, true, nil
+}
+
+// atHost reports whether the registry reference ref is at one of hosts.
+func atHost(ref string, hosts []string) bool {
+	named, err := reference.ParseNamed(ref)
+	return err == nil && slices.Contains(hosts, reference.Domain(named))
+}
+
+// sourceContext returns the settings to read an image at a registry with: sys, or, for an insecure one,
+// a copy that skips verifying certificates, which containers/image also takes as leave to fall back to plain HTTP.
+// The destination keeps sys, so that the client's own settings, --tls-verify among them, govern it alone.
+func sourceContext(sys *types.SystemContext, insecure bool) *types.SystemContext {
+	if !insecure {
+		return sys
+	}
+	var source types.SystemContext
+	if sys != nil {
+		source = *sys
+	}
+	source.DockerInsecureSkipTLSVerify = types.OptionalBoolTrue
+	return &source
 }
 
 // registryOf returns the first registry location among locations, if there is one.
@@ -149,12 +177,13 @@ func deliver(ctx context.Context, img Image, sys *types.SystemContext, send send
 		return "", err
 	}
 	defer policyContext.Destroy()
-	src, multi, err := img.open(ctx, policyContext, dir, sys)
+	src, sourceCtx, multi, err := img.open(ctx, policyContext, dir, sys)
 	if err != nil {
 		return "", err
 	}
-	// The client's settings apply at both ends: the registry an image is read from, and the destination.
-	options := &imagecopy.Options{SourceCtx: sys, DestinationCtx: sys}
+	// The client's settings apply at both ends: the registry an image is read from, and the destination;
+	// but a registry that the executor reads insecurely is read so here too.
+	options := &imagecopy.Options{SourceCtx: sourceCtx, DestinationCtx: sys}
 	if multi {
 		options.ImageListSelection = imagecopy.CopyAllImages
 	}
@@ -174,44 +203,47 @@ func deliver(ctx context.Context, img Image, sys *types.SystemContext, send send
 	return m.ConfigInfo().Digest.Encoded(), nil
 }
 
-// open returns the image as a source to copy from, and whether it is an index: an image at a registry as it is,
-// an index of members assembled in dir, and an export laid out in dir from the content store.
+// open returns the image as a source to copy from, the settings to read it with, and whether it is an index:
+// an image at a registry as it is, an index of members assembled in dir, and an export laid out in dir from the
+// content store.
 func (img Image) open(ctx context.Context, policyContext *signature.PolicyContext, dir string,
-	sys *types.SystemContext) (types.ImageReference, bool, error) {
+	sys *types.SystemContext) (types.ImageReference, *types.SystemContext, bool, error) {
 	switch {
 	case img.Registry != "":
 		ref, err := registryReference(img.Registry)
-		return ref, false, err
+		return ref, sourceContext(sys, img.Insecure), false, err
 	case len(img.Members) > 0:
 		members := make([]transfer.IndexMember, len(img.Members))
 		for i, m := range img.Members {
 			ref, err := registryReference(m.Registry)
 			if err != nil {
-				return nil, false, err
+				return nil, nil, false, err
 			}
-			members[i] = transfer.IndexMember{Platform: m.Platform, Source: ref}
+			members[i] = transfer.IndexMember{
+				Platform: m.Platform, Source: ref, SourceCtx: sourceContext(sys, m.Insecure),
+			}
 		}
 		_, span := tracing.Start(ctx, "assemble index", "members", len(members))
 		src, _, err := transfer.LayoutIndex(ctx, policyContext, dir, members, sys)
 		span.EndWith(err)
 		if err != nil {
-			return nil, false, fmt.Errorf("reading the index's images from their registries: %w", err)
+			return nil, nil, false, fmt.Errorf("reading the index's images from their registries: %w", err)
 		}
-		return src, true, nil
+		return src, sys, true, nil
 	case img.Exported != nil:
 		exp := img.Exported
 		if exp.Manifest.Digest == "" {
-			return nil, false, errors.New("the target made no image")
+			return nil, nil, false, errors.New("the target made no image")
 		}
 		_, span := tracing.Start(ctx, "read blobs", "manifest", exp.Manifest.Digest.String(), "blobs", len(exp.Blobs))
 		src, err := transfer.Layout(ctx, img.Store, dir, exp.Manifest, exp.MediaType, exp.Blobs)
 		span.EndWith(err)
 		if err != nil {
-			return nil, false, fmt.Errorf("reading the image from the content store: %w", err)
+			return nil, nil, false, fmt.Errorf("reading the image from the content store: %w", err)
 		}
-		return src, manifest.MIMETypeIsMultiImage(exp.MediaType), nil
+		return src, sys, manifest.MIMETypeIsMultiImage(exp.MediaType), nil
 	}
-	return nil, false, errors.New("the target made no image")
+	return nil, nil, false, errors.New("the target made no image")
 }
 
 // registryReference returns a reference to read the image at ref, a registry reference, with the docker transport.

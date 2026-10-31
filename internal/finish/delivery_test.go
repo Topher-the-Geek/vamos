@@ -28,6 +28,7 @@ import (
 	gcrtypes "github.com/google/go-containerregistry/pkg/v1/types"
 	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"go.podman.io/image/v5/docker/reference"
+	"go.podman.io/image/v5/oci/layout"
 	"go.podman.io/image/v5/types"
 )
 
@@ -226,6 +227,31 @@ func finishJob(t *testing.T, ex api.Executor, req api.Request) api.Outcome {
 	return outcome
 }
 
+// pushRandomImage pushes an image for platform, "os/arch", to host's vamos-cache repository, tagged by its ID,
+// as a worker does, and returns its reference there and its ID.
+func pushRandomImage(t *testing.T, host, platform string) (ref string, id string) {
+	t.Helper()
+	// An OCI image of one random layer, as vamos builds them, so that assembling the index converts nothing
+	// and the image IDs hold.
+	layer, err := random.Layer(256, gcrtypes.OCILayer)
+	testenv.Must(t, err)
+	img, err := mutate.AppendLayers(mutate.ConfigMediaType(mutate.MediaType(empty.Image,
+		gcrtypes.OCIManifestSchema1), gcrtypes.OCIConfigJSON), layer)
+	testenv.Must(t, err)
+	config, err := img.ConfigFile()
+	testenv.Must(t, err)
+	config.OS, config.Architecture, _ = strings.Cut(platform, "/")
+	img, err = mutate.ConfigFile(img, config)
+	testenv.Must(t, err)
+	configName, err := img.ConfigName()
+	testenv.Must(t, err)
+	ref = host + "/vamos-cache:" + configName.Hex
+	r, err := gcrname.ParseReference(ref, gcrname.Insecure)
+	testenv.Must(t, err)
+	testenv.Must(t, remote.Write(r, img))
+	return ref, configName.Hex
+}
+
 // TestDeliverFromRegistry checks that the client delivers an image from the registry location its result names,
 // reading nothing from any content store, and assembles an index from its members' locations:
 // what a coordinator's results, whose images workers pushed to the cache registry, give it.
@@ -234,34 +260,13 @@ func TestDeliverFromRegistry(t *testing.T) {
 	t.Cleanup(server.Close)
 	host := strings.TrimPrefix(server.URL, "http://")
 	sys := &types.SystemContext{DockerInsecureSkipTLSVerify: types.OptionalBoolTrue}
-	push := func(platform string) (ref string, id string) {
-		t.Helper()
-		// An OCI image of one random layer, as vamos builds them, so that assembling the index converts nothing
-		// and the image IDs hold.
-		layer, err := random.Layer(256, gcrtypes.OCILayer)
-		testenv.Must(t, err)
-		img, err := mutate.AppendLayers(mutate.ConfigMediaType(mutate.MediaType(empty.Image,
-			gcrtypes.OCIManifestSchema1), gcrtypes.OCIConfigJSON), layer)
-		testenv.Must(t, err)
-		config, err := img.ConfigFile()
-		testenv.Must(t, err)
-		config.OS, config.Architecture, _ = strings.Cut(platform, "/")
-		img, err = mutate.ConfigFile(img, config)
-		testenv.Must(t, err)
-		configName, err := img.ConfigName()
-		testenv.Must(t, err)
-		ref = host + "/vamos-cache:" + configName.Hex
-		r, err := gcrname.ParseReference(ref, gcrname.Insecure)
-		testenv.Must(t, err)
-		testenv.Must(t, remote.Write(r, img))
-		return ref, configName.Hex
-	}
+	push := func(platform string) (string, string) { return pushRandomImage(t, host, platform) }
 	ref, id := push("linux/amd64")
 	res := api.Result{Image: id, Locations: []cache.Location{
 		{Kind: cache.LocationStore, Reference: "localhost/vamos-cache:" + id},
 		{Kind: cache.LocationRegistry, Reference: ref},
 	}}
-	img, ok, err := FromLocations(res)
+	img, ok, err := FromLocations(res, nil)
 	if !ok || err != nil || img.Registry != ref {
 		t.Fatalf("FromLocations = %+v, %v, %v; want the registry location", img, ok, err)
 	}
@@ -275,11 +280,11 @@ func TestDeliverFromRegistry(t *testing.T) {
 	if saved != id || config.Hex != id {
 		t.Errorf("Save reported %s and the tarball holds %s, want %s from the registry", saved, config.Hex, id)
 	}
-	if _, ok, err := FromLocations(api.Result{Image: id, Locations: res.Locations[:1]}); ok || err != nil {
+	if _, ok, err := FromLocations(api.Result{Image: id, Locations: res.Locations[:1]}, nil); ok || err != nil {
 		t.Errorf("a result located in a store alone = %v, %v; want it not deliverable from a registry", ok, err)
 	}
 	broken := api.Result{Index: []api.Manifest{{Image: id, Platform: "linux-amd64", Locations: res.Locations[1:]}}}
-	if _, _, err := FromLocations(broken); err == nil || !strings.Contains(err.Error(), "manifest 0") {
+	if _, _, err := FromLocations(broken, nil); err == nil || !strings.Contains(err.Error(), "manifest 0") {
 		t.Errorf("FromLocations of a member with platform %q = %v, want an error naming the manifest", "linux-amd64",
 			err)
 	}
@@ -291,7 +296,7 @@ func TestDeliverFromRegistry(t *testing.T) {
 		{Image: otherID, Platform: "linux/arm64", Locations: []cache.Location{{Kind: cache.LocationRegistry,
 			Reference: otherRef}}},
 	}}
-	img, ok, err = FromLocations(index)
+	img, ok, err = FromLocations(index, nil)
 	if !ok || err != nil || len(img.Members) != 2 {
 		t.Fatalf("FromLocations of an index = %+v, %v, %v; want two members", img, ok, err)
 	}
@@ -319,5 +324,56 @@ func TestDeliverFromRegistry(t *testing.T) {
 			t.Errorf("the index's image %d is %s for %v, want %s for %s", i, config.Hex, m.Manifests[i].Platform, want,
 				index.Index[i].Platform)
 		}
+	}
+}
+
+// TestDeliverFromInsecureRegistry checks that the client reads an image at a registry that the executor names as
+// insecure over plain HTTP, though its own settings name no such registry, and only reads it so: its destination
+// keeps the client's settings.
+func TestDeliverFromInsecureRegistry(t *testing.T) {
+	server := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))
+	t.Cleanup(server.Close)
+	host := strings.TrimPrefix(server.URL, "http://")
+	sys := &types.SystemContext{} // verifying certificates, as a client without registries.conf entries does
+	ref, id := pushRandomImage(t, host, "linux/amd64")
+	res := api.Result{Image: id, Locations: []cache.Location{{Kind: cache.LocationRegistry, Reference: ref}}}
+
+	img, _, err := FromLocations(res, nil)
+	testenv.Must(t, err)
+	if _, err := Save(t.Context(), img, filepath.Join(t.TempDir(), "app.tar"), nil, sys); err == nil ||
+		!strings.Contains(err.Error(), "HTTP response to HTTPS client") {
+		t.Errorf("saving from a registry the executor doesn't name as insecure = %v, want HTTPS refused", err)
+	}
+
+	img, _, err = FromLocations(res, []string{"elsewhere:5000", host})
+	testenv.Must(t, err)
+	saved, err := Save(t.Context(), img, filepath.Join(t.TempDir(), "app.tar"), nil, sys)
+	if err != nil || saved != id {
+		t.Errorf("saving from a registry the executor names as insecure = %s, %v; want %s", saved, err, id)
+	}
+
+	// The destination is the same registry, which the client's settings don't mark insecure.
+	named, err := reference.ParseNormalizedNamed(host + "/pushed:v1")
+	testenv.Must(t, err)
+	if _, err := Push(t.Context(), img, named.(reference.NamedTagged), sys); err == nil ||
+		!strings.Contains(err.Error(), "HTTP response to HTTPS client") {
+		t.Errorf("pushing to a registry the client's settings don't mark insecure = %v, want HTTPS refused", err)
+	}
+
+	otherRef, otherID := pushRandomImage(t, host, "linux/arm64")
+	index := api.Result{Index: []api.Manifest{
+		{Image: id, Platform: "linux/amd64", Locations: res.Locations},
+		{Image: otherID, Platform: "linux/arm64", Locations: []cache.Location{{Kind: cache.LocationRegistry,
+			Reference: otherRef}}},
+	}}
+	img, _, err = FromLocations(index, []string{host})
+	testenv.Must(t, err)
+	if !img.Members[0].Insecure || !img.Members[1].Insecure {
+		t.Fatalf("FromLocations of an index at an insecure registry = %+v, want its members insecure", img.Members)
+	}
+	dest, err := layout.NewReference(t.TempDir(), "all")
+	testenv.Must(t, err)
+	if _, err := copyTo(t.Context(), img, dest, sys); err != nil {
+		t.Errorf("assembling an index from a registry the executor names as insecure: %v", err)
 	}
 }

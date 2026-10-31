@@ -177,16 +177,22 @@ func TestGraphRequestSecrets(t *testing.T) {
 }
 
 // TestCapabilitiesClone checks that a clone of capabilities shares no platform with the original, the execution
-// platform and its OS features included, so that a caller changing its copy changes nothing an executor keeps.
+// platform and its OS features included, nor an insecure registry, so that a caller changing its copy changes nothing
+// an executor keeps.
 func TestCapabilitiesClone(t *testing.T) {
 	caps := Capabilities{
-		Platforms:    []imgspecv1.Platform{{OS: "windows", Architecture: "amd64", OSFeatures: []string{"win32k"}}},
-		ExecPlatform: &imgspecv1.Platform{OS: "windows", Architecture: "amd64", OSFeatures: []string{"win32k"}},
+		Platforms:          []imgspecv1.Platform{{OS: "windows", Architecture: "amd64", OSFeatures: []string{"win32k"}}},
+		ExecPlatform:       &imgspecv1.Platform{OS: "windows", Architecture: "amd64", OSFeatures: []string{"win32k"}},
+		InsecureRegistries: []string{"registry:5000"},
 	}
 	clone := caps.Clone()
 	clone.Platforms[0].OSFeatures[0] = "changed"
 	clone.ExecPlatform.Architecture = "arm64"
 	clone.ExecPlatform.OSFeatures[0] = "changed"
+	clone.InsecureRegistries[0] = "changed"
+	if caps.InsecureRegistries[0] != "registry:5000" {
+		t.Errorf("changing a clone's insecure registry changed the original's, to %q", caps.InsecureRegistries[0])
+	}
 	if caps.Platforms[0].OSFeatures[0] != "win32k" {
 		t.Errorf("changing a clone's platform changed the original's, to %+v", caps.Platforms[0])
 	}

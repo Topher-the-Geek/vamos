@@ -23,7 +23,7 @@
 //
 // Image.open owns where an image is read from; Push, Save and LoadDocker own image delivery through copyTo,
 // which opens the image for transfer.Image; FromLocations decides from a result whether the client reads it from a
-// registry; archiveReference owns archive path adaptation.
+// registry, and whether insecurely, as the executor's capabilities name the registry; archiveReference owns archive path adaptation.
 // Export, install, swap and setMetadata in export.go own directory replacement and host metadata.
 // Consult their contracts before changing filesystem operations,
 // especially around symlinks, cancellation and replacement races.

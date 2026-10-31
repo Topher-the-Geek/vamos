@@ -13,7 +13,8 @@ A client builds with --coordinator, or $VAMOS_COORDINATOR, once it reaches the c
   vamos build <target> --coordinator http://127.0.0.1:8080
 
 load, save and push --push-from=client read images from the registries by the names above, so a client that
-delivers must resolve and reach them, and mark the plain-HTTP ones insecure in its registries.conf as the
-{{ include "vamos.fullname" . }}-registries ConfigMap does.
+delivers must resolve and reach them; the coordinator tells clients which of them the
+{{ include "vamos.fullname" . }}-registries ConfigMap marks insecure, and a client of vamos 0.1.4 or later reads
+those over plain HTTP as it does, while an earlier client needs the same entries in its own registries.conf.
 
 There is no authentication: keep the coordinator and the registries on a trusted network.

@@ -35,6 +35,7 @@ import (
 	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
 	"go.podman.io/image/v5/docker/reference"
+	"go.podman.io/image/v5/pkg/sysregistriesv2"
 	"go.podman.io/image/v5/types"
 	"go.podman.io/storage"
 )
@@ -122,6 +123,7 @@ type invocation struct {
 	holds          []*hold       // the builds held open on the executor until it is closed
 	grace          time.Duration // the executor's grace period, from its capabilities
 	generation     uint64        // the executor's cache generation, from its capabilities, read before capture
+	insecure       []string      // the registries the executor reads insecurely, from its capabilities
 }
 
 // hold keeps a build open on its executor while the command delivers its result: a watch past the terminal
@@ -700,7 +702,10 @@ func (inv *invocation) newCoordinator() (*coordinatorStores, error) {
 		CacheRepository: inv.opts.cacheRepo,
 		PullThrough:     pullThrough,
 		Version:         run.Version(),
-		Images:          &coord.Registry{Sys: sys},
+		// Clients read results at the cache registry with their own settings, so they are told which of its
+		// registries the coordinator's settings mark insecure, as the chart's plain-HTTP registries are.
+		InsecureRegistries: insecureRegistries(sys, inv.opts.cacheRepo, pullThrough),
+		Images:             &coord.Registry{Sys: sys},
 		// The jobs are kept beside the build cache, on the volume that keeps it, which a prune leaves alone.
 		State: filepath.Join(inv.opts.cacheDir, "coordinator"),
 		Warn:  inv.warn,
@@ -710,6 +715,29 @@ func (inv *invocation) newCoordinator() (*coordinatorStores, error) {
 		return nil, fmt.Errorf("--cache-dir %s: %w", inv.opts.cacheDir, err)
 	}
 	return &coordinatorStores{Coordinator: c, directory: directory, content: directory}, nil
+}
+
+// insecureRegistries returns the hosts of the cache repository and the pull-through caches that sys reaches over
+// plain HTTP or without verifying certificates: all of them if it verifies none, and otherwise those that
+// registries.conf marks insecure.
+func insecureRegistries(sys *types.SystemContext, cacheRepo string, pullThrough map[string]string) []string {
+	var hosts []string
+	if named, err := reference.ParseNormalizedNamed(cacheRepo); cacheRepo != "" && err == nil {
+		hosts = append(hosts, reference.Domain(named))
+	}
+	for _, through := range pullThrough {
+		hosts = append(hosts, through)
+	}
+	slices.Sort(hosts)
+	hosts = slices.Compact(hosts)
+	return slices.DeleteFunc(hosts, func(host string) bool {
+		if sys.DockerInsecureSkipTLSVerify == types.OptionalBoolTrue {
+			return false
+		}
+		// An error reading registries.conf leaves the host secure; containers/image reports it on first use.
+		reg, err := sysregistriesv2.FindRegistry(sys, host)
+		return err != nil || reg == nil || !reg.Insecure
+	})
 }
 
 // checkRegistryHost checks that host names a registry as an image reference would: with a dot or a port, or as
@@ -839,7 +867,7 @@ func (inv *invocation) capabilities(ex api.Executor) (imgspecv1.Platform, error)
 	if err != nil {
 		return imgspecv1.Platform{}, err
 	}
-	inv.grace, inv.generation = caps.GracePeriod, caps.Generation
+	inv.grace, inv.generation, inv.insecure = caps.GracePeriod, caps.Generation, caps.InsecureRegistries
 	if !slices.Contains(caps.GraphVersions, graph.Version) {
 		who := "the executor"
 		if inv.opts.coordinator != "" {
@@ -1059,7 +1087,7 @@ func (inv *invocation) buildImage(target string, dest destination) error {
 			var img finish.Image
 			located := false
 			if inv.opts.coordinator != "" {
-				img, located, err = finish.FromLocations(res)
+				img, located, err = finish.FromLocations(res, inv.insecure)
 			}
 			if err == nil && !located {
 				var exp api.Exported

@@ -77,7 +77,8 @@ func TestRemote_BuildsOnTheCoordinator(t *testing.T) {
 }
 
 // TestRemote_BuildsOnWorkers specifies that a coordinator without --local builds on the workers that register with
-// it, which push the layers they build to its cache repository, from which a command reads what it sends, and
+// it, which push the layers they build to its cache repository, from which a command reads what it sends,
+// over plain HTTP if the coordinator's registries.conf marks it insecure, whatever --tls-verify says, and
 // pushes, from the client or, with the worker's own settings, from the worker.
 func TestRemote_BuildsOnWorkers(t *testing.T) {
 	t.Run("A build on a coordinator runs on its worker, and a second build reuses what it made", func(t *testing.T) {
@@ -116,6 +117,22 @@ func TestRemote_BuildsOnWorkers(t *testing.T) {
 			w.WhenISave("base", onTheCoordinator("<coordinator>"))
 			w.ThenItSucceeds()
 			w.ThenTheImageIs("base", thisPlatform())
+		})
+
+	t.Run("A save given --tls-verify reads the cache repository over plain HTTP, as the coordinator does",
+		func(t *testing.T) {
+			w := newBuildingWorld(t)
+			w.GivenARegistry()
+			w.GivenACoordinatorWithAWorker()
+			w.GivenTheBuildFileDeclares(`
+				glob(name="src", include=["hello.txt"])
+				layer(name="app", base="scratch", steps=[add("src", "/data")])
+			`)
+			hello := testenv.NewNonce()
+			w.GivenTheProjectHolds(files{"hello.txt": hello})
+			w.WhenISave("app", onTheCoordinator("<coordinator>"), withTLSVerification())
+			w.ThenItSucceeds()
+			w.ThenTheImageHolds(under("/data"), files{"/data/hello.txt": hello})
 		})
 
 	for _, example := range []struct {

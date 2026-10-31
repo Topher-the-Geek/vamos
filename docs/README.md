@@ -27,8 +27,9 @@ and the images come back to the client from a cache registry that the workers pu
 Run a coordinator only on a trusted network: it has no authentication, so anyone who can reach it can build on it
 and read its cache, and anyone who can reach a pull-through cache reads what its upstream credentials can.
 The client must reach the coordinator, the cache registry and, for images that are plain `pull()`s, the pull-through
-cache, with its own registry credentials; `--tls-verify=false` or a `registries.conf` entry allows a registry that
-speaks plain HTTP.
+cache, with its own registry credentials.
+A registry that the coordinator's `registries.conf` marks insecure, as the Helm chart's are, the client reads over
+plain HTTP too; for another, `--tls-verify=false` or a `registries.conf` entry allows one that speaks plain HTTP.
 A build runs its commands on the platform the coordinator's workers have; see
 [platforms](reference/configuration.md#platforms) for how that platform is chosen and what happens when the image
 being built is for another one.

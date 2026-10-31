@@ -227,9 +227,11 @@ func writeIndexJSON(dir string, desc imgspecv1.Descriptor, ref string) error {
 type IndexMember struct {
 	Platform imgspecv1.Platform
 	Source   types.ImageReference
+	// SourceCtx, if set, are the settings to read Source with, in place of LayoutIndex's.
+	SourceCtx *types.SystemContext
 }
 
-// LayoutIndex copies each member's image, read with the settings sys, into the OCI layout in dir, and makes an index
+// LayoutIndex copies each member's image, read with the settings sys or its own, into the OCI layout in dir, and makes an index
 // listing each with its platform, in order, which the layout's index.json names as "index", and returns a reference
 // to it and the index's bytes.
 // containers/image copies an index, and its images, only from a source that has one, which this makes.
@@ -243,8 +245,12 @@ func LayoutIndex(
 		if err != nil {
 			return nil, nil, err
 		}
+		sourceCtx := sys
+		if m.SourceCtx != nil {
+			sourceCtx = m.SourceCtx
+		}
 		written, err := Image(ctx, policyContext, layoutRef, m.Source, &imagecopy.Options{
-			SourceCtx:             sys,
+			SourceCtx:             sourceCtx,
 			ForceManifestMIMEType: imgspecv1.MediaTypeImageManifest,
 		})
 		if err != nil {

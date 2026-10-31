@@ -90,6 +90,11 @@ type Capabilities struct {
 	// generation. Zero for an executor that doesn't fence, as the local one, whose lock covers a build from capture
 	// to finish.
 	Generation uint64 `json:"generation,omitempty"`
+	// InsecureRegistries are the hosts, "host:port", of registries that its results' locations may name and that it
+	// reaches over plain HTTP, or without verifying certificates, as a coordinator's cache registry may be:
+	// a client reads a result's image there likewise, and only there, so that it needs no registry settings
+	// of its own for them. An executor whose results name no registry gives none.
+	InsecureRegistries []string `json:"insecure_registries,omitempty"`
 }
 
 // Offers reports whether the executor offers platform as an execution platform.
