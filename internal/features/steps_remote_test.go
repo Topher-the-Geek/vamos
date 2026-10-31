@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"net/http/httputil"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -101,7 +104,7 @@ func (w *world) platform(text string) imgspecv1.Platform {
 func (w *world) ThenTheGraphIsConfiguredFor(platform string) {
 	w.t.Helper()
 	if w.graph == nil {
-		w.t.Fatal("no When step showed the graph")
+		w.t.Fatal(w.noGraph())
 	}
 	if w.graph.ExecPlatform != platform {
 		w.t.Errorf("the graph is configured for %s, want %s", w.graph.ExecPlatform, platform)
@@ -109,21 +112,14 @@ func (w *world) ThenTheGraphIsConfiguredFor(platform string) {
 }
 
 // startCoordinator serves handler, at <coordinator>, until the scenario ends, counting the requests it is sent and
-// the jobs it is given, and telling watching, if it has room, when a command watches a job.
+// the jobs it is given.
 func (w *world) startCoordinator(handler http.Handler) {
 	w.t.Helper()
 	w.hasNoCoordinator()
-	w.watching = make(chan struct{}, 1)
 	w.coordinatorServer = httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		w.served.Add(1)
 		if r.Method == http.MethodPost && r.URL.Path == "/v1/jobs" { // remote's pathJobs
 			w.jobs.Add(1)
-		}
-		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/events") {
-			select {
-			case w.watching <- struct{}{}:
-			default:
-			}
 		}
 		handler.ServeHTTP(rw, r)
 	}))
@@ -182,6 +178,8 @@ func (w *world) hasNoCoordinator() {
 
 // front makes <coordinator> a front for the coordinator that served started, once it says where it listens, so that
 // steps count what is sent to it, as for every coordinator, and returns the URL it listens at itself.
+// It tells watching, if it has room, once it has sent the coordinator a command's watch of a job: not as the watch
+// is answered, since a job may send no event, and so no answer, until a keep-alive many seconds later.
 func (w *world) front(served *server) string {
 	w.t.Helper()
 	address := "http://" + served.waitFor(w.t, "Coordinating builds at ")
@@ -191,6 +189,24 @@ func (w *world) front(served *server) string {
 	}
 	proxy := httputil.NewSingleHostReverseProxy(backend)
 	proxy.FlushInterval = -1 // so that events stream
+	w.watching = make(chan struct{}, 1)
+	direct := proxy.Director
+	proxy.Director = func(r *http.Request) {
+		direct(r)
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/events") {
+			*r = *r.WithContext(httptrace.WithClientTrace(r.Context(), &httptrace.ClientTrace{
+				WroteRequest: func(info httptrace.WroteRequestInfo) {
+					if info.Err != nil { // the coordinator has no watch, and the command fails to reach it
+						return
+					}
+					select {
+					case w.watching <- struct{}{}:
+					default:
+					}
+				},
+			}))
+		}
+	}
 	w.startCoordinator(proxy)
 	return address
 }
@@ -238,28 +254,8 @@ func (w *world) GivenACoordinatorWithAWorker(args ...string) {
 	address := w.front(coordinator)
 	// The worker reaches the coordinator itself, so that what it sends isn't counted as a command's.
 	registered = w.serve(ctx, &workerStores.Options, "worker", "--coordinator", address, "--capacity", "2")
-	client, err := remote.NewClient(address)
-	if err != nil {
-		w.t.Fatal(err)
-	}
-	defer client.Close()
-	for start := time.Now(); ; time.Sleep(50 * time.Millisecond) {
-		caps, err := client.Capabilities(w.t.Context())
-		if err != nil {
-			w.t.Fatal(err)
-		}
-		if len(caps.Platforms) > 0 {
-			return
-		}
-		select {
-		case <-registered.ended:
-			w.t.Fatalf("the worker ended with %v before it registered\n%s", registered.err, registered.output())
-		default:
-		}
-		if time.Since(start) > 20*time.Second {
-			w.t.Fatalf("the worker never registered\n%s", registered.output())
-		}
-	}
+	// As the worker says, rather than as the coordinator's platforms do, which --offer gives before any registers.
+	registered.waitFor(w.t, "worker: registered as ", coordinator)
 }
 
 // allAtPlaceholders returns args, each with placeholders replaced as atPlaceholders says.
@@ -288,6 +284,7 @@ func (w *world) ThenTheCacheRepositoryHoldsALayer() {
 
 // server is a vamos command that serves, run by serve, until its context ends.
 type server struct {
+	name  string // the command, such as "vamos worker", for a failure's message
 	mu    sync.Mutex
 	out   bytes.Buffer
 	ended chan struct{} // closed once it has ended, with err
@@ -307,7 +304,7 @@ func (s *server) wait(t *testing.T, d time.Duration) error {
 	case <-s.ended:
 		return s.err
 	case <-time.After(d):
-		t.Fatalf("vamos didn't end within %s\n%s", d, s.output())
+		t.Fatalf("%s didn't end within %s\n%s", s.name, d, s.output())
 		return nil
 	}
 }
@@ -320,30 +317,64 @@ func (s *server) output() string {
 }
 
 // waitFor waits until the server prints a line that starts with prefix, and returns the rest of the line,
-// failing the test if the server ends first, or prints no such line within twenty seconds.
-func (s *server) waitFor(t *testing.T, prefix string) string {
+// failing the test if the server, or any of others that it needs, ends first, or it prints no such line within
+// twenty seconds.
+func (s *server) waitFor(t *testing.T, prefix string, others ...*server) string {
 	t.Helper()
-	for start := time.Now(); time.Since(start) < 20*time.Second; time.Sleep(20 * time.Millisecond) {
-		lines := strings.Split(s.output(), "\n")
-		for _, line := range lines[:len(lines)-1] { // whole lines only, as one may be written in parts
-			if rest, ok := strings.CutPrefix(line, prefix); ok {
-				return strings.TrimSpace(rest)
+	needed := append([]*server{s}, others...)
+	for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		late := time.Now().After(deadline)
+		ended := slices.IndexFunc(needed, func(n *server) bool {
+			select {
+			case <-n.ended:
+				return true
+			default:
+				return false
 			}
+		})
+		// Read after seeing an end, or the deadline, so that a line printed just before it counts.
+		if rest, ok := s.printed(prefix); ok {
+			return rest
 		}
-		select {
-		case <-s.ended:
-			t.Fatalf("vamos ended with %v before it printed %q\n%s", s.err, prefix, s.output())
-		default:
+		if ended >= 0 {
+			t.Fatalf("%s ended with %v before %s printed %q\n%s", needed[ended].name, needed[ended].err, s.name,
+				prefix, outputsOf(needed))
+		}
+		if late {
+			t.Fatalf("%s printed no %q\n%s", s.name, prefix, outputsOf(needed))
 		}
 	}
-	t.Fatalf("vamos printed no %q\n%s", prefix, s.output())
-	return ""
 }
 
-// serve runs the vamos command line args, which reads no project, on the stores that store gives, until ctx ends.
+// printed returns the rest of the first whole line that the server has printed that starts with prefix, and whether
+// it has printed one.
+func (s *server) printed(prefix string) (string, bool) {
+	lines := strings.Split(s.output(), "\n")
+	for _, line := range lines[:len(lines)-1] { // whole lines only, as one may be written in parts
+		if rest, ok := strings.CutPrefix(line, prefix); ok {
+			return strings.TrimSpace(rest), true
+		}
+	}
+	return "", false
+}
+
+// outputsOf shows what each of servers has printed, for a failure's message.
+func outputsOf(servers []*server) string {
+	var b strings.Builder
+	for _, s := range servers {
+		fmt.Fprintf(&b, "%s printed:\n%s\n", s.name, s.output())
+	}
+	return b.String()
+}
+
+// serve runs the vamos command line args, which reads no project, on the stores that store gives, until ctx ends,
+// stopping the scenario if args is empty.
 func (w *world) serve(ctx context.Context, store *storage.StoreOptions, args ...string) *server {
 	w.t.Helper()
-	s := &server{ended: make(chan struct{})}
+	if len(args) == 0 {
+		w.t.Fatal("serve runs a command that serves, but was given no command line")
+	}
+	s := &server{name: "vamos " + args[0], ended: make(chan struct{})}
 	cmd := cli.NewRootCommand(cli.Config{Fs: afero.NewMemMapFs(), Store: store}) // which reads no project
 	cmd.SetOut(s)
 	cmd.SetErr(s)
@@ -389,21 +420,27 @@ func (w *world) GivenALocalCoordinator() {
 // WhenIInterruptTheCoordinatorWhileIBuild builds target on the coordinator of GivenALocalCoordinator and, once the
 // build watches its job there, interrupts the coordinator, as Ctrl-C does, and once it has ended, closes
 // <coordinator>, so that whatever the build sends from then finds no coordinator, as when one has ended.
-// The build is the last command, for Then steps to check.
+// The build is the last command, for Then steps to check. It stops the scenario if the build ended before the
+// interrupt, or if the build or the coordinator takes a minute where the step waits for it.
 func (w *world) WhenIInterruptTheCoordinatorWhileIBuild(target string) {
 	w.t.Helper()
 	if w.local == nil {
 		w.t.Fatal("no Given step started a local coordinator")
 	}
 	// Alongside the build, which runs as any command does, and which this touches nothing of until it has ended.
-	var failure string
-	interrupted := make(chan struct{})
+	select {
+	case <-w.watching: // told of a watch by an earlier command, not this build's
+	default:
+	}
+	var failures []string
+	built, interrupted := make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(interrupted)
 		select {
 		case <-w.watching:
+		case <-built: // which the interrupt then follows, as the check below sees
 		case <-time.After(time.Minute):
-			failure = "the build didn't watch its job within a minute"
+			failures = append(failures, "the build didn't watch its job within a minute")
 		}
 		w.interruptedAt = time.Now()
 		w.interruptLocal()
@@ -411,15 +448,28 @@ func (w *world) WhenIInterruptTheCoordinatorWhileIBuild(target string) {
 		case <-w.local.ended:
 			w.localErr, w.localTook = w.local.err, time.Since(w.interruptedAt)
 		case <-time.After(time.Minute):
-			failure = "the coordinator didn't end within a minute of its interrupt"
+			failures = append(failures, "the coordinator didn't end within a minute of its interrupt")
 		}
 		w.coordinatorServer.Close()
 	}()
-	w.WhenIBuild(target, onTheCoordinator("<coordinator>"))
-	<-interrupted
-	w.buildTook = time.Since(w.interruptedAt)
-	if failure != "" {
-		w.t.Fatalf("%s\n%s\n%s", failure, w.outputs(), w.local.output())
+	func() {
+		returned := false
+		defer func() { // even if the build stops the scenario, so that nothing is left changing it
+			close(built)
+			<-interrupted
+			if !returned && len(failures) > 0 { // what the build's failure would otherwise hide
+				w.t.Errorf("%s\n%s\n%s", strings.Join(failures, "; "), w.outputs(), w.local.output())
+			}
+		}()
+		w.WhenIBuild(target, onTheCoordinator("<coordinator>"))
+		returned = true
+	}()
+	w.buildTook = w.endedAt.Sub(w.interruptedAt) // not counting the wait for the coordinator to end
+	if w.buildTook < 0 {
+		failures = append(failures, "the build ended before its coordinator was interrupted")
+	}
+	if len(failures) > 0 {
+		w.t.Fatalf("%s\n%s\n%s", strings.Join(failures, "; "), w.outputs(), w.local.output())
 	}
 }
 

@@ -2,6 +2,7 @@ package features
 
 import (
 	"cmp"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -44,6 +45,7 @@ type commandLine struct {
 	project bool     // whether name is relative to the directory that commands run in, in the project, instead
 	sentBy  string   // the option that gave name
 	tlsBy   string   // the option that gave --tls-verify, if one has
+	traceBy string   // the option that gave --trace, if one has
 	flags   []string
 }
 
@@ -424,13 +426,15 @@ func (w *world) WhenIBuild(target string, options ...option) {
 }
 
 // WhenIShowTheGraph shows the graph that target configures, which the scenario keeps, for Then steps that compare
-// what other commands do with it.
+// what other commands do with it, or forgets the one shown earlier if the command fails.
 func (w *world) WhenIShowTheGraph(target string, options ...option) {
 	w.t.Helper()
+	w.graph, w.graphErr = nil, nil
 	c := w.apply("graph", options)
 	w.sendsNothing("WhenIShowTheGraph")
 	w.run(append([]string{"graph", target}, c.flags...)...)
 	if w.err != nil {
+		w.graphErr = w.err
 		return
 	}
 	g, err := graph.Decode([]byte(w.stdout))
@@ -438,6 +442,14 @@ func (w *world) WhenIShowTheGraph(target string, options ...option) {
 		w.t.Fatalf("reading the graph: %v", err)
 	}
 	w.graph = g
+}
+
+// noGraph says why the scenario has no graph that WhenIShowTheGraph showed, for a step that needs one.
+func (w *world) noGraph() string {
+	if w.graphErr != nil {
+		return fmt.Sprintf("no graph was shown, as the graph command failed: %v", w.graphErr)
+	}
+	return "no When step showed the graph"
 }
 
 // WhenIRun runs vamos with args as they are, after -C, for a command line that the other When steps don't give:

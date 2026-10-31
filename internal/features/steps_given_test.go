@@ -505,12 +505,8 @@ func (w *world) GivenStoresOfTheScenariosOwn() {
 		w.t.Fatal("a command has run already, on the suite's stores")
 	}
 	w.stores, w.ownStores = testenv.PrivateStores(w.t), true
-	if w.before != nil {
-		before, err := w.stores.UnnamedImages()
-		if err != nil {
-			w.t.Fatal(err)
-		}
-		w.before = before
+	if w.before != nil { // as GivenBuildahCanBuildHere noted the suite's
+		w.noteWhatTheStoresHold()
 	}
 }
 

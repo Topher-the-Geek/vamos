@@ -30,6 +30,7 @@ import (
 // Every command takes it.
 func traced() option {
 	return option{"traced", everyCommand, func(w *world, c *commandLine) {
+		c.traceWith(w, "traced")
 		w.traceTo = filepath.Join(w.t.TempDir(), "trace.json")
 		c.flags = append(c.flags, "--trace", w.traceTo)
 	}}
@@ -39,9 +40,19 @@ func traced() option {
 // command sends to, and <outside> for the folder of GivenAFileOutsideTheProjectHolds: for a path that is a mistake.
 // Every command takes it. The path is given once the When step has made the destination, as the command runs.
 func tracedTo(path string) option {
-	return option{"tracedTo", everyCommand, func(w *world, _ *commandLine) {
+	return option{"tracedTo", everyCommand, func(w *world, c *commandLine) {
+		c.traceWith(w, "tracedTo")
 		w.traceAt = path
 	}}
+}
+
+// traceWith records that the option by gives --trace, failing the scenario if another option has already.
+func (c *commandLine) traceWith(w *world, by string) {
+	w.t.Helper()
+	if c.traceBy != "" {
+		w.t.Fatalf("both %s() and %s() give --trace", c.traceBy, by)
+	}
+	c.traceBy = by
 }
 
 // theTrace returns the trace that the last command wrote, failing the scenario if it was given no traced() option,
@@ -213,7 +224,7 @@ func (w *world) ThenTheTraceSpanSaysAtLeast(process, name string, want traceArgs
 func (w *world) ThenTheTraceGlobHasTheTreeTheGraphShows(glob string) {
 	w.t.Helper()
 	if w.graph == nil {
-		w.t.Fatal("no When step showed the graph")
+		w.t.Fatal(w.noGraph())
 	}
 	var tree string
 	for _, n := range w.graph.Nodes {

@@ -22,7 +22,6 @@ import (
 	"github.com/google/go-containerregistry/pkg/authn"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/spf13/afero"
-	"go.podman.io/storage"
 )
 
 // The steps are split by subject, in files that sort together:
@@ -70,7 +69,7 @@ type world struct {
 	jobs              atomic.Int64       // the jobs that the scenario's coordinator was given
 	served            atomic.Int64       // the requests that the scenario's coordinator was sent
 	coordinatorServer *httptest.Server   // that serves <coordinator>, counting what it is sent
-	watching          chan struct{}      // told when a command watches a job on <coordinator>, if it has room
+	watching          chan struct{}      // told, if it has room, once front sends on a command's watch of a job
 	interruptedAt     time.Time          // when WhenIInterruptTheCoordinatorWhileIBuild interrupted the coordinator
 	buildTook         time.Duration      // how long after that the build ended
 	local             *server            // the coordinator that GivenALocalCoordinator started
@@ -111,11 +110,13 @@ type world struct {
 	printedCue   bool              // whether the last command printed what it was interrupted on, before any deadline
 	containers   map[string]bool   // the containers in the store when the scenario started, if it builds
 	took         time.Duration     // how long the last command ran
+	endedAt      time.Time         // when the last command returned
 	outputClosed bool              // whether the command running's standard output fails every write
 	tried        string            // what the last command tried to print to standard output that was closed
 	tracePath    string            // where the last command wrote its trace, if traced() asked it to
 	trace        *trace            // the trace there, once a step has read it
 	graph        *graph.Graph      // the graph that WhenIShowTheGraph showed last
+	graphErr     error             // what the last WhenIShowTheGraph failed with, if it did
 	ran          bool              // whether any command has run
 	ownStores    bool              // whether the scenario's stores are its own, rather than the suite's
 	other        func()            // releases what another vamos holds of the build cache, if one does
@@ -150,25 +151,18 @@ func (w *world) GivenBuildahCanBuildHere() {
 		w.t.Fatal("GivenBuildahCanBuildHere comes before any command, so that it notes what the scenario leaves")
 	}
 	testenv.RequireBuildah(w.t)
-	err := w.stores.WithStore(func(store storage.Store) error {
-		images, err := store.Images()
-		if err != nil {
-			return err
-		}
-		w.before = map[string]bool{}
-		for _, img := range images {
-			if len(img.Names) == 0 {
-				w.before[img.ID] = true
-			}
-		}
-		containers, err := store.Containers()
-		w.containers = map[string]bool{}
-		for _, c := range containers {
-			w.containers[c.ID] = true
-		}
-		return err
-	})
-	if err != nil {
+	w.noteWhatTheStoresHold()
+}
+
+// noteWhatTheStoresHold notes the images without names and the containers in the scenario's stores, for
+// ThenNoImageIsLeftBehind and ThenTheCommandLeavesNoContainer to compare with.
+func (w *world) noteWhatTheStoresHold() {
+	w.t.Helper()
+	var err error
+	if w.before, err = w.stores.UnnamedImages(); err != nil {
+		w.t.Fatal(err)
+	}
+	if w.containers, err = w.stores.ContainerIDs(); err != nil {
 		w.t.Fatal(err)
 	}
 }
@@ -250,7 +244,8 @@ func (w *world) execute(fsys afero.Fs, args []string) {
 	}
 	start := time.Now()
 	w.err = cmd.ExecuteContext(ctx)
-	w.took = time.Since(start)
+	w.endedAt = time.Now()
+	w.took = w.endedAt.Sub(start)
 	w.askedDuring, w.jobsDuring = w.asked.Load()-asked, w.jobs.Load()-jobs
 	w.servedDuring = w.served.Load() - served
 	if w.ownStores {

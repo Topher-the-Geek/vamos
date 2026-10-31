@@ -127,7 +127,7 @@ func (w *world) fails(usage bool, wants []string) {
 	} else if !printed && usage {
 		errs = append(errs, fmt.Errorf("printed no usage for a mistake on the command line\n%s", w.outputs()))
 	}
-	if slices.ContainsFunc(sentReports, w.reported) {
+	if slices.ContainsFunc(sentReports, w.triedToReport) {
 		errs = append(errs, fmt.Errorf("reported something sent after an error\n%s", w.outputs()))
 	}
 	if err := errors.Join(errs...); err != nil {
