@@ -1,6 +1,7 @@
 # The registry settings of the coordinator and the workers, which they read as $CONTAINERS_REGISTRIES_CONF:
 # the chart's registries speak plain HTTP, which containers/image refuses unless the registry is marked insecure.
-# A client outside the cluster needs the same entries in its own registries.conf.
+# The coordinator tells clients which of its registries these mark insecure, and a client of vamos 0.1.4 or later reads
+# its results there likewise; an earlier client needs the same entries in its own registries.conf.
 apiVersion: v1
 kind: ConfigMap
 metadata:

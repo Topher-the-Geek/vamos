@@ -35,6 +35,7 @@ import (
 	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
 	"go.podman.io/image/v5/docker/reference"
+	"go.podman.io/image/v5/pkg/sysregistriesv2"
 	"go.podman.io/image/v5/types"
 	"go.podman.io/storage"
 )
@@ -117,11 +118,12 @@ type invocation struct {
 	ctx            context.Context
 	stdout, stderr io.Writer
 	opts           options
-	command        string        // as the trace names it: "vamos build app"
-	session        *traceSession // of the trace, if --trace is given, once started
-	holds          []*hold       // the builds held open on the executor until it is closed
-	grace          time.Duration // the executor's grace period, from its capabilities
-	generation     uint64        // the executor's cache generation, from its capabilities, read before capture
+	command        string               // as the trace names it: "vamos build app"
+	session        *traceSession        // of the trace, if --trace is given, once started
+	holds          []*hold              // the builds held open on the executor until it is closed
+	grace          time.Duration        // the executor's grace period, from its capabilities
+	generation     uint64               // the executor's cache generation, from its capabilities, read before capture
+	registries     []api.RegistryPolicy // how the executor reaches its results' registries, from its capabilities
 }
 
 // hold keeps a build open on its executor while the command delivers its result: a watch past the terminal
@@ -700,7 +702,10 @@ func (inv *invocation) newCoordinator() (*coordinatorStores, error) {
 		CacheRepository: inv.opts.cacheRepo,
 		PullThrough:     pullThrough,
 		Version:         run.Version(),
-		Images:          &coord.Registry{Sys: sys},
+		// Clients read results at the cache registry with their own settings, so they are told how the
+		// coordinator's settings reach its registries, which mark the chart's plain-HTTP registries insecure.
+		Registries: registryPolicies(sys, inv.opts.cacheRepo, pullThrough),
+		Images:     &coord.Registry{Sys: sys},
 		// The jobs are kept beside the build cache, on the volume that keeps it, which a prune leaves alone.
 		State: filepath.Join(inv.opts.cacheDir, "coordinator"),
 		Warn:  inv.warn,
@@ -710,6 +715,55 @@ func (inv *invocation) newCoordinator() (*coordinatorStores, error) {
 		return nil, fmt.Errorf("--cache-dir %s: %w", inv.opts.cacheDir, err)
 	}
 	return &coordinatorStores{Coordinator: c, directory: directory, content: directory}, nil
+}
+
+// registryPolicies returns how sys reaches the cache repository and the pull-through caches, as policies by prefix
+// for a client to read their images by, as containers/image chooses for a reference: all of them insecure if sys
+// verifies no certificates, none if it verifies them, whatever registries.conf says, and otherwise as registries.conf
+// says for each, by its longest matching prefix, and for each prefix that registries.conf gives within one of them,
+// so that a repository's exception to its host's setting holds. It returns none if none is insecure.
+func registryPolicies(sys *types.SystemContext, cacheRepo string, pullThrough map[string]string) []api.RegistryPolicy {
+	var scopes []string
+	if named, err := reference.ParseNormalizedNamed(cacheRepo); cacheRepo != "" && err == nil {
+		scopes = append(scopes, named.Name())
+	}
+	for _, through := range pullThrough {
+		scopes = append(scopes, through)
+	}
+	slices.Sort(scopes)
+	scopes = slices.Compact(scopes)
+	var policies []api.RegistryPolicy
+	switch sys.DockerInsecureSkipTLSVerify {
+	case types.OptionalBoolTrue:
+		for _, scope := range scopes {
+			policies = append(policies, api.RegistryPolicy{Prefix: scope, Insecure: true})
+		}
+		return policies
+	case types.OptionalBoolFalse:
+		return nil
+	}
+	// An error reading registries.conf leaves every registry secure; containers/image reports it on first use.
+	registries, err := sysregistriesv2.GetRegistries(sys)
+	if err != nil {
+		return nil
+	}
+	for _, scope := range scopes {
+		reg, err := sysregistriesv2.FindRegistry(sys, scope)
+		if err != nil {
+			return nil
+		}
+		policies = append(policies, api.RegistryPolicy{Prefix: scope, Insecure: reg != nil && reg.Insecure})
+		for _, r := range registries {
+			if strings.HasPrefix(r.Prefix, scope+"/") {
+				policies = append(policies, api.RegistryPolicy{Prefix: r.Prefix, Insecure: r.Insecure})
+			}
+		}
+	}
+	if !slices.ContainsFunc(policies, func(p api.RegistryPolicy) bool { return p.Insecure }) {
+		return nil
+	}
+	slices.SortFunc(policies, func(a, b api.RegistryPolicy) int { return strings.Compare(a.Prefix, b.Prefix) })
+	return slices.CompactFunc(policies, func(a, b api.RegistryPolicy) bool { return a.Prefix == b.Prefix })
 }
 
 // checkRegistryHost checks that host names a registry as an image reference would: with a dot or a port, or as
@@ -839,7 +893,7 @@ func (inv *invocation) capabilities(ex api.Executor) (imgspecv1.Platform, error)
 	if err != nil {
 		return imgspecv1.Platform{}, err
 	}
-	inv.grace, inv.generation = caps.GracePeriod, caps.Generation
+	inv.grace, inv.generation, inv.registries = caps.GracePeriod, caps.Generation, caps.Registries
 	if !slices.Contains(caps.GraphVersions, graph.Version) {
 		who := "the executor"
 		if inv.opts.coordinator != "" {
@@ -1059,7 +1113,7 @@ func (inv *invocation) buildImage(target string, dest destination) error {
 			var img finish.Image
 			located := false
 			if inv.opts.coordinator != "" {
-				img, located, err = finish.FromLocations(res)
+				img, located, err = finish.FromLocations(res, inv.registries)
 			}
 			if err == nil && !located {
 				var exp api.Exported

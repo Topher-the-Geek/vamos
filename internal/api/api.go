@@ -90,6 +90,20 @@ type Capabilities struct {
 	// generation. Zero for an executor that doesn't fence, as the local one, whose lock covers a build from capture
 	// to finish.
 	Generation uint64 `json:"generation,omitempty"`
+	// Registries are how the executor reaches the registries that its results' locations may name, by repository
+	// prefix, as registries.conf gives them: a client reads a result's image as the longest prefix matching its
+	// repository says, over plain HTTP, or without verifying certificates, if that one is insecure, as a coordinator's
+	// cache registry may be, so that it needs no registry settings of its own for them; and otherwise, or with no
+	// prefix matching, with its own settings. An executor whose results name no registry gives none.
+	Registries []RegistryPolicy `json:"registries,omitempty"`
+}
+
+// RegistryPolicy is how an executor reaches the repositories under a prefix: "host[:port]" or
+// "host[:port]/repository", which names the repository and those whose names continue it past a "/".
+type RegistryPolicy struct {
+	Prefix string `json:"prefix"`
+	// Insecure reaches them over plain HTTP, or without verifying certificates.
+	Insecure bool `json:"insecure,omitempty"`
 }
 
 // Offers reports whether the executor offers platform as an execution platform.

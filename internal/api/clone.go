@@ -26,6 +26,7 @@ func (c Capabilities) Clone() Capabilities {
 		c.ExecPlatform = &p
 	}
 	c.GraphVersions = slices.Clone(c.GraphVersions)
+	c.Registries = slices.Clone(c.Registries)
 	return c
 }
 

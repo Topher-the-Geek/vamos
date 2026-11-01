@@ -33,6 +33,12 @@ the services get the same settings as an inline compose config, and a client in 
 executor's, so `--tls-verify=false` isn't needed besides.
 The client needs them to deliver: `load` and `save` read built images from `registry:5000` and pulled bases from
 `hub-proxy:5000`, as the results locate them, through [finish](../../internal/finish/doc.go)'s `Image`.
+A coordinator also gives, in its capabilities' `Registries`, how its own settings reach its cache repository and
+pull-through caches, by repository prefix as `registries.conf` matches them, so that a repository's exception to its
+host's entry holds, and as its own `--tls-verify` says when given.
+The client reads a result's image over plain HTTP where the longest matching prefix is insecure, whatever its own
+settings say, but only as a source, so that a client given only `VAMOS_COORDINATOR` delivers from the chart's
+registries, while `--tls-verify` still governs its destination.
 
 ```sh
 docker compose -f remote/compose.yaml up -d --build --wait  # the project is named "remote"

@@ -52,6 +52,9 @@ type Config struct {
 	CacheRepository string
 	// PullThrough maps each upstream registry to the pull-through cache that mirrors it, by host.
 	PullThrough map[string]string
+	// Registries are how the coordinator's registry settings reach the cache repository and the pull-through
+	// caches, for capabilities.
+	Registries []api.RegistryPolicy
 	// Version is the vamos version, for capabilities.
 	Version string
 	// Isolation is how workers run commands, for capabilities.
@@ -351,6 +354,7 @@ func (c *Coordinator) Capabilities(ctx context.Context) (api.Capabilities, error
 		Instance:      c.instance,
 		GracePeriod:   c.cfg.Grace,
 		Generation:    generation,
+		Registries:    c.cfg.Registries,
 	}.Clone(), nil
 }
 
