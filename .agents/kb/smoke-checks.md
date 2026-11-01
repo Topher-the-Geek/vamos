@@ -114,8 +114,7 @@ the tests already push to a real (in-process) registry, from the executor and fr
 # Expect an "Index built!" line for each tag of strawberry-ui and of strawberry-backend,
 # the client's naming what the executor's did, and then the tags 1.0, 1.1 and latest in each repository.
 # The backend's other platform builds under emulation, through the host's binfmt_misc handlers,
-# which the devcontainer sees once it mounts them.
-mountpoint -q /proc/sys/fs/binfmt_misc || mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc
+# so the host needs an emulator for it, as development.md says.
 C=$(docker run -d --rm registry:3) \
   && R=$(docker inspect "$C" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'):5000 \
   && printf '[[registry]]\nlocation = "%s"\ninsecure = true\n' "$R" > "$TMP/registries.conf" \

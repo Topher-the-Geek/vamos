@@ -175,6 +175,10 @@ and mount the Docker socket if you use `vamos load`:
 
 The named volume also keeps the build cache when the devcontainer is rebuilt.
 Run vamos as root, with `sudo` if your devcontainer's user is not root.
+To run commands for another architecture, as an image for another platform may,
+the Docker host needs emulators registered; the devcontainer itself needs nothing more.
+Docker Desktop registers them itself;
+on a Linux host, register them after each boot with `docker run --privileged --rm tonistiigi/binfmt --install all`.
 Each requirement has a recognizable failure:
 
 | Requirement | Provides | Without it |
@@ -184,6 +188,7 @@ Each requirement has a recognizable failure:
 | `netavark` | Networking for `run` steps | `could not find "netavark"` on the first `run` |
 | `BUILDAH_ISOLATION=chroot` | `run` steps without an OCI runtime | `did not get container create message from subprocess` on the first `run` |
 | A volume for `/var/lib/containers` | Overlay storage, which cannot nest in the container's own overlay filesystem | `Failed to built-in GetDriver graph btrfs` at startup, then slow `vfs` storage |
+| Emulators registered on the Docker host | `run` steps for another architecture | `exec format error`, which vamos explains as no emulator being registered |
 
 ## 3. Open the example
 

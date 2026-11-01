@@ -4,6 +4,12 @@ Work inside the [devcontainer](../../.devcontainer/devcontainer.json).
 Image builds need root, a privileged container, `BUILDAH_ISOLATION=chroot`
 and a volume for `/var/lib/containers`; no OCI runtime is installed.
 The Docker socket is mounted for destination checks.
+`run` steps for another architecture use the emulators the Docker host's kernel has registered,
+with nothing to set up in the devcontainer, as [container-builds.md](container-builds.md) explains.
+Docker Desktop registers them itself;
+a Linux host without them needs them registered on the host,
+such as with `docker run --privileged --rm tonistiigi/binfmt --install all`,
+which lasts until the host reboots.
 See [testing.md](testing.md) for required validation.
 
 Use gofmt and keep lines within 120 columns, counting a tab as four.

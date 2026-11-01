@@ -51,6 +51,23 @@ On Apple silicon, Rosetta for amd64 is an option tied to the selected VM backend
 see [Desktop settings](https://docs.docker.com/desktop/settings-and-maintenance/settings/#general).
 The buildah error-reporting limitation is documented beside `emulatorHint` in [runner.go](../../internal/run/runner.go).
 
+The handlers belong to the kernel, not to a container, and need no setup inside one.
+Docker Desktop's, and those `tonistiigi/binfmt` registers, have the `F` flag,
+so their interpreter is opened when they are registered and runs a foreign program in any container,
+whether or not `/proc/sys/fs/binfmt_misc` is mounted there.
+Mounting that filesystem only shows the handlers' control files.
+Only the worker reads them, in `emulatedPlatforms` in [worker](../../internal/worker/doc.go),
+to report the qemu emulators it offers,
+and the coordinator gives emulated work only to a worker that reports the emulator,
+in `pool.suits` in [coord](../../internal/coord/doc.go).
+So a worker in a container where it isn't mounted could run emulated work, but reports no emulators and gets none;
+the worker containers in [remote/](../../remote/) don't mount it yet.
+An empty or unmounted `/proc/sys/fs/binfmt_misc`, as in the devcontainer, does not mean that nothing emulates,
+and mounting it fixes no `exec format error`:
+to learn whether a platform is emulated, run one of its programs, as the scenarios behind `GivenThisMachineEmulates` do.
+A handler without `F` opens its interpreter by path in the container that runs the program,
+so that interpreter must exist there.
+
 Delivery is a separate commit from caching a successful target.
 A failed build must publish no requested file output, while previously successful dependency results remain reusable.
 For file destinations, inspect `Save`, `Export`, `install`
