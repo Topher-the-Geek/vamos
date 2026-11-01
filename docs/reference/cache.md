@@ -30,7 +30,8 @@ but dependencies that succeeded before its failure remain cached.
 
 Cached results are reused even when rerunning would observe a changed external service,
 such as a package repository with newer dependencies.
-`push`, `load`, `save`, and `export` do not force cached targets to run again.
+`push`, `publish`, `load`, `save`, and `export` do not force cached targets to run again:
+publishing again pushes again, while a publication's checks and images are reused.
 
 To refresh a target explicitly:
 
@@ -92,9 +93,9 @@ The workers' own container stores only speed things up; a cache hit is checked a
 be replaced at any time.
 `vamos prune --coordinator URL` empties the coordinator's results, files and the cache repository's tags, keeping
 recorded tag resolutions and the pull-through cache's contents.
-It is refused while any build or push is open, including a finished build whose client is still delivering it,
-while attempts are still ending on the workers, and for one lease after the coordinator started; run it again
-when they have finished.
+It is refused while any build, push or publication is open,
+including a finished build whose client is still delivering it, while attempts are still ending on the workers,
+and for one lease after the coordinator started; run it again when they have finished.
 A build whose sources were captured before a prune is refused when submitted, with a message to run it again.
 
 ## Timestamps
@@ -125,7 +126,8 @@ Exported task files receive the task's timestamp.
 
 ## Traces
 
-`--trace <file.json>` is available on `build`, `push`, `load`, `save` (including its `write` alias), and `export`:
+`--trace <file.json>` is available on `build`, `push`, `publish`, `load`, `save` (including its `write` alias),
+and `export`:
 
 ```sh
 vamos build lint test app --trace build-trace.json

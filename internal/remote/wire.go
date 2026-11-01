@@ -173,18 +173,18 @@ func firstNonEmpty(strs ...string) string {
 	return ""
 }
 
-// maxJSONBody is the most bytes a JSON request or response body may have: a request, an outcome or a list of
-// blobs; a graph crosses as a blob, not here.
-const maxJSONBody = 16 << 20
+// MaxJSONBody is the most bytes a JSON request or response body may have: a request, an outcome, an assignment or a
+// list of blobs; a graph crosses as a blob, not here.
+const MaxJSONBody = 16 << 20
 
-// decodeJSON decodes r, up to maxJSONBody bytes, into v.
+// decodeJSON decodes r, up to MaxJSONBody bytes, into v.
 func decodeJSON(r io.Reader, v any) error {
-	data, err := io.ReadAll(io.LimitReader(r, maxJSONBody+1))
+	data, err := io.ReadAll(io.LimitReader(r, MaxJSONBody+1))
 	if err != nil {
 		return err
 	}
-	if int64(len(data)) > maxJSONBody {
-		return fmt.Errorf("the body holds more than %d bytes", maxJSONBody)
+	if int64(len(data)) > MaxJSONBody {
+		return fmt.Errorf("the body holds more than %d bytes", MaxJSONBody)
 	}
 	return json.Unmarshal(data, v)
 }

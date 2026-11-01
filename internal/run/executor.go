@@ -26,7 +26,6 @@ import (
 	containersconfig "go.podman.io/common/pkg/config"
 	imagecopy "go.podman.io/image/v5/copy"
 	"go.podman.io/image/v5/docker/reference"
-	"go.podman.io/image/v5/manifest"
 	"go.podman.io/image/v5/oci/layout"
 	"go.podman.io/image/v5/signature"
 	is "go.podman.io/image/v5/storage"
@@ -253,11 +252,12 @@ func vamosVersion() string {
 
 // Submit starts a job for req: a graph run, a push or an export.
 // A graph of a version it can't run, or configured for another platform, is refused before anything else;
-// so is a push to a destination that isn't a registry reference with a tag.
+// so is a push to a destination that isn't a registry reference with a tag, and a publication to repositories that
+// aren't registry repositories, or with tags that aren't tags.
 func (l *Local) Submit(ctx context.Context, req api.Request) (api.JobID, error) {
 	req = req.Clone() // the job runs after Submit returns, and the caller's request is its own again
 	kinds := 0
-	for _, set := range []bool{req.Graph != nil, req.Push != nil, req.Export != nil} {
+	for _, set := range []bool{req.Graph != nil, req.Push != nil, req.Export != nil, req.Publish != nil} {
 		if set {
 			kinds++
 		}
@@ -276,6 +276,8 @@ func (l *Local) Submit(ctx context.Context, req api.Request) (api.JobID, error) 
 			return "", err
 		}
 		return l.submitExport(*req.Export)
+	case req.Publish != nil:
+		return l.submitPublish(*req.Publish)
 	}
 	g := req.Graph
 	if !slices.Contains(graphVersions, g.Version) {
@@ -440,25 +442,7 @@ func (l *Local) push(ctx context.Context, res api.Result, dest reference.NamedTa
 	if err := l.open(); err != nil {
 		return api.Pushed{}, err
 	}
-	switch {
-	case res.Index != nil:
-		d, err := l.pushIndex(ctx, res.Index, dest)
-		return api.Pushed{Index: d}, err
-	case res.Image != "":
-		id, err := l.pushImage(ctx, res.Image, dest)
-		return api.Pushed{Image: id}, err
-	}
-	return api.Pushed{}, errors.New("the target made no image")
-}
-
-// pushImage copies the image with ID id from the container store to dest, returning the ID it has there:
-// the digest of its config, as written there, which may differ from the store's if its manifest is converted.
-func (l *Local) pushImage(ctx context.Context, id string, dest reference.NamedTagged) (string, error) {
-	src, err := l.imageReference(ctx, id)
-	if err != nil {
-		return "", err
-	}
-	return pushImageFrom(ctx, l.systemContext, src, dest)
+	return pushResult(ctx, l.store, l.systemContext, res, dest)
 }
 
 // pushImageFrom copies the image at src to dest, with the settings sys, returning the ID it has there:
@@ -470,47 +454,14 @@ func pushImageFrom(ctx context.Context, sys *types.SystemContext, src types.Imag
 		return "", err
 	}
 	defer policyContext.Destroy()
-	written, err := transfer.Push(ctx, policyContext, dest, src, sys, &imagecopy.Options{DestinationCtx: sys})
-	if err != nil {
-		return "", err
-	}
-	m, err := manifest.FromBlob(written, manifest.GuessMIMEType(written))
-	if err != nil {
-		return "", fmt.Errorf("reading the manifest written: %w", err)
-	}
-	return m.ConfigInfo().Digest.Encoded(), nil
-}
-
-// pushIndex copies the images of manifests from the container store to dest,
-// as an index listing each with its platform, in order, through a layout, and returns the index's digest there.
-func (l *Local) pushIndex(ctx context.Context, manifests []api.Manifest, dest reference.NamedTagged) (
-	_ string, err error) {
-	dir, err := os.MkdirTemp("", "vamos-index-")
-	if err != nil {
-		return "", err
-	}
-	defer func() {
-		if rerr := os.RemoveAll(dir); rerr != nil {
-			err = errors.Join(err, fmt.Errorf("removing the copied blobs: %w", rerr))
-		}
-	}()
-	policyContext, err := transfer.Policy(l.systemContext)
-	if err != nil {
-		return "", err
-	}
-	defer policyContext.Destroy()
-	src, _, err := l.layoutIndex(ctx, policyContext, dir, manifests)
-	if err != nil {
-		return "", err
-	}
-	written, err := transfer.Push(ctx, policyContext, dest, src, l.systemContext, &imagecopy.Options{
-		DestinationCtx:     l.systemContext,
-		ImageListSelection: imagecopy.CopyAllImages,
+	written, err := transfer.Push(ctx, policyContext, dest, src, sys, &imagecopy.Options{
+		SourceCtx:      sys,
+		DestinationCtx: sys,
 	})
 	if err != nil {
 		return "", err
 	}
-	return digest.FromBytes(written).String(), nil
+	return imageIDOf(written)
 }
 
 // imageReference returns the reference of the image with ID id in the container store,

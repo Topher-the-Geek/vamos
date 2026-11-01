@@ -63,12 +63,13 @@ type buildFile struct {
 // The template is made, and checked, as the BUILD file runs, unless an attribute is given by a function of ctx.
 // Then the call's arguments are kept instead, and a template is made in each configuration the target is needed in.
 type declaration struct {
-	kind      string // "glob", "pull", "layer", "task" or "index"
+	kind      string // "glob", "pull", "layer", "task", "index" or "publication"
 	pos       syntax.Position
 	file      *buildFile
 	params    []*param // that params declares, in order, which are known before any configuration
 	hasOutput bool     // a glob, or a task given source, whose files add() can name
-	static    any      // the template, if no attribute is a function: a *fileSet, *pullSpec, *targetSpec or *indexSpec
+	// the template, if no attribute is a function: a *fileSet, *pullSpec, *targetSpec, *indexSpec or *publicationSpec
+	static any
 
 	// Otherwise, the call's arguments, of which some are functions of ctx, and how to make the template.
 	fn     *starlark.Builtin
@@ -162,6 +163,21 @@ type targetSpec struct {
 // its manifests, each a pull or layer, named with the platform it is for.
 type indexSpec struct {
 	manifests []targetRef // in the order given, which the index keeps
+}
+
+// publicationSpec is a release, declared by a call to publication(): the tasks that must succeed before it publishes,
+// and the images it publishes, each a pull, layer or index, to its repository.
+// No target can use a publication, so it is never configured as a target, but only expanded into its roots.
+type publicationSpec struct {
+	checks []targetRef         // in the order given
+	images []publishedImageRef // in the dictionary's order
+}
+
+// publishedImageRef is an image that a publication publishes, and the repository it publishes it to.
+type publishedImageRef struct {
+	repository reference.Named // with no tag or digest
+	key        string          // the repository as the publication gives it, for messages
+	target     targetRef
 }
 
 // madeStep is a step made by a call to the builtin kind at pos.
@@ -531,6 +547,7 @@ func (w *workspace) predeclared() starlark.StringDict {
 		"layer":         w.declarer("layer", layerParams, w.makeLayer),
 		"task":          w.declarer("task", taskParams, w.makeTask),
 		"index":         w.declarer("index", []string{"name", "layer", "platforms?"}, w.makeIndex),
+		"publication":   w.declarer("publication", []string{"name", "images", "checks?"}, w.makePublication),
 		"add":           track(starlark.NewBuiltin("add", w.newAdd)),
 		"dep":           starlark.NewBuiltin("dep", w.newDep),
 		"arg":           starlark.NewBuiltin("arg", newArg),
@@ -748,19 +765,39 @@ func (w *workspace) makePull(
 	return name, &pullSpec{label: label(c.file.pkg, name), image: ref}, nil
 }
 
+// refUse is what a target that another names is used for, which decides the kinds it may be.
+type refUse int
+
+const (
+	useFiles     refUse = iota // an add()'s source: a glob, or a task with output
+	useImage                   // a base, or an index's manifest: a pull or layer
+	useCheck                   // a publication's check: a task
+	usePublished               // an image a publication publishes: a pull, layer or index
+)
+
 // resolve finds the target that ref, the argument param of a call to fn, names, setting ref.label:
-// a pull or layer if image is set, or else a glob or task, returning its declaration.
+// one of the kinds that use allows, returning its declaration.
 // It checks the arguments ref gives the target too.
 // As a BUILD file runs, targets of its own must be declared earlier,
 // so targets it names outside functions of ctx can't form a cycle.
+// No target can name a publication, which only the command line names.
 func (w *workspace) resolve(
-	c *evalContext, fn *starlark.Builtin, param string, ref *targetRef, image bool,
+	c *evalContext, fn *starlark.Builtin, param string, ref *targetRef, use refUse,
 ) (*declaration, error) {
-	kinds, listed, scratchHint := []string{"glob", "task"}, "globs and tasks", ""
-	if image {
-		kinds, listed, scratchHint = []string{"pull", "layer"}, "targets", `"scratch" or `
+	image := use == useImage
+	var kinds []string
+	var listed, scratchHint, want, rule string
+	switch use {
+	case useFiles:
+		kinds, listed, want = []string{"glob", "task"}, "globs and tasks", "glob() or task()"
+	case useImage:
+		kinds, listed, want, scratchHint = []string{"pull", "layer"}, "targets", "pull() or layer()", `"scratch" or `
+	case useCheck:
+		kinds, listed, want, rule = []string{"task"}, "tasks", "task()", "; a check must be a task"
+	case usePublished:
+		kinds, listed = []string{"pull", "layer", "index"}, "pulls, layers and indexes"
+		want, rule = "pull(), layer() or index()", "; a published target must be a pull, layer or index"
 	}
-	want := kinds[0] + "() or " + kinds[1] + "()"
 	from, name, err := w.lookup(c.file, ref.ref, ref.pkg)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %s %q: %w", fn.Name(), param, ref.ref, err)
@@ -778,10 +815,14 @@ func (w *workspace) resolve(
 			fn.Name(), param, ref.ref, scratchHint, want, describeNames(listed, from.namesOf(kinds...)))
 	case !ok:
 		return nil, fmt.Errorf("%s: %s %q: %w", fn.Name(), param, ref.ref, from.missing(name))
+	case d.kind == "publication":
+		return nil, fmt.Errorf("%s: %s %q is a publication(), which can't be depended on; "+
+			"%q publishes it, and %q builds what it publishes",
+			fn.Name(), param, ref.ref, "vamos publish", "vamos build")
 	case !slices.Contains(kinds, d.kind):
-		return nil, fmt.Errorf("%s: %s %q is %s %s(), not a %s",
-			fn.Name(), param, ref.ref, article(d.kind), d.kind, want)
-	case !image && !d.hasOutput:
+		return nil, fmt.Errorf("%s: %s %q is %s %s(), not %s %s%s",
+			fn.Name(), param, ref.ref, article(d.kind), d.kind, article(kinds[0]), want, rule)
+	case use == useFiles && !d.hasOutput:
 		return nil, fmt.Errorf("%s: %s %q is a task() without output; give it source and include",
 			fn.Name(), param, ref.ref)
 	}
@@ -856,7 +897,7 @@ func (w *workspace) newAdd(
 	if err != nil {
 		return nil, err
 	}
-	if _, err := w.resolve(c, fn, "source", &ref, false); err != nil {
+	if _, err := w.resolve(c, fn, "source", &ref, useFiles); err != nil {
 		return nil, err
 	}
 	if err := graph.CheckPath("dest", dest); err != nil {
@@ -883,7 +924,7 @@ func (w *workspace) makeBase(c *evalContext, fn *starlark.Builtin, base starlark
 	if err != nil {
 		return targetRef{}, err
 	}
-	_, err = w.resolve(c, fn, "base", &ref, true)
+	_, err = w.resolve(c, fn, "base", &ref, useImage)
 	return ref, err
 }
 
@@ -1004,7 +1045,7 @@ func (w *workspace) makeIndex(
 			return fmt.Errorf("%s: %s: an index's dep() can't give platform, since %s says what each "+
 				"manifest is for", fn.Name(), param, at)
 		}
-		if _, err := w.resolve(c, fn, param, &ref, true); err != nil {
+		if _, err := w.resolve(c, fn, param, &ref, useImage); err != nil {
 			return err
 		}
 		if ref.platform, err = parsePlatform(platform); err != nil {
@@ -1061,6 +1102,92 @@ func (w *workspace) makeIndex(
 	return name, s, nil
 }
 
+// makePublication makes the template of a publication(): the tasks it checks, and the images it publishes,
+// by repository, in the dictionary's order.
+func (w *workspace) makePublication(
+	c *evalContext, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple,
+) (string, any, error) {
+	var name string
+	var images *starlark.Dict
+	var checks *starlark.List
+	if err := starlark.UnpackArgs(fn.Name(), args, kwargs,
+		"name", &name,
+		"images", &images,
+		"checks?", &checks,
+	); err != nil {
+		return "", nil, err
+	}
+	s := &publicationSpec{}
+	if checks != nil {
+		for i := range checks.Len() {
+			param := fmt.Sprintf("checks[%d]", i)
+			ref, err := targetRefOf(c, fn.Name(), param, checks.Index(i))
+			if err != nil {
+				return "", nil, err
+			}
+			if _, err := w.resolve(c, fn, param, &ref, useCheck); err != nil {
+				return "", nil, err
+			}
+			s.checks = append(s.checks, ref)
+		}
+	}
+	if images.Len() == 0 {
+		return "", nil, fmt.Errorf("%s: images is empty, so it publishes no image; "+
+			"give a dict from each repository to the pull, layer or index published there", fn.Name())
+	}
+	for _, item := range images.Items() {
+		repo, ok := starlark.AsString(item[0])
+		if !ok {
+			return "", nil, fmt.Errorf("%s: images has a key of type %s, want a repository, such as %q",
+				fn.Name(), item[0].Type(), "ghcr.io/team/app")
+		}
+		repository, err := parseRepository(repo)
+		if err != nil {
+			return "", nil, fmt.Errorf("%s: images: %w", fn.Name(), err)
+		}
+		for _, other := range s.images {
+			if other.repository.Name() == repository.Name() {
+				return "", nil, fmt.Errorf("%s: images has %q twice, as %q and %q; "+
+					"a repository gets one image of a publication",
+					fn.Name(), repository.Name(), other.key, repo)
+			}
+		}
+		param := fmt.Sprintf("images[%s]", item[0])
+		ref, err := targetRefOf(c, fn.Name(), param, item[1])
+		if err != nil {
+			return "", nil, err
+		}
+		if _, err := w.resolve(c, fn, param, &ref, usePublished); err != nil {
+			return "", nil, err
+		}
+		s.images = append(s.images, publishedImageRef{repository: repository, key: repo, target: ref})
+	}
+	return name, s, nil
+}
+
+// parseRepository returns the repository that repo, a key of a publication's images, names:
+// a lowercase registry repository name, with no tag or digest, which come from publish's --tag.
+func parseRepository(repo string) (reference.Named, error) {
+	if repo == "" {
+		return nil, errors.New("a repository must not be empty")
+	}
+	// The reference's own parsing allows an uppercase registry host, which names the same registry as lowercase.
+	if repo != strings.ToLower(repo) {
+		return nil, fmt.Errorf("repository %q must be lowercase", repo)
+	}
+	named, err := reference.ParseNormalizedNamed(repo)
+	if err != nil {
+		return nil, fmt.Errorf("repository %q: %w", repo, err)
+	}
+	if _, ok := named.(reference.Tagged); ok {
+		return nil, fmt.Errorf("repository %q must not include a tag; the tag comes from --tag", repo)
+	}
+	if _, ok := named.(reference.Digested); ok {
+		return nil, fmt.Errorf("repository %q must not include a digest; publish writes the tags --tag gives", repo)
+	}
+	return named, nil
+}
+
 // target returns the label and kind of the target that ref, given on the command line,
 // names from the package of -C, loading the BUILD file that declares it.
 func (w *workspace) target(ref string) (string, string, error) {
@@ -1090,7 +1217,7 @@ func (w *workspace) buildTargets(names []string) ([]string, []string, error) {
 		}
 		if kind == "glob" {
 			return nil, nil, fmt.Errorf("%q is a glob(), whose files are read by the targets that add them; "+
-				"name a pull(), layer(), task() or index() to build", name)
+				"name a pull(), layer(), task(), index() or publication() to build", name)
 		}
 		if !slices.Contains(labels, l) {
 			labels, kinds = append(labels, l), append(kinds, kind)
@@ -1110,6 +1237,8 @@ func (w *workspace) imageTarget(name string) (string, string, error) {
 	case "glob":
 		return "", "", fmt.Errorf("%q is a glob(), whose files are read by the targets that add them, not an image; "+
 			"name a pull(), layer() or index() to send", name)
+	case "publication":
+		return "", "", publicationRefused(name)
 	case "task":
 		hint := ""
 		if w.declaration(l).hasOutput {
@@ -1139,9 +1268,31 @@ func (w *workspace) filesTarget(name string) (string, error) {
 			name)
 	case "index":
 		return "", fmt.Errorf("%q is an index(), not a task(); export writes a task's files", name)
+	case "publication":
+		return "", publicationRefused(name)
 	}
 	return "", fmt.Errorf(`%q is %s %s(), not a task(); export writes a task's files, and "vamos save" writes an image`,
 		name, article(kind), kind)
+}
+
+// publicationRefused reports that name, given to a command that sends one image or a task's files, is a publication.
+func publicationRefused(name string) error {
+	return fmt.Errorf("%q is a publication(), which publishes images to repositories; "+
+		"%q publishes it, and %q builds them",
+		name, "vamos publish "+name+" --tag ...", "vamos build "+name)
+}
+
+// publicationTarget returns the label of the publication to publish that name, given on the command line, names.
+func (w *workspace) publicationTarget(name string) (string, error) {
+	l, kind, err := w.target(name)
+	if err != nil {
+		return "", err
+	}
+	if kind != "publication" {
+		return "", fmt.Errorf("%q is %s %s(), not a publication(); publish takes a publication",
+			name, article(kind), kind)
+	}
+	return l, nil
 }
 
 // declaration returns the declaration of the target with label l, whose package is loaded.

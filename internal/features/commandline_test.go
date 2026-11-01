@@ -55,8 +55,8 @@ func TestCommandLine_UsageMistakesPrintUsage(t *testing.T) {
 	}{
 		{
 			name:   "An unknown command fails",
-			args:   []string{"publish"},
-			errors: []string{`unknown command "publish"`},
+			args:   []string{"release"},
+			errors: []string{`unknown command "release"`},
 		},
 		{
 			name:   "A misspelled command fails, naming the one meant",

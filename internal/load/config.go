@@ -1057,7 +1057,7 @@ func (cr *configurer) image(cl confLabel) error {
 		return nil
 	}
 	if idx, ok := tmpl.(*indexSpec); ok {
-		// Only the command line names an index, so it can't be in a cycle.
+		// Only the command line, or a publication it names, names an index, so it can't be in a cycle.
 		var manifests []confLabel
 		for _, ref := range idx.manifests {
 			m, err := cr.w.edge(ref, cl)

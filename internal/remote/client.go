@@ -314,16 +314,20 @@ var errRestartedSubmitting = errors.New("the coordinator restarted before it ack
 	"so the job is lost if it started; running the command again reuses what finished")
 
 // Submit asks the coordinator for the job req asks for.
-// A push whose coordinator restarted before acknowledging it may have pushed: the failure says so.
+// A push or publication whose coordinator restarted before acknowledging it may have written: the failure says so.
 func (c *Client) Submit(ctx context.Context, req api.Request) (api.JobID, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return "", err
 	}
 	restarted := errRestartedSubmitting
-	if req.Push != nil {
+	switch {
+	case req.Push != nil:
 		restarted = errors.New("the coordinator restarted before it acknowledged the push, so whether it pushed " +
 			"is unknown; check the destination, or push again")
+	case req.Publish != nil:
+		restarted = errors.New("the coordinator restarted before it acknowledged the publication, so whether its " +
+			"tags were written is unknown: they may or may not have been; publishing again finishes it")
 	}
 	return c.submit(ctx, "submitting a job", pathJobs, body, restarted)
 }

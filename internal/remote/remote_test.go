@@ -67,7 +67,7 @@ func (f *fakeExecutor) Capabilities(context.Context) (api.Capabilities, error) {
 func (f *fakeExecutor) Submit(_ context.Context, req api.Request) (api.JobID, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if req.Graph == nil && req.Push == nil {
+	if req.Graph == nil && req.Push == nil && req.Publish == nil {
 		return "", errors.New("refused: no graph")
 	}
 	f.submits++
@@ -835,7 +835,8 @@ func TestGetResumes(t *testing.T) {
 
 // TestSubmitAfterRestart checks that a submission whose acknowledgement is lost, and whose coordinator restarted
 // before the retry, isn't started again by the new instance, which can't know whether the old one accepted it:
-// the submission fails saying the coordinator restarted, and a push says that whether it pushed is unknown.
+// the submission fails saying the coordinator restarted, and a push or publication says that whether it wrote is
+// unknown.
 func TestSubmitAfterRestart(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -851,6 +852,11 @@ func TestSubmitAfterRestart(t *testing.T) {
 			name: "push",
 			req:  api.Request{Push: &api.PushRequest{}},
 			want: "whether it pushed is unknown; check the destination",
+		},
+		{
+			name: "publish",
+			req:  api.Request{Publish: &api.PublishRequest{}},
+			want: "whether its tags were written is unknown",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

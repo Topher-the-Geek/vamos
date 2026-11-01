@@ -34,8 +34,9 @@ func (stub) Release(context.Context, JobID) error                         { retu
 // a pointer into memory or an interface, other than any as a trace argument's value.
 // A path is a string, which the test can't tell from any other, so it also refuses field names that suggest one.
 func TestNoHandles(t *testing.T) {
-	values := []any{Capabilities{}, Request{}, GraphRequest{}, PushRequest{}, ExportRequest{}, Event{}, Outcome{},
-		Result{}, Manifest{}, Pushed{}, Exported{}, Pruned{}, Failure{}}
+	values := []any{Capabilities{}, Request{}, GraphRequest{}, PushRequest{}, ExportRequest{}, PublishRequest{},
+		PublishImage{}, Event{}, Outcome{}, Result{}, Manifest{}, Pushed{}, Exported{}, Pruned{}, Published{},
+		Destination{}, Failure{}}
 	seen := map[reflect.Type]bool{}
 	var problems []string
 	for _, v := range values {
@@ -198,5 +199,47 @@ func TestCapabilitiesClone(t *testing.T) {
 	}
 	if p := caps.ExecPlatform; p.Architecture != "amd64" || p.OSFeatures[0] != "win32k" {
 		t.Errorf("changing a clone's execution platform changed the original's, to %+v", *p)
+	}
+}
+
+// TestPublishClone checks that a clone of a publish request, or of a publish job's outcome, shares no image, tag
+// or destination with the original.
+func TestPublishClone(t *testing.T) {
+	req := Request{Publish: &PublishRequest{
+		Images: []PublishImage{{Result: Result{Index: []Manifest{{Image: "a"}}}, Repository: "registry/app"}},
+		Tags:   []string{"v1"},
+	}}
+	clone := req.Clone()
+	clone.Publish.Images[0].Repository = "changed"
+	clone.Publish.Images[0].Result.Index[0].Image = "changed"
+	clone.Publish.Tags[0] = "changed"
+	if p := req.Publish; p.Images[0].Repository != "registry/app" || p.Images[0].Result.Index[0].Image != "a" ||
+		p.Tags[0] != "v1" {
+		t.Errorf("changing a clone's publish request changed the original's, to %+v", *p)
+	}
+	outcome := Outcome{Published: &Published{Destinations: []Destination{{Repository: "registry/app", Tag: "v1"}}}}
+	cloned := outcome.Clone()
+	cloned.Published.Destinations[0].Tag = "changed"
+	if tag := outcome.Published.Destinations[0].Tag; tag != "v1" {
+		t.Errorf("changing a clone's destination changed the original's, to tag %q", tag)
+	}
+}
+
+// TestShortfall checks that a publication's shortfall names each destination not written, once, with why,
+// though its error names a longer tag that starts with the same one, and each that was written.
+func TestShortfall(t *testing.T) {
+	p := Published{Destinations: []Destination{
+		{Repository: "r/app", Tag: "v1", Error: "writing r/app:v1: denied"},
+		{Repository: "r/app", Tag: "v1", Error: "r/app:v10 is in the way"},
+		{Repository: "r/app", Tag: "v1", Error: "mirror.io/r/app:v1 is in the way"},
+		{Repository: "r/app", Tag: "latest", Written: true},
+	}}
+	want := "3 of 4 tags weren't written, or couldn't be read back: writing r/app:v1: denied; " +
+		"r/app:v1: r/app:v10 is in the way; r/app:v1: mirror.io/r/app:v1 is in the way; written: r/app:latest"
+	if got := p.Shortfall(); got != want {
+		t.Errorf("Shortfall = %q, want %q", got, want)
+	}
+	if got := (Published{Destinations: p.Destinations[3:]}).Shortfall(); got != "" {
+		t.Errorf("Shortfall of every tag written = %q, want none", got)
 	}
 }

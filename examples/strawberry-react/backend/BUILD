@@ -95,7 +95,11 @@ layer(
             "-r",
             "requirements_dev_lock.txt",
         ]),
-        run(["pyright", "--version"]),  # Installs Node.js, which pyright runs on
+        # pyright installs Node.js, which it runs on, through nodeenv, whose default takes the newest release,
+        # a pre-release at times, whose version nodeenv can't parse: this is an LTS release.
+        # It is a build_env, since pyright given it later installs Node.js again.
+        build_env(PYRIGHT_PYTHON_NODE_VERSION = "26.13.0"),
+        run(["pyright", "--version"]),  # Installs Node.js
     ],
 )
 

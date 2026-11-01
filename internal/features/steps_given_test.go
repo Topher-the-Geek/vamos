@@ -301,6 +301,12 @@ func (w *world) startRegistry(handler http.Handler, insecure bool) {
 			return
 		}
 		w.asked.Add(1)
+		if w.refuses(r) {
+			rw.Header().Set("Content-Type", "application/json")
+			rw.WriteHeader(http.StatusForbidden)
+			rw.Write([]byte(`{"errors": [{"code": "DENIED", "message": "writes refused"}]}`))
+			return
+		}
 		handler.ServeHTTP(rw, r)
 	}))
 	w.t.Cleanup(w.server.Close)
@@ -308,6 +314,59 @@ func (w *world) startRegistry(handler http.Handler, insecure bool) {
 	if insecure {
 		testenv.InsecureRegistry(w.t, w.registry)
 	}
+}
+
+// GivenTheRegistryRefusesWritesTo makes the scenario's registry refuse every manifest written to each of repositories,
+// "team/app" for <registry>/team/app: one uploaded by digest, and a tag; it takes their blobs.
+func (w *world) GivenTheRegistryRefusesWritesTo(repositories ...string) {
+	w.t.Helper()
+	w.refuse(repositories, false)
+}
+
+// GivenTheRegistryRefusesTagsIn makes the scenario's registry refuse every tag written to each of repositories,
+// while it takes manifests uploaded there by digest, as a registry that starts refusing writes after an upload would.
+func (w *world) GivenTheRegistryRefusesTagsIn(repositories ...string) {
+	w.t.Helper()
+	w.refuse(repositories, true)
+}
+
+// GivenTheRegistryAcceptsWritesAgain makes the scenario's registry accept what it refused.
+func (w *world) GivenTheRegistryAcceptsWritesAgain() {
+	w.t.Helper()
+	w.refusedMu.Lock()
+	defer w.refusedMu.Unlock()
+	w.refused = nil
+}
+
+// refuse makes the scenario's registry refuse what is written to repositories: tags alone, if tagsOnly.
+func (w *world) refuse(repositories []string, tagsOnly bool) {
+	w.t.Helper()
+	if w.registry == "" {
+		w.t.Fatal("no Given step started a registry to refuse writes")
+	}
+	w.refusedMu.Lock()
+	defer w.refusedMu.Unlock()
+	if w.refused == nil {
+		w.refused = map[string]bool{}
+	}
+	for _, repo := range repositories {
+		w.refused[repo] = tagsOnly
+	}
+}
+
+// refuses reports whether the scenario's registry refuses r, a write of a manifest.
+func (w *world) refuses(r *http.Request) bool {
+	if r.Method != http.MethodPut {
+		return false
+	}
+	repo, reference, ok := strings.Cut(strings.TrimPrefix(r.URL.Path, "/v2/"), "/manifests/")
+	if !ok {
+		return false
+	}
+	w.refusedMu.Lock()
+	defer w.refusedMu.Unlock()
+	tagsOnly, refused := w.refused[repo]
+	return refused && (!tagsOnly || !strings.HasPrefix(reference, "sha256:"))
 }
 
 // atRegistry returns s with each <registry> replaced by the host of the scenario's registry,

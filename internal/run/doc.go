@@ -35,7 +35,10 @@
 //
 // submitPush and submitExport in executor.go make pushes and exports jobs: a push copies from the container store
 // to a registry, and an export publishes an image's blobs to the content store for the client to deliver;
-// a task's export needs the content store alone. Submit refuses results whose image IDs aren't image IDs.
+// a task's export needs the content store alone.
+// submitPublish in publish.go makes a publication a job: it uploads each image by digest, one at a time,
+// since they share the host's network, then, only once every upload has succeeded,
+// writes every tag with tagAll, attempting each. Submit refuses results whose image IDs aren't image IDs.
 // localRunner in runner.go executes actions with buildah: result checks, base materialization from a location,
 // the push of a built layer to the cache repository, target cleanup and file transfer.
 // attempt.go is the worker's subprocess: Attempt reads an AttemptInput, runs the action or push with a localRunner
@@ -45,6 +48,6 @@
 // platform contexts.
 // step.go applies action steps; a run() step's secrets become buildah secret mounts, their values written to files
 // that only this process reads and removed after the step, which buildah copies outside the image's root filesystem.
-// Copies go through transfer.Image, which traces them; inspect export, pushImage and layoutIndex
+// Copies go through transfer.Image, which traces them; inspect export, sendResult and layoutIndexFrom
 // before changing transports or signature policy.
 package run

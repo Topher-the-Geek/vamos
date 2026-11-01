@@ -4,9 +4,12 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Topher-the-Geek/vamos/internal/api"
@@ -45,7 +48,8 @@ type Config struct {
 	Retries int
 	// Bound is how many targets of one build are dispatched at once.
 	Bound int
-	// MaxBuilds is how many jobs, builds and pushes, may be open at once; beyond it, submissions are refused as busy.
+	// MaxBuilds is how many jobs, builds, pushes and publications, may be open at once; beyond it, submissions are
+	// refused as busy.
 	MaxBuilds int
 	// CacheRepository is the registry repository that workers push built layers to, tagged by image ID;
 	// "" for none.
@@ -204,10 +208,11 @@ func New(content cache.ContentStore, records cache.RecordStore, cfg Config) (*Co
 // recover restores the jobs that an earlier run recorded: a build that hadn't ended runs again, from the start,
 // and what finished before is a cache hit, while what its attempts were running is lost with them; a finished job's
 // outcome is readable again, its terminal event where it was, as if its client had just stopped watching; a
-// tombstone is remembered as expired. A push or a prune that hadn't ended fails, since what it wrote before the
-// restart is unknown, as does a job that was cancelled, which no restart revives, and a build that was released,
-// which no client wants. What recovery changes is recorded before the job runs or is readable, and a failure to
-// record it fails the recovery, so that no restart finds a job other than the last one left it.
+// tombstone is remembered as expired. A push, a publication or a prune that hadn't ended fails,
+// since what it wrote before the restart is unknown, as does a job that was cancelled, which no restart revives,
+// and a build that was released, which no client wants.
+// What recovery changes is recorded before the job runs or is readable, and a failure to record it fails the
+// recovery, so that no restart finds a job other than the last one left it.
 func (c *Coordinator) recover(kept []*record) error {
 	for _, r := range kept {
 		var err error
@@ -216,6 +221,15 @@ func (c *Coordinator) recover(kept []*record) error {
 			c.jobs.RememberEvicted(r.ID)
 		case r.Outcome != nil:
 			err = c.restore(r)
+		case r.Publish != nil:
+			// Before a cancellation, since a publication cancelled while it wrote its tags may have written them.
+			outcome := sched.Failed(errors.New("the coordinator restarted while the publication ran, so whether its " +
+				"tags were written is unknown: they may or may not have been; publishing again finishes it"))
+			outcome.Cancelled = r.Cancelled
+			if len(r.Publish.Images) > 0 {
+				outcome.Failure.Nodes = []graph.Ref{r.Publish.Images[0].Result.Node}
+			}
+			err = c.conclude(r, outcome)
 		case r.Cancelled:
 			err = c.conclude(r, sched.Failed(context.Canceled))
 		case r.Push != nil:
@@ -382,12 +396,12 @@ func (c *Coordinator) offered(platform imgspecv1.Platform) bool {
 // maxGraphSize is the most bytes a graph may have, so that a corrupt or hostile one is refused rather than decoded.
 const maxGraphSize = 64 << 20
 
-// Submit starts a job for req: a graph run, a push or an export.
+// Submit starts a job for req: a graph run, a push, a publication or an export.
 // A graph of a version it can't run, or for a platform the deployment doesn't offer, is refused before anything else.
 func (c *Coordinator) Submit(ctx context.Context, req api.Request) (api.JobID, error) {
 	req = req.Clone()
 	kinds := 0
-	for _, set := range []bool{req.Graph != nil, req.Push != nil, req.Export != nil} {
+	for _, set := range []bool{req.Graph != nil, req.Push != nil, req.Export != nil, req.Publish != nil} {
 		if set {
 			kinds++
 		}
@@ -406,6 +420,8 @@ func (c *Coordinator) Submit(ctx context.Context, req api.Request) (api.JobID, e
 			return "", err
 		}
 		return "", errors.New("a coordinator exports nothing: the client delivers from the result's locations")
+	case req.Publish != nil:
+		return c.submitPublish(ctx, *req.Publish)
 	}
 	g := req.Graph
 	if g.Version != graph.Version {
@@ -702,7 +718,8 @@ func (c *Coordinator) submitPush(ctx context.Context, req api.PushRequest) (api.
 		defer flush()
 		ctx, span := tracing.StartTrack(ctx, "push", "push to "+req.Destination)
 		ctx = withBuild(ctx, buildInfo{job: jobOf(ctx)})
-		rep, err := c.pool.attempt(ctx, nil, &remote.PushWork{Result: req.Result, Destination: req.Destination},
+		rep, err := c.pool.attempt(ctx, nil, &remote.PushWork{Mode: remote.ModePush, Result: req.Result,
+			Destination: req.Destination},
 			sched.OutputFunc(func(byte, []byte) {}))
 		span.EndWith(err)
 		switch {
@@ -722,6 +739,145 @@ func (c *Coordinator) submitPush(ctx context.Context, req api.PushRequest) (api.
 		}
 		return api.Outcome{Pushed: rep.Pushed}
 	})
+}
+
+// submitPublish starts a job that publishes req's images, each to its repository under every tag, on workers,
+// as one job however many repositories and tags it has, so that a busy coordinator refuses it before anything is
+// pushed. Its uploads are attempts at once, on any workers, each retried on worker loss, since an upload by digest
+// changes nothing a user sees; once every upload has succeeded, one attempt writes every tag, which is never
+// retried, since its writes may have happened. The coordinator itself never contacts a destination registry.
+func (c *Coordinator) submitPublish(ctx context.Context, req api.PublishRequest) (api.JobID, error) {
+	if _, _, err := sched.ParsePublication(req); err != nil {
+		return "", err
+	}
+	for _, image := range req.Images {
+		if err := checkResult(image.Result); err != nil {
+			return "", err
+		}
+	}
+	return c.begin(ctx, record{Publish: &req}, sched.Spec{}, func(ctx context.Context, ev sched.Events) api.Outcome {
+		ctx, flush := sched.ForCall(ctx, req.Trace, ev)
+		defer flush()
+		ctx, span := tracing.StartTrack(ctx, "publish", "publish")
+		ctx = withBuild(ctx, buildInfo{job: jobOf(ctx)})
+		uploads, i, err := c.uploadAll(ctx, req, ev)
+		if err != nil {
+			span.EndWith(err)
+			outcome := sched.Failed(err)
+			outcome.Failure.Nodes = []graph.Ref{req.Images[i].Result.Node}
+			return outcome
+		}
+		tagging := &remote.PushWork{Mode: remote.ModeTag, Tag: &remote.TagWork{
+			Images: req.Images, Tags: req.Tags, Uploads: uploads,
+		}}
+		if err := checkAssignmentSize(tagging); err != nil {
+			span.EndWith(err)
+			outcome := sched.Failed(err)
+			outcome.Failure.Nodes = []graph.Ref{req.Images[0].Result.Node}
+			return outcome
+		}
+		rep, err := c.pool.attempt(ctx, nil, tagging, outputOf(ev, req.Images[0].Result.Node))
+		switch {
+		case errors.Is(err, context.Canceled):
+			err = fmt.Errorf("%w: the publication was cancelled while it wrote its tags, which may or may not have "+
+				"been written; publish again", err)
+		case err != nil:
+		case rep.Failure != nil:
+			err = fmt.Errorf("%w; the tags may or may not have been written; publish again", rep.Failure.Err())
+		case rep.Tagged == nil:
+			err = errors.New("the worker reported no tags written")
+		}
+		if err != nil {
+			span.EndWith(err)
+			outcome := sched.Failed(err)
+			outcome.Failure.Nodes = []graph.Ref{req.Images[0].Result.Node}
+			return outcome
+		}
+		if rep.Tagged.Failure != nil {
+			span.EndWith(errors.New(rep.Tagged.Failure.Message))
+		} else {
+			span.End()
+		}
+		return *rep.Tagged
+	})
+}
+
+// uploadAll uploads each of req's images to its repository, by digest, as an attempt of its own, as many at once
+// as Bound lets a build dispatch targets, one if it is 1 or less, as the scheduler takes it, and returns what each
+// wrote, in order; on the first failure it withdraws the rest and returns the failure, with the index of the image
+// whose upload failed. What an upload prints, such as that it waits for a worker, goes to ev as its image's.
+func (c *Coordinator) uploadAll(ctx context.Context, req api.PublishRequest, ev sched.Events) (
+	[]remote.Uploaded, int, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	uploads := make([]remote.Uploaded, len(req.Images))
+	errs := make([]error, len(req.Images))
+	var failedFirst atomic.Int64
+	failedFirst.Store(-1)
+	slots := make(chan struct{}, max(c.cfg.Bound, 1))
+	var wg sync.WaitGroup
+	for i, image := range req.Images {
+		wg.Go(func() {
+			select {
+			case slots <- struct{}{}:
+				defer func() { <-slots }()
+			case <-ctx.Done(): // cancelled, or another upload failed, before this one started
+				errs[i] = ctx.Err()
+				failedFirst.CompareAndSwap(-1, int64(i))
+				return
+			}
+			// Each upload is a span of its own, on a track of its own, since they run at once and are retried apart;
+			// the worker's upload is within it.
+			track := "upload to " + image.Repository
+			ctx, span := tracing.StartTrack(ctx, track, "attempts to upload to "+image.Repository)
+			rep, err := c.pool.attempt(ctx, nil, &remote.PushWork{Mode: remote.ModeUpload, Result: image.Result,
+				Repository: image.Repository}, outputOf(ev, image.Result.Node))
+			defer func() { span.EndWith(errs[i]) }()
+			switch {
+			case err != nil:
+			case rep.Failure != nil:
+				err = rep.Failure.Err()
+			case rep.Uploaded == nil:
+				err = fmt.Errorf("the worker uploaded nothing to %s", image.Repository)
+			default:
+				uploads[i] = *rep.Uploaded
+				return
+			}
+			errs[i] = err
+			if failedFirst.CompareAndSwap(-1, int64(i)) {
+				cancel() // the publication fails, so the other uploads are no longer wanted
+			}
+		})
+	}
+	wg.Wait()
+	if i := failedFirst.Load(); i >= 0 {
+		return nil, int(i), errs[i]
+	}
+	return uploads, 0, nil
+}
+
+// outputOf returns where an attempt for node prints: to ev, as node's output.
+func outputOf(ev sched.Events, node graph.Ref) sched.OutputFunc {
+	return func(stream byte, data []byte) { ev.Output(node, stream, data) }
+}
+
+// assignmentMargin is room left in a worker's limit for what an assignment carries besides its work.
+const assignmentMargin = 64 << 10
+
+// checkAssignmentSize refuses a tagging whose assignment a worker would refuse as too large, which a publication
+// of very many images, with large manifests, could make, before any tag is written.
+func checkAssignmentSize(work *remote.PushWork) error {
+	data, err := json.Marshal(remote.Assignment{Push: work})
+	if err != nil {
+		return err
+	}
+	// The assignment's own fields, its attempt, lease and trace, take a little more on the wire.
+	if len(data) > remote.MaxJSONBody-assignmentMargin {
+		return fmt.Errorf("every image is uploaded, but the tags to write, with every manifest uploaded, take "+
+			"%d bytes, more than a worker takes, %d, so no tag is written; publish fewer images at once",
+			len(data), remote.MaxJSONBody-assignmentMargin)
+	}
+	return nil
 }
 
 // checkResult refuses a result to push whose image IDs aren't image IDs.

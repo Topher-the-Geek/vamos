@@ -68,6 +68,8 @@ type fakeWorker struct {
 	handle func(a *remote.Assignment, killed func() bool) remote.AttemptReport
 	// silent makes the worker stop heartbeating once it has taken an attempt, as a dead worker would.
 	silent bool
+	// silentOn, if set, makes the worker heartbeat for none of the attempts it reports true of, as if it died then.
+	silentOn func(a *remote.Assignment) bool
 	// maxTake, if set, is how many attempts the worker takes before it stops asking for more.
 	maxTake int
 
@@ -100,7 +102,7 @@ func newWorker(t *testing.T, f *fixture, platform imgspecv1.Platform, capacity i
 	}
 	reg, err := client.Register(t.Context(), remote.WorkerInfo{
 		Platform: platform, Emulates: emulates, Isolation: "chroot", Version: "test",
-		ActionVersion: sched.ActionVersion, Capacity: capacity,
+		ActionVersion: sched.ActionVersion, Capacity: capacity, Publishes: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -150,7 +152,7 @@ func (w *fakeWorker) run(ctx context.Context) {
 	}
 }
 
-// attempt runs a, heartbeating meanwhile unless silent, and reports how it ended.
+// attempt runs a, heartbeating meanwhile unless silent, or silent on a, and reports how it ended.
 func (w *fakeWorker) attempt(ctx context.Context, a *remote.Assignment) {
 	var killed sync.Mutex
 	kill := false
@@ -161,7 +163,7 @@ func (w *fakeWorker) attempt(ctx context.Context, a *remote.Assignment) {
 	}
 	beat, stopBeat := context.WithCancel(ctx)
 	defer stopBeat()
-	if !w.silent {
+	if !w.silent && (w.silentOn == nil || !w.silentOn(a)) {
 		go func() {
 			ticker := time.NewTicker(w.reg.Heartbeat)
 			defer ticker.Stop()

@@ -318,6 +318,45 @@ func TestRestartEndsPush(t *testing.T) {
 	}
 }
 
+// TestRestartEndsPublication checks that a publication running when the coordinator restarts fails after it,
+// saying its tags may or may not have been written, rather than being published again.
+func TestRestartEndsPublication(t *testing.T) {
+	r := newRestartable(t, Config{})
+	tagging := make(chan struct{}, 1)
+	wait, ended := untilKilled(t)
+	startWorker(t, r.fixture, amd64, 2, func(a *remote.Assignment, killed func() bool) remote.AttemptReport {
+		if a.Push.Mode == remote.ModeUpload {
+			return remote.AttemptReport{Uploaded: &remote.Uploaded{Manifest: []byte("m"), Image: "id"}}
+		}
+		tagging <- struct{}{}
+		wait(killed)
+		return remote.AttemptReport{Tagged: &api.Outcome{Published: &api.Published{}}}
+	})
+	t.Cleanup(ended)
+	ctx := t.Context()
+	req := api.PublishRequest{
+		Images: []api.PublishImage{{Result: api.Result{Image: strings.Repeat("a", 64), Node: 2},
+			Repository: "example.com/app"}},
+		Tags: []string{"v1"},
+	}
+	id, err := r.c.Submit(ctx, api.Request{Publish: &req})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-tagging
+
+	r.restart()
+	outcome, err := r.c.Result(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.Failure == nil || !strings.Contains(outcome.Failure.Message,
+		"whether its tags were written is unknown: they may or may not have been; publishing again finishes it") ||
+		len(outcome.Failure.Nodes) != 1 || outcome.Failure.Nodes[0] != 2 {
+		t.Errorf("outcome = %+v, want a failure of node 2 saying the tags may have been written", outcome.Failure)
+	}
+}
+
 // TestRestartKeepsCancelled checks that a build cancelled before a restart stays cancelled after it.
 func TestRestartKeepsCancelled(t *testing.T) {
 	r := newRestartable(t, Config{})

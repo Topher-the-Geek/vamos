@@ -22,6 +22,10 @@
 // # Changes
 //
 // Start with Load and Request.
+// LoadPublication loads a publication as the roots it checks and publishes, its checks then its images,
+// and returns the Publication saying where each image goes; its repositories never enter the graph.
+// expandPublication owns that expansion, which a build of a publication shares; resolve refuses a publication
+// wherever a target names another, so that it is a root only.
 // In buildfile.go, declaration and evalContext own deferred evaluation and builtin scope;
 // loadError preserves nested failures.
 // In config.go, confLabel, workspace.edge, workspace.template and configurer own target identity

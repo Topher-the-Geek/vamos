@@ -210,8 +210,8 @@ func (p *pool) attempt(ctx context.Context, req *sched.Request, push *remote.Pus
 	*remote.AttemptReport, error) {
 	build := buildOf(ctx)
 	retries := p.cfg.Retries
-	if push != nil {
-		retries = 0 // a push is never retried on worker loss: its write may have happened
+	if push != nil && push.Mode != remote.ModeUpload {
+		retries = 0 // a push or tagging is never retried on worker loss: its write may have happened
 	}
 	if req != nil && req.Emulated {
 		if platform, ok := p.emulationOffered(req.ImagePlatform()); !ok {
@@ -246,9 +246,13 @@ func (p *pool) attempt(ctx context.Context, req *sched.Request, push *remote.Pus
 			return at.report, nil
 		}
 		if !at.lost || try >= retries {
-			if at.lost && push != nil {
+			switch {
+			case at.lost && push != nil && push.Mode == remote.ModePush:
 				return nil, fmt.Errorf("%w: it is unknown whether the push completed; check the destination, or push "+
 					"again", at.err)
+			case at.lost && push != nil && push.Mode == remote.ModeTag:
+				return nil, fmt.Errorf("%w: it is unknown whether the publication's tags were written; "+
+					"publishing again finishes it", at.err)
 			}
 			return nil, at.err
 		}
@@ -285,9 +289,13 @@ func (p *pool) await(ctx context.Context, at *attempt) error {
 			}
 			if platform, waiting := p.unserved(at); waiting && !told {
 				told = true
-				if platform == "" {
+				switch {
+				case at.push != nil && at.push.Mode != remote.ModePush:
+					at.out.Output(2, []byte("waiting for a worker that publishes; those registered, if any, are of "+
+						"a vamos from before publications\n"))
+				case platform == "":
 					at.out.Output(2, []byte("waiting for a worker; none is registered\n"))
-				} else {
+				default:
 					at.out.Output(2, fmt.Appendf(nil, "waiting for a worker that runs %s; none is registered\n",
 						platform))
 				}
@@ -480,7 +488,8 @@ func (at *attempt) runsOn() string {
 // worker while none of its platform is registered.
 func (p *pool) suits(w *worker, at *attempt) bool {
 	if at.push != nil {
-		return true // a push copies between registries, which any worker can
+		// A push copies between registries, which any worker can; a publication's work needs one that knows it.
+		return at.push.Mode == remote.ModePush || w.info.Publishes
 	}
 	if platforms.Format(w.info.Platform) != at.runsOn() {
 		return at.req != nil && !at.req.RunsCommands() && !p.serves(at.runsOn())

@@ -29,3 +29,4 @@ The [tutorial](../docs/tutorial.md) walks through the TypeScript UI example.
 
   A monorepo with dependencies across packages and ecosystems.
   The Python backend exports a GraphQL schema used to generate types for the React/TypeScript UI.
+  A publication releases both packages' indexes together, under every tag, once their checks pass.

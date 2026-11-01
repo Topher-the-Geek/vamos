@@ -28,7 +28,7 @@ go test -short ./...   # command line and BUILD file checks only
 ```
 
 Image builds use `busybox` from Docker Hub.
-`push` is tested against an in-process registry and `load` against a fake Docker daemon;
+`push` and `publish` are tested against an in-process registry and `load` against a fake Docker daemon;
 if a real Docker daemon is running, `load` is also checked against it.
 The tests use the machine's build cache, and one of them empties it,
 so the next build of your own project runs every target again.

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -85,6 +86,8 @@ type world struct {
 	server     *httptest.Server       // that serves the scenario's registry, once a Given step starts it
 	asked      atomic.Int64           // the requests that the scenario's registry has served
 	stopped    atomic.Bool            // whether the scenario's registry has stopped answering
+	refusedMu  sync.Mutex             // guards refused, which the registry's requests read
+	refused    map[string]bool        // the repositories whose writes it refuses, true for tags alone
 	held       map[string]v1.Image    // the images that Given steps put in the registry, by label and platform
 
 	stdout       string

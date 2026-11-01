@@ -26,11 +26,13 @@
 //
 // # Changes
 //
-// NewRootCommand wires commands and parses flags into options; the handlers, build, push, load, save, export,
-// prune, graph, coordinator, worker and attempt, hold the phase boundary; Config says which container store the
+// NewRootCommand wires commands and parses flags into options; the handlers, build, push, publish, load, save,
+// export, prune, graph, coordinator, worker and attempt, hold the phase boundary; Config says which container store the
 // local executor builds in, so that tests give it their own.
 // buildImage delivers from a result's registry locations only over a coordinator; the local executor exports from
-// its store, so that a local delivery needs no network.
+// its store, so that a local delivery needs no network; clientImage owns that choice.
+// publish loads a publication's graph and plan with load.LoadPublication, through runLoaded, then submits one
+// api.PublishRequest, or publishes from the client with finish.Publish; checkTags checks --tag before loading.
 // invocation.executor chooses the executor, and invocation.capabilities refuses one of another graph version.
 // Output goes through invocation.printf, which returns a failure to write.
 // Inspect destination for delivery and platform selection, invocation.execPlatform for the choice of execution

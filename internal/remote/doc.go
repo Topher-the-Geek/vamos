@@ -42,6 +42,8 @@
 // wire.go owns the paths and the error codes, which Server and Client must agree on; a code is added there and
 // mapped in both.
 // Server in server.go serves one executor and one content store; Client in client.go implements both interfaces.
+// workers.go owns the worker-facing API: an Assignment is an action or a PushWork, a write to a registry whose mode
+// is a push, an upload by digest, or the tagging of a publication whose uploads have all succeeded.
 // Prove a change with the contract suites: cachetest.Content through a Server, and apitest.Contract through
 // Client and Server over a local executor, in run's tests.
 package remote

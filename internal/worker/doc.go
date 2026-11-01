@@ -17,7 +17,8 @@
 // which run names for the attempt, and its cgroup.
 // The subprocess is told the worker's graph root and run root, so that it builds where the worker cleans up.
 // On shutdown the worker waits for the attempts it has killed for one deadline in all, not one each.
-// The worker's registry credentials are its own; nothing of the client's reaches it.
+// The worker's registry credentials are its own; nothing of the client's reaches it: it pushes, uploads and writes
+// a publication's tags with them, since a coordinator contacts no destination registry itself.
 // At registration the worker reports the platforms it emulates, read from the enabled qemu handlers in binfmt_misc,
 // so that the coordinator sends it emulated work for them and no other.
 //

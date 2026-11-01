@@ -11,8 +11,8 @@
 // recorded; the journal's lock keeps a second coordinator from its state.
 // What a restart loses is the workers' registrations and the attempts they run, which their next requests are
 // refused, so that they kill what they run and register again; a resumed build runs again from its start, and what
-// finished before is a hit. A push or prune cut off by a restart fails, since what it wrote is unknown, and a
-// cancelled or released job ends too. A shutdown records nothing, so that what it ends is resumed, not cancelled.
+// finished before is a hit. A push, publication or prune cut off by a restart fails, since what it wrote is unknown,
+// and a cancelled or released job ends too. A shutdown records nothing, so that what it ends is resumed, not cancelled.
 // What a restart decides, a resumed build's count of restarts and the outcome of a job it ends, is recorded before
 // the job runs or is readable, or the coordinator fails to start, so that the next restart finds the same; what a
 // running coordinator records, a cancellation, a release, an outcome and a platform a build reached, is reported to
@@ -23,8 +23,10 @@
 // wasn't replaced by a retry, so that a stale report is discarded.
 // A build's demand ends an attempt no other build needs: the worker is told to kill it at its next heartbeat,
 // and the build's terminal event doesn't wait for the worker's cleanup.
-// Work whose worker is lost is tried again elsewhere, a bounded number of times; a push is never retried,
-// since its write may have happened.
+// Work whose worker is lost is tried again elsewhere, a bounded number of times; a push, and a publication's
+// tagging, are never retried, since their writes may have happened, while a publication's uploads, by digest,
+// which change no tag, are.
+// The coordinator never contacts a destination registry: pushes and publications run on workers, with theirs.
 //
 // # Lifecycle
 //
@@ -67,6 +69,9 @@
 // against another generation fails once it is open, when no prune can start, and Report refuses an attempt that
 // started in one, with messages that say to run the command again.
 // A cancelled push's outcome says the destination may or may not have been written.
+// A publication is one job against the bound on open jobs, however many repositories and tags it has: its uploads are
+// attempts at once, on any workers, and once all have succeeded one attempt writes every tag, as the executor's
+// publish job would, and reports every destination.
 // Emulated work, a request the scheduler marks Emulated, goes only to a worker of the build's execution platform that
 // reports an emulator for the image's platform, which the deployment doesn't offer natively;
 // a platform neither configured as emulated nor emulated by a registered worker fails the target at once,
@@ -76,7 +81,8 @@
 // # Changes
 //
 // pool.go owns workers, attempts, assignment, leases, kills and reports; coordinator.go owns the executor's
-// methods, the build's context and recovery; journal.go owns the jobs on disk; checker.go checks cached results
+// methods, the build's context and recovery, and submitPush and submitPublish the jobs that write to registries;
+// journal.go owns the jobs on disk; checker.go checks cached results
 // against the content store and the registry.
 // coord_test.go drives a coordinator with fake workers over the worker-facing API; platform_test.go does so with
 // workers of several platforms; restart_test.go restarts one over the same stores and state.

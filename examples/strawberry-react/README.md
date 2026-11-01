@@ -88,7 +88,7 @@ pnpm dev             # http://localhost:3100, proxying /graphql to the backend o
 ## Build with vamos
 
 The directory is a vamos workspace: `backend/` and `ui/` each have a `BUILD` file,
-and both load helpers from `defs.star`.
+and both load helpers from `defs.star`; the root's `BUILD` declares the release.
 The UI's `graphql-codegen` task adds `//backend:schema`, the backend's exported schema,
 so no generated file is needed on disk.
 From the repository root:
@@ -103,6 +103,21 @@ Each package's `server` is an index of its `layer` for amd64 and arm64, which `p
 
 ```
 ./vamos push //ui:server ghcr.io/me/strawberry-ui:1.0 -C examples/strawberry-react
+```
+
+The root's `//:release` is a [publication](../../docs/reference/build.md#publication):
+it publishes both packages' `server` indexes, together, under every `--tag`,
+only once the backend's tests and both packages' lint pass.
+Its `registry` parameter, which has no default, says where:
+
+```
+./vamos publish //:release --tag 1.0 --tag latest --set registry=ghcr.io/your-org -C examples/strawberry-react
+```
+
+Building it builds the checks and both indexes without publishing them:
+
+```
+./vamos build //:release --set registry=ghcr.io/your-org -C examples/strawberry-react
 ```
 
 The backend's layer installs Python packages, which may have native code,

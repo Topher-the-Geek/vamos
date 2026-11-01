@@ -106,9 +106,10 @@ Trace importer coverage skips without `trace_processor_shell`.
 ## Behavior specifications
 
 [features](../../internal/features/) specifies the behavior of BUILD files and their targets, pulls, globs, layers,
-tasks, their steps, variables and secrets, workspaces, modules, parameters, platforms, indexes, the cache,
-the command line, the save, export, push, load and prune commands, traces, interrupts, output that can't be
-written, building on a coordinator, and the coordinator command as features, rules and scenarios, in Go:
+tasks, their steps, variables and secrets, workspaces, modules, parameters, platforms, indexes, publications,
+the cache, the command line, the save, export, push, publish, load and prune commands, traces, interrupts,
+output that can't be written, building on a coordinator, and the coordinator command
+as features, rules and scenarios, in Go:
 a feature is a file, such as `task_test.go`, and each of its rules is a test named `TestFeature_Rule`,
 such as `TestTask_WithoutOutputIsACheck`,
 whose doc comment states the rule's sentence, in the words of the [BUILD reference](../../docs/reference/build.md),
@@ -131,11 +132,14 @@ the command's standard output, where its statuses and steps' output go, its erro
 the image it saved, the folder it exported and the images left in the store.
 A workspace's packages are declared with `GivenThePackageDeclares`, and commands run in one with `GivenIWorkIn`.
 Observe a layer's image with `WhenISave` and a task's files with `WhenIExport`;
-a push, with `WhenIPush` to a registry of the scenario's own that `GivenARegistry` starts,
+a push, with `WhenIPush`, or a publication, with `WhenIPublish`, to a registry of the scenario's own that
+`GivenARegistry` starts,
 which `<registry>` stands for in image names, errors and BUILD text, and Given steps fill with indexes and images
 (`<outside>` stands likewise for the folder of files outside the project, once `GivenAFileOutsideTheProjectHolds`
 has written one),
-reads back what it pushed, for the steps about the image, or `ThenTheIndexManifestsAre` for an index;
+reads back what it pushed, or published last, for the steps about the image, or `ThenTheIndexManifestsAre` for an
+index, while `ThenTheRepositoryHasTags` and `ThenTheyNameTheSameManifest` check the repositories a publication
+writes, and `GivenTheRegistryRefusesWritesTo` and `GivenTheRegistryRefusesTagsIn` make the registry refuse them;
 a load, with `WhenILoad` into a fake Docker daemon of the scenario's own that `GivenADockerDaemon` starts,
 reads back what the daemon loaded, and `GivenTheHostsDockerDaemon` loads into the host's, where there is one;
 see a glob's files in a layer that adds them, which the scenario declares, such as

@@ -30,7 +30,9 @@ References produced by a function of `ctx` can name later targets; dependency cy
 | `task()` without output | Successful check | No | No |
 | `layer()` | Image | Yes | No |
 | `index()` | Image index | No | No |
+| `publication()` | A release, published by `vamos publish` | No | No |
 
+No target can depend on a `publication()`, which only the command line names.
 All target kinds except `pull()` accept `params`, a dictionary of parameter declarations.
 Target attributes other than `name` and `params` can be functions of `ctx`.
 See [configuration](configuration.md) for `param()`, `dep()`, `arg()`, and platform configuration.
@@ -181,6 +183,58 @@ Each platform must be unique.
 A `dep()` in an index may pass user parameters but cannot specify `platform`;
 the list or dictionary already determines each image's platform.
 An index cannot contain another index.
+
+## `publication()`
+
+```python
+publication(
+    name = "release",
+    checks = ["lint", "test"],
+    images = {
+        "ghcr.io/team/app": "app",
+        "docker.io/team/app": "app",
+        "ghcr.io/team/worker": "worker",
+    },
+)
+```
+
+| Argument | Meaning | Default |
+| --- | --- | --- |
+| `name` | Target name | Required |
+| `images` | Dictionary from each repository to the pull, layer or index published there | Required |
+| `checks` | Tasks that must succeed before anything is published | `[]` |
+
+A publication declares a release: what must succeed, and which images go where.
+[`vamos publish`](cli.md#publish) builds every check and image in one run,
+and only if all of them succeed publishes each image to its repository under every `--tag` given;
+`vamos build` builds them and publishes nothing.
+
+`images` is keyed by repository, a lowercase registry repository name without a tag or digest,
+since the tags come from the command line.
+It must not be empty, and two keys must not name the same repository, as `busybox` and `docker.io/library/busybox` do.
+Keying by repository lets one target go to several repositories, as a release mirrored to more than one registry needs,
+while a repository gets one image.
+Each check must be a `task()`, and each image a `pull()`, `layer()` or `index()`.
+Checks and images are configured as the publication names them, as a dependency is, so a `dep()` can pass them
+parameters.
+
+Like other targets, a publication takes `params`, set with `--set`,
+and its `checks` and `images` can be functions of `ctx`, so that a parameter can choose its repositories:
+
+```python
+publication(
+    name = "release",
+    params = {"env": param(default = "staging", values = ["staging", "production"])},
+    images = lambda ctx: {
+        "registry.example/" + ctx.env + "/app": "app",
+    },
+)
+```
+
+A publication is a root only: no target can name it as a `base`, an `add()` source, an index's image or another
+publication's check or image.
+Its own result is never cached, so publishing it again pushes again,
+while its checks and images are reused from the build cache as usual.
 
 ## Steps
 

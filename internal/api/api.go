@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Topher-the-Geek/vamos/internal/cache"
@@ -120,9 +121,10 @@ func (c Capabilities) Offers(platform imgspecv1.Platform) bool {
 // Request asks an executor for a job.
 // Exactly one of its fields is set.
 type Request struct {
-	Graph  *GraphRequest  `json:"graph,omitempty"`
-	Push   *PushRequest   `json:"push,omitempty"`
-	Export *ExportRequest `json:"export,omitempty"`
+	Graph   *GraphRequest   `json:"graph,omitempty"`
+	Push    *PushRequest    `json:"push,omitempty"`
+	Export  *ExportRequest  `json:"export,omitempty"`
+	Publish *PublishRequest `json:"publish,omitempty"`
 }
 
 // PushRequest asks an executor to push a result's image or index to a registry,
@@ -134,6 +136,26 @@ type PushRequest struct {
 	Destination string `json:"destination"`
 	// Trace, if set, asks for the spans of a trace of the push, as events of the job.
 	Trace *tracing.CallContext `json:"trace,omitempty"`
+}
+
+// PublishRequest asks an executor to publish results' images and indexes, each to its repository under every tag,
+// with the executor's own credentials and registry settings.
+// It uploads every image to its repository by digest, with no tag, and only once every upload has succeeded,
+// writes every tag, attempting each even if another fails, so that a failed upload changes no tag.
+type PublishRequest struct {
+	Images []PublishImage `json:"images"` // in the order to publish them, and to report them
+	// Tags are the tags to write in every repository, such as 1.4.2 and latest, in order; there is at least one.
+	Tags []string `json:"tags"`
+	// Trace, if set, asks for the spans of a trace of the publication, as events of the job.
+	Trace *tracing.CallContext `json:"trace,omitempty"`
+}
+
+// PublishImage is a result's image or index, and a repository to publish it to.
+type PublishImage struct {
+	Result Result `json:"result"`
+	// Repository is a full registry repository name with no tag or digest, such as ghcr.io/me/app;
+	// the client resolves short names, so that both sides mean the same registry.
+	Repository string `json:"repository"`
 }
 
 // ExportRequest asks an executor to publish a result's content to the content store, for a client to deliver:
@@ -207,12 +229,84 @@ type Event struct {
 // Outcome is how a job ended.
 // A job that succeeded sets the field of its kind; one that failed sets Failure.
 type Outcome struct {
-	Results   []Result  `json:"results,omitempty"`   // a graph job's, one for each root, in order
-	Pushed    *Pushed   `json:"pushed,omitempty"`    // a push job's
-	Exported  *Exported `json:"exported,omitempty"`  // an export job's
-	Pruned    *Pruned   `json:"pruned,omitempty"`    // a prune job's
-	Failure   *Failure  `json:"failure,omitempty"`   // why the job failed, if it did
-	Cancelled bool      `json:"cancelled,omitempty"` // it ended because it was cancelled
+	Results  []Result  `json:"results,omitempty"`  // a graph job's, one for each root, in order
+	Pushed   *Pushed   `json:"pushed,omitempty"`   // a push job's
+	Exported *Exported `json:"exported,omitempty"` // an export job's
+	Pruned   *Pruned   `json:"pruned,omitempty"`   // a prune job's
+	// Published is a publish job's, which accompanies a Failure from writing its tags, so that the client can report
+	// which tags were written and which weren't; a failure before any tag is written, as of an upload, sets none.
+	Published *Published `json:"published,omitempty"`
+	Failure   *Failure   `json:"failure,omitempty"`   // why the job failed, if it did
+	Cancelled bool       `json:"cancelled,omitempty"` // it ended because it was cancelled
+}
+
+// Published is what a publish job wrote, or tried to write: every destination, each repository under each tag.
+type Published struct {
+	// Destinations are in the request's order of images, and for each, of tags.
+	Destinations []Destination `json:"destinations"`
+}
+
+// Shortfall describes, as a publication's failure says it, each destination of p not known to be written, with why,
+// and each that was; "" if every one was.
+func (p Published) Shortfall() string {
+	var failed, written []string
+	for _, d := range p.Destinations {
+		if d.Written {
+			written = append(written, d.Repository+":"+d.Tag)
+		} else if dest := d.Repository + ":" + d.Tag; names(d.Error, dest) {
+			failed = append(failed, d.Error)
+		} else {
+			failed = append(failed, dest+": "+d.Error)
+		}
+	}
+	if len(failed) == 0 {
+		return ""
+	}
+	msg := fmt.Sprintf("%d of %d tags weren't written, or couldn't be read back: %s",
+		len(failed), len(p.Destinations), strings.Join(failed, "; "))
+	if len(written) > 0 {
+		msg += "; written: " + strings.Join(written, ", ")
+	}
+	return msg
+}
+
+// names reports whether msg names the destination dest, as a whole: not as the end of a longer repository's name,
+// nor as the start of a longer tag.
+func names(msg, dest string) bool {
+	for from := 0; ; {
+		i := strings.Index(msg[from:], dest)
+		if i < 0 {
+			return false
+		}
+		start, end := from+i, from+i+len(dest)
+		before := start == 0 || !isTagByte(msg[start-1]) && msg[start-1] != '/' && msg[start-1] != ':'
+		after := end == len(msg) || !isTagByte(msg[end])
+		if before && after {
+			return true
+		}
+		from = start + 1
+	}
+}
+
+// isTagByte reports whether b can be part of a tag.
+func isTagByte(b byte) bool {
+	return b == '_' || b == '.' || b == '-' || '0' <= b && b <= '9' || 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z'
+}
+
+// PublishHint is what a publication's failure while writing its tags advises.
+const PublishHint = "publishing again writes them, uploading nothing that is already there"
+
+// Destination is a repository and tag that a publication writes.
+// Image or Index says what it names once written: exactly one is set, from the upload, whether or not it was written.
+type Destination struct {
+	Repository string `json:"repository"`
+	Tag        string `json:"tag"`
+	Image      string `json:"image,omitempty"` // an image's ID there, which may differ from Result.Image if converted
+	Index      string `json:"index,omitempty"` // an index's manifest digest there, as algorithm:hex
+	// Written says the tag was written and read back naming what was uploaded; a tag that isn't may still have been
+	// written, if reading it back failed, or another write replaced it.
+	Written bool   `json:"written,omitempty"`
+	Error   string `json:"error,omitempty"` // why the tag isn't known to be written, if it isn't
 }
 
 // Pushed is what a push made at its registry: exactly one of its fields is set.

@@ -258,6 +258,80 @@ func (w *world) GivenACoordinatorWithAWorker(args ...string) {
 	registered.waitFor(w.t, "worker: registered as ", coordinator)
 }
 
+// GivenAnotherClientBuildsOnTheCoordinator starts building target on the scenario's coordinator, which options must
+// name, as another client would, until the scenario ends, when it is interrupted, and waits until the coordinator has
+// accepted its job and the client watches it. What it prints is its own, which no step checks, but which the scenario
+// logs once it ends. It takes no option that traces or interrupts, which are for the commands that When steps run.
+// Its watch of its job tells the scenario's watch signal, as any command's does, so a later step that waits on that
+// signal drains it first, as WhenIInterruptTheCoordinatorWhileIBuild does.
+func (w *world) GivenAnotherClientBuildsOnTheCoordinator(target string, options ...option) {
+	w.t.Helper()
+	if w.coordinator == "" {
+		w.t.Fatal("no Given step started a coordinator for another client to build on")
+	}
+	c := w.apply("build", options)
+	if c.traceBy != "" {
+		w.t.Fatalf("another client's build doesn't take %s()", c.traceBy)
+	}
+	if w.interruptOn != "" || w.interruptIn != 0 || w.interruptBy != 0 {
+		w.t.Fatal("another client's build isn't interrupted by an option; the scenario's end interrupts it")
+	}
+	fsys := w.project()
+	args := w.commandLine(fsys, append([]string{"build", target}, c.flags...))
+	select {
+	case <-w.watching: // told of a watch by an earlier command, not this build's
+	default:
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	var output syncBuffer
+	var err error
+	go func() {
+		defer close(done)
+		cmd := cli.NewRootCommand(cli.Config{Fs: fsys, Store: &w.stores.Options})
+		cmd.SetOut(&output)
+		cmd.SetErr(&output)
+		cmd.SetArgs(args)
+		err = cmd.ExecuteContext(ctx)
+	}()
+	w.t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+			w.t.Logf("the other client's build ended with %v, printing:\n%s", err, output.String())
+		case <-time.After(time.Minute):
+			w.t.Error("the other client's build didn't end within a minute of being interrupted")
+		}
+	})
+	// A client watches a job only once the coordinator has accepted it.
+	select {
+	case <-w.watching:
+	case <-done:
+		w.t.Fatalf("the other client's build ended before it watched its job, with %v, printing:\n%s",
+			err, output.String())
+	case <-time.After(20 * time.Second):
+		w.t.Fatal("the other client didn't watch a job on the coordinator")
+	}
+}
+
+// syncBuffer is a buffer that a command's output can be written to while a step reads it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 // allAtPlaceholders returns args, each with placeholders replaced as atPlaceholders says.
 func (w *world) allAtPlaceholders(args []string) []string {
 	w.t.Helper()

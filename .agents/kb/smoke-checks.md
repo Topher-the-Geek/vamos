@@ -107,6 +107,26 @@ shellcheck -s sh install.sh && mkdir -p "$TMP/devc" \
 
 `push` has no manual check here:
 the tests already push to a real (in-process) registry, from the executor and from the client.
+`publish` has one, since its scenarios publish small images alone:
+
+```sh
+# 12. publish: the strawberry-react release to a registry of its own, from the executor, then from the client.
+# Expect an "Index built!" line for each tag of strawberry-ui and of strawberry-backend,
+# the client's naming what the executor's did, and then the tags 1.0, 1.1 and latest in each repository.
+# The backend's other platform builds under emulation, through the host's binfmt_misc handlers,
+# which the devcontainer sees once it mounts them.
+mountpoint -q /proc/sys/fs/binfmt_misc || mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc
+C=$(docker run -d --rm registry:3) \
+  && R=$(docker inspect "$C" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'):5000 \
+  && printf '[[registry]]\nlocation = "%s"\ninsecure = true\n' "$R" > "$TMP/registries.conf" \
+  && S=examples/strawberry-react \
+  && CONTAINERS_REGISTRIES_CONF="$TMP/registries.conf" ./vamos publish //:release --tag 1.0 --tag latest \
+  --set registry=$R/strawberry -C $S \
+  && ./vamos publish //:release --tag 1.1 --set registry=$R/strawberry --push-from=client --tls-verify=false -C $S \
+  && curl -fs http://$R/v2/strawberry/strawberry-ui/tags/list | grep '"1.0".*"1.1".*"latest"' \
+  && curl -fs http://$R/v2/strawberry/strawberry-backend/tags/list | grep '"1.0".*"1.1".*"latest"'; \
+  status=$?; [ -n "$C" ] && docker stop "$C"; (exit $status)
+```
 
 ## Remote execution
 

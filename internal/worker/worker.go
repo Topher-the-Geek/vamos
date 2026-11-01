@@ -141,6 +141,7 @@ func (w *Worker) info() remote.WorkerInfo {
 		Version:       run.Version(),
 		ActionVersion: sched.ActionVersion,
 		Capacity:      w.cfg.Capacity,
+		Publishes:     true,
 	}
 }
 

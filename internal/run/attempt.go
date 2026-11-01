@@ -21,10 +21,10 @@ import (
 	"go.podman.io/buildah/pkg/parse"
 	containersconfig "go.podman.io/common/pkg/config"
 
-	"github.com/opencontainers/go-digest"
 	imagecopy "go.podman.io/image/v5/copy"
 	"go.podman.io/image/v5/docker"
 	"go.podman.io/image/v5/docker/reference"
+	"go.podman.io/image/v5/signature"
 	is "go.podman.io/image/v5/storage"
 	"go.podman.io/image/v5/types"
 	"go.podman.io/storage"
@@ -148,11 +148,11 @@ func attempt(ctx context.Context, input AttemptInput, w *lineWriter, options sto
 		}
 		return remote.AttemptReport{Report: rep}
 	case input.Push != nil:
-		pushed, err := pushResult(ctx, store, sys, input.Push.Result, input.Push.Destination)
+		rep, err := pushWork(ctx, store, sys, *input.Push)
 		if err != nil {
 			return failed(err)
 		}
-		return remote.AttemptReport{Pushed: &pushed}
+		return rep
 	}
 	return failed(errors.New("the attempt asks for nothing"))
 }
@@ -227,37 +227,74 @@ func LeftoverAttempts(options storage.StoreOptions) ([]string, error) {
 	return ids, nil
 }
 
-// pushResult pushes the image or index of res to destination, from its locations: a registry location, or the
-// store, for an image this worker holds, and returns what it made there.
+// pushWork makes the write to a registry that work asks for, as its mode says, with the registry settings sys,
+// reading images from store, if it holds them, or else from their locations, and reports it.
+func pushWork(ctx context.Context, store storage.Store, sys *types.SystemContext, work remote.PushWork) (
+	remote.AttemptReport, error) {
+	switch work.Mode {
+	case remote.ModePush:
+		dest, err := sched.ParseDestination(work.Destination)
+		if err != nil {
+			return remote.AttemptReport{}, err
+		}
+		pushed, err := pushResult(ctx, store, sys, work.Result, dest)
+		if err != nil {
+			return remote.AttemptReport{}, err
+		}
+		return remote.AttemptReport{Pushed: &pushed}, nil
+	case remote.ModeUpload:
+		repo, err := sched.ParseRepository(work.Repository)
+		if err != nil {
+			return remote.AttemptReport{}, err
+		}
+		u, err := uploadResult(ctx, store, sys, work.Result, repo)
+		if err != nil {
+			return remote.AttemptReport{}, err
+		}
+		return remote.AttemptReport{Uploaded: &u}, nil
+	case remote.ModeTag:
+		if work.Tag == nil || len(work.Tag.Uploads) != len(work.Tag.Images) {
+			return remote.AttemptReport{}, errors.New("the tagging names an upload for each image, but doesn't")
+		}
+		_, dests, err := sched.ParsePublication(api.PublishRequest{Images: work.Tag.Images, Tags: work.Tag.Tags})
+		if err != nil {
+			return remote.AttemptReport{}, err
+		}
+		outcome := tagAll(ctx, sys, work.Tag.Images, dests, work.Tag.Uploads)
+		return remote.AttemptReport{Tagged: &outcome}, nil
+	}
+	return remote.AttemptReport{}, fmt.Errorf("the attempt asks for a write of mode %q, which this worker can't make",
+		work.Mode)
+}
+
+// pushResult pushes the image or index of res to dest, from the store, if it holds the image, or else from its
+// locations, and returns what it made there.
 func pushResult(ctx context.Context, store storage.Store, sys *types.SystemContext, res api.Result,
-	destination string) (api.Pushed, error) {
-	dest, err := sched.ParseDestination(destination)
+	dest reference.NamedTagged) (api.Pushed, error) {
+	written, err := sendResult(ctx, store, sys, res, func(
+		ctx context.Context, policyContext *signature.PolicyContext, src types.ImageReference,
+		options *imagecopy.Options,
+	) ([]byte, error) {
+		return transfer.Push(ctx, policyContext, dest, src, sys, options)
+	})
 	if err != nil {
 		return api.Pushed{}, err
 	}
-	switch {
-	case res.Index != nil:
-		d, err := pushIndexFrom(ctx, store, sys, res.Index, dest)
-		return api.Pushed{Index: d}, err
-	case res.Image != "":
-		src, err := sourceOf(ctx, store, res.Image, res.Locations)
-		if err != nil {
-			return api.Pushed{}, err
-		}
-		id, err := pushImageFrom(ctx, sys, src, dest)
-		return api.Pushed{Image: id}, err
-	}
-	return api.Pushed{}, errors.New("the target made no image")
+	image, index, err := describeWritten(res, written)
+	return api.Pushed{Image: image, Index: index}, err
 }
 
 // sourceOf returns a reference to read the image with ID id from: the store, if it holds it, and otherwise the
 // first of locations at a registry.
 func sourceOf(ctx context.Context, store storage.Store, id string, locations []cache.Location) (
 	types.ImageReference, error) {
+	var inStore error
 	if store != nil {
-		if storeID, _, err := locateImage(ctx, store, id); err == nil {
+		storeID, _, err := locateImage(ctx, store, id)
+		if err == nil {
 			return is.Transport.NewStoreReference(store, nil, storeID)
 		}
+		inStore = err
 	}
 	for _, l := range locations {
 		if l.Kind != cache.LocationRegistry {
@@ -269,43 +306,8 @@ func sourceOf(ctx context.Context, store storage.Store, id string, locations []c
 		}
 		return docker.NewReference(named)
 	}
+	if inStore != nil {
+		return nil, fmt.Errorf("image %s is in no registry, and not in this store: %w", shortID(id), inStore)
+	}
 	return nil, fmt.Errorf("image %s is in no registry, and not in this store", shortID(id))
-}
-
-// pushIndexFrom pushes the images of manifests, each from its locations, to dest as an index listing each with its
-// platform, in order, through a layout, and returns the index's digest there.
-func pushIndexFrom(ctx context.Context, store storage.Store, sys *types.SystemContext, manifests []api.Manifest,
-	dest reference.NamedTagged) (_ string, err error) {
-	dir, err := os.MkdirTemp("", "vamos-index-")
-	if err != nil {
-		return "", err
-	}
-	defer func() {
-		if rerr := os.RemoveAll(dir); rerr != nil {
-			err = errors.Join(err, fmt.Errorf("removing the copied blobs: %w", rerr))
-		}
-	}()
-	policyContext, err := transfer.Policy(sys)
-	if err != nil {
-		return "", err
-	}
-	defer policyContext.Destroy()
-	sources := make([]types.ImageReference, len(manifests))
-	for i, m := range manifests {
-		if sources[i], err = sourceOf(ctx, store, m.Image, m.Locations); err != nil {
-			return "", err
-		}
-	}
-	src, _, err := layoutIndexFrom(ctx, policyContext, dir, manifests, sources, sys)
-	if err != nil {
-		return "", err
-	}
-	written, err := transfer.Push(ctx, policyContext, dest, src, sys, &imagecopy.Options{
-		DestinationCtx:     sys,
-		ImageListSelection: imagecopy.CopyAllImages,
-	})
-	if err != nil {
-		return "", err
-	}
-	return digest.FromBytes(written).String(), nil
 }

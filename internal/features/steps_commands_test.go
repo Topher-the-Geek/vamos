@@ -53,7 +53,7 @@ type commandLine struct {
 var sendingCommands = []string{"save", "export"}
 
 // everyCommand are the commands that build, which When steps run with options.
-var everyCommand = []string{"save", "export", "build", "push", "load"}
+var everyCommand = []string{"save", "export", "build", "push", "load", "publish"}
 
 // everyCommandAndGraph are everyCommand and graph, which configures a graph as they do, building nothing.
 var everyCommandAndGraph = append(slices.Clone(everyCommand), "graph")
@@ -93,6 +93,15 @@ func tagged(tag string) option {
 	}}
 }
 
+// taggedAs publishes under each of tags, with --tag for each. Publish takes it.
+func taggedAs(tags ...string) option {
+	return option{"taggedAs", []string{"publish"}, func(_ *world, c *commandLine) {
+		for _, tag := range tags {
+			c.flags = append(c.flags, "--tag", tag)
+		}
+	}}
+}
+
 // stampedAt gives --timestamp stamp, a time as RFC 3339 or Unix seconds give it. Every command takes it.
 func stampedAt(stamp string) option {
 	return option{"stampedAt", everyCommand, func(_ *world, c *commandLine) {
@@ -127,9 +136,10 @@ func forPlatform(platform string) option {
 	}}
 }
 
-// fromTheClient pushes from the client, with --push-from=client, rather than from the executor. Push takes it.
+// fromTheClient pushes from the client, with --push-from=client, rather than from the executor.
+// Push and publish take it.
 func fromTheClient() option {
-	return option{"fromTheClient", []string{"push"}, func(_ *world, c *commandLine) {
+	return option{"fromTheClient", []string{"push", "publish"}, func(_ *world, c *commandLine) {
 		c.flags = append(c.flags, "--push-from=client")
 	}}
 }
@@ -211,7 +221,7 @@ func withFlags(flags ...string) option {
 
 // namedFlags are the options that give flags, by flag, and the step that gives -C.
 var namedFlags = map[string]string{
-	"--tag":           "tagged",
+	"--tag":           "tagged or taggedAs",
 	"-t":              "tagged",
 	"--timestamp":     "stampedAt",
 	"--set":           "setting",
@@ -311,6 +321,13 @@ func (w *world) WhenIPush(target, image string, options ...option) {
 		w.sent = ""
 		return
 	}
+	w.readBack(image)
+}
+
+// readBack reads what the scenario's registry holds at image, an image or an index, for the steps about the image or
+// the index to check, and records which the command reports sending, failing the scenario if it holds nothing.
+func (w *world) readBack(image string) {
+	w.t.Helper()
 	ref, err := name.ParseReference(image, name.Insecure)
 	if err != nil {
 		w.t.Fatal(err)
@@ -329,6 +346,28 @@ func (w *world) WhenIPush(target, image string, options ...option) {
 	if err != nil {
 		w.t.Fatalf("reading what was pushed: %v", err)
 	}
+}
+
+// WhenIPublish publishes the publication target, under the tags that taggedAs gives, and reads back what it reports
+// publishing last, its last image under its last tag, an image or an index, for the steps about the image or the
+// index to check. It fails the scenario if a publication that succeeds reports nothing published, or published
+// nothing that can be read where it reports it.
+func (w *world) WhenIPublish(target string, options ...option) {
+	w.t.Helper()
+	c := w.apply("publish", options)
+	w.sendsNothing("WhenIPublish")
+	w.sent = " built! " // "Image built!" or "Index built!", once what was published says which
+	w.run(append([]string{"publish", target}, c.flags...)...)
+	if w.err != nil {
+		w.sent = ""
+		return
+	}
+	fields := strings.Fields(lastLine(w.stdout)) // Image built! <name> <id>
+	if len(fields) != 4 || fields[1] != "built!" {
+		w.t.Fatalf("stdout = %q, want its last line to report what was published", w.stdout)
+	}
+	w.sentAs = fields[2]
+	w.readBack(fields[2])
 }
 
 // WhenILoad loads target into Docker as the image name image, with :latest if it gives no tag, and, from the

@@ -200,6 +200,113 @@ func TestTrace_ShowsDelivery(t *testing.T) {
 	})
 }
 
+// aPublicationOfTwoImages declares what aTaskAndALayer does, with nonce, the layer "worker" on scratch, which adds the
+// file of the glob "src", and the publication "release", which publishes app to <registry>/team/app and worker to
+// <registry>/team/worker.
+func aPublicationOfTwoImages(nonce string) string {
+	return aTaskAndALayer(nonce) + `
+		layer(name="worker", base="scratch", steps=[add("src", "/src")])
+		publication(name="release", images={"<registry>/team/app": "app", "<registry>/team/worker": "worker"})
+	`
+}
+
+// aPublicationOnScratch declares the layer "app" on scratch, which adds the file of the glob "src", holding the
+// scenario's nonce, so that a coordinator's worker builds it with no base to pull, and the publication "release",
+// which publishes it to <registry>/team/app.
+const aPublicationOnScratch = `
+	glob(name="src", include=["src"])
+	layer(name="app", base="scratch", steps=[add("src", "/src")])
+	publication(name="release", images={"<registry>/team/app": "app"})
+`
+
+// TestTrace_ShowsPublishing specifies that the trace of a publication shows one publish job of the executor within
+// the client's span of publishing, and within it a span for each upload and each tag written, every upload ending
+// before the first tag starts, and each copy in the process that made it: the executor, the client given
+// --push-from=client, or a coordinator's worker, never the coordinator itself.
+func TestTrace_ShowsPublishing(t *testing.T) {
+	t.Run("Uploads, then tags, within one publish job", func(t *testing.T) {
+		w := newTraceWorld(t)
+		w.GivenAProjectThatPullsBusybox()
+		w.GivenARegistry()
+		w.GivenTheBuildFileDeclares(aPublicationOfTwoImages(testenv.NewNonce()))
+		w.GivenTheProjectHolds(theSources)
+		w.WhenIPublish("release", taggedAs("v1", "latest"), traced())
+		w.ThenItSucceeds()
+		w.ThenTheTraceSpanIsWithin("executor", "publish", "vamos", "publish")
+		w.ThenTheTraceSpanIsOnTrack("executor", "publish", "publish")
+		w.ThenTheTraceSpanHolds("executor", "publish",
+			"upload to <registry>/team/app", "upload to <registry>/team/worker",
+			"tag <registry>/team/app:v1", "tag <registry>/team/app:latest",
+			"tag <registry>/team/worker:v1", "tag <registry>/team/worker:latest")
+		w.ThenEverySpanEndsBeforeAnyStarts("executor", "upload to *", "tag *")
+	})
+
+	for _, example := range []struct {
+		name       string
+		options    []option
+		copier     string // the process that uploads and tags
+		notCopying string // a process that copies nothing to the registry
+	}{
+		{
+			name:       "A publication from the executor shows its uploads and tags in the executor's process",
+			copier:     "executor",
+			notCopying: "vamos",
+		},
+		{
+			name:       "A publication from the client shows its uploads and tags in the client's process",
+			options:    []option{fromTheClient(), withoutTLSVerification()},
+			copier:     "vamos",
+			notCopying: "executor",
+		},
+	} {
+		t.Run(example.name, func(t *testing.T) {
+			w := newTraceWorld(t)
+			w.GivenAProjectThatPullsBusybox()
+			w.GivenARegistry()
+			w.GivenTheBuildFileDeclares(aPublicationOnScratch)
+			w.GivenTheProjectHolds(files{"src": testenv.NewNonce()})
+			w.WhenIPublish("release", append([]option{taggedAs("v1"), traced()}, example.options...)...)
+			w.ThenItSucceeds()
+			w.ThenTheTraceSpanIsWithin(example.copier, "upload to <registry>/team/app", "vamos", "publish")
+			w.ThenTheTraceSpanIsWithin(example.copier, "copy to docker://<registry>/team/app*", "vamos", "publish")
+			w.ThenTheTraceSpanIsWithin(example.copier, "tag <registry>/team/app:v1", "vamos", "publish")
+			w.ThenTheTraceHasNoSpan(example.notCopying, "upload to *")
+			w.ThenTheTraceHasNoSpan(example.notCopying, "tag *")
+		})
+	}
+
+	t.Run("A publication on a coordinator shows its uploads and tags in the worker's process, none in its own",
+		func(t *testing.T) {
+			w := newTraceWorld(t)
+			w.GivenAProjectThatPullsBusybox()
+			w.GivenARegistry()
+			w.GivenACoordinatorWithAWorker()
+			w.GivenTheBuildFileDeclares(aPublicationOnScratch)
+			w.GivenTheProjectHolds(files{"src": testenv.NewNonce()})
+			w.WhenIPublish("release", taggedAs("v1"), onTheCoordinator("<coordinator>"), traced())
+			w.ThenItSucceeds()
+			w.ThenTheTraceSpanIsWithin("worker", "upload to <registry>/team/app", "vamos", "publish")
+			w.ThenTheTraceSpanIsWithin("worker", "copy to docker://<registry>/team/app*", "vamos", "publish")
+			w.ThenTheTraceSpanIsWithin("worker", "tag <registry>/team/app:v1", "vamos", "publish")
+			w.ThenTheTraceHasNoSpan("executor", "upload to *")
+			w.ThenTheTraceHasNoSpan("executor", "tag *")
+			w.ThenTheTraceHasNoSpan("executor", "copy to docker://*")
+		})
+
+	t.Run("Publishing again skips what is uploaded", func(t *testing.T) {
+		w := newTraceWorld(t)
+		w.GivenAProjectThatPullsBusybox()
+		w.GivenARegistry()
+		w.GivenTheBuildFileDeclares(aPublicationOnScratch)
+		w.GivenTheProjectHolds(files{"src": testenv.NewNonce()})
+		w.WhenIPublish("release", taggedAs("v1"))
+		w.ThenItSucceeds()
+		w.WhenIPublish("release", taggedAs("v2"), traced())
+		w.ThenItSucceeds()
+		w.ThenTheTraceSkipsTheLayersPushed("executor")
+	})
+}
+
 // TestTrace_ShowsPulls specifies that the trace of a pull of an image that the store lacks shows resolving its tag,
 // and copying the image, a blob at a time.
 func TestTrace_ShowsPulls(t *testing.T) {

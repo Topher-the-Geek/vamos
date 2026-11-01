@@ -33,6 +33,8 @@ type WorkerInfo struct {
 	Version       string               `json:"version"`            // of vamos
 	ActionVersion int                  `json:"action_version"`     // what its keys mean; it must be the coordinator's
 	Capacity      int                  `json:"capacity"`           // how many attempts it runs at once
+	// Publishes says the worker makes a publication's uploads and taggings, which a worker from before them can't.
+	Publishes bool `json:"publishes,omitempty"`
 }
 
 // Registration is what a coordinator answers a worker's registration with.
@@ -52,17 +54,49 @@ type Registration struct {
 type Assignment struct {
 	Attempt string         `json:"attempt"`
 	Request *sched.Request `json:"request,omitempty"` // an action to execute
-	Push    *PushWork      `json:"push,omitempty"`    // or a push to make
+	Push    *PushWork      `json:"push,omitempty"`    // or a push, upload or tagging to make
 	Lease   time.Duration  `json:"lease"`             // how long the attempt lives without a heartbeat
 	// Trace, if set, asks the worker to trace the attempt as part of the coordinator's span Parent,
 	// so that its spans nest where the coordinator started it.
 	Trace *tracing.CallContext `json:"trace,omitempty"`
 }
 
-// PushWork is a push for a worker to make, from the image's locations to a destination.
+// PushWork is a write to a registry for a worker to make, as its Mode says:
+// a push of Result, from its image's locations, to Destination;
+// an upload of Result, likewise, to Repository by digest, with no tag, which changes nothing a user sees,
+// and so may be made again;
+// or the writing of every tag of a publication whose uploads have all succeeded, as Tag says.
 type PushWork struct {
-	Result      api.Result `json:"result"`
-	Destination string     `json:"destination"`
+	Mode        PushMode   `json:"mode,omitempty"`
+	Result      api.Result `json:"result,omitzero"`       // a push's or upload's
+	Destination string     `json:"destination,omitempty"` // a push's: a full reference with a tag
+	Repository  string     `json:"repository,omitempty"`  // an upload's: a full repository name with no tag or digest
+	Tag         *TagWork   `json:"tag,omitempty"`         // a tagging's
+}
+
+// PushMode says what a PushWork writes.
+type PushMode string
+
+// The modes of PushWork.
+const (
+	ModePush   PushMode = ""       // a push to a tag
+	ModeUpload PushMode = "upload" // an upload by digest
+	ModeTag    PushMode = "tag"    // the tags of a publication
+)
+
+// TagWork is the tags of a publication to write, once every image is uploaded:
+// each image's repository under every tag, naming what was uploaded there.
+type TagWork struct {
+	Images  []api.PublishImage `json:"images"`  // in the publication's order
+	Tags    []string           `json:"tags"`    // in the publication's order
+	Uploads []Uploaded         `json:"uploads"` // what was uploaded for each of Images, in its order
+}
+
+// Uploaded is what an upload wrote: its manifest, and what that names, an image's ID there or an index's digest.
+type Uploaded struct {
+	Manifest []byte `json:"manifest"`
+	Image    string `json:"image,omitempty"`
+	Index    string `json:"index,omitempty"`
 }
 
 // Heartbeat is what a worker sends to renew an attempt's lease.
@@ -91,10 +125,14 @@ type OutputEvent struct {
 	Data   []byte `json:"data"`
 }
 
-// AttemptReport is how an attempt ended: a report, a push's outcome, or a failure.
+// AttemptReport is how an attempt ended: a report, a push's outcome, an upload's, a tagging's, or a failure.
 type AttemptReport struct {
-	Report  *sched.Report         `json:"report,omitempty"`
-	Pushed  *api.Pushed           `json:"pushed,omitempty"`
+	Report   *sched.Report `json:"report,omitempty"`
+	Pushed   *api.Pushed   `json:"pushed,omitempty"`
+	Uploaded *Uploaded     `json:"uploaded,omitempty"`
+	// Tagged is a tagging's outcome, as a publish job ends: every destination, and a failure if any tag wasn't
+	// written, which is the publication's, not the attempt's.
+	Tagged  *api.Outcome          `json:"tagged,omitempty"`
 	Failure *sched.AttemptFailure `json:"failure,omitempty"`
 }
 

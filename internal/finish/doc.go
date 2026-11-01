@@ -8,8 +8,8 @@
 // reference the result's location names, with the client's credentials and settings; an index is assembled from its
 // members' locations; and a local executor publishes an image's blobs with an export job, which finish reads through
 // cache.ContentStore. A task's files are always in the content store.
-// Registry push placement is explicit: the executor pushes as a job with its settings,
-// and Push here is the client's, with the client's.
+// Registry push placement is explicit: the executor pushes and publishes as a job with its settings,
+// and Push and Publish here are the client's, with the client's.
 // Destination preflight improves errors but does not reserve a path.
 //
 // # Lifecycle
@@ -22,7 +22,8 @@
 // # Changes
 //
 // Image.open owns where an image is read from; Push, Save and LoadDocker own image delivery through copyTo,
-// which opens the image for transfer.Image; FromLocations decides from a result whether the client reads it from a
+// which opens the image for transfer.Image, and Publish uploads, then tags, through sendImage, transfer.Upload and
+// transfer.Tag; FromLocations decides from a result whether the client reads it from a
 // registry, and whether insecurely, as the executor's capabilities' registry policies say;
 // archiveReference owns archive path adaptation.
 // Export, install, swap and setMetadata in export.go own directory replacement and host metadata.

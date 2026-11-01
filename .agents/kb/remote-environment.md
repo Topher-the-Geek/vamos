@@ -90,7 +90,8 @@ so a worker that crashed cleans up after its attempts, and a deleted pod takes i
 Clients reach the coordinator and the registries by the names above, which resolve only inside the cluster
 unless the values give `cacheRegistry.address` and each cache's `address` as names that clients resolve as well.
 `vamos build` needs the coordinator alone, which `kubectl port-forward` gives a client outside the cluster;
-`load`, `save` and `push --push-from=client` need the registries by the same names the workers use.
+`load`, `save`, `push --push-from=client` and `publish --push-from=client` need the registries by the same names
+the workers use.
 
 The devcontainer has `kind`, `kubectl`, `helm` and `kubeconform`.
 kind runs the cluster's node as a container on the host's Docker, on a network named `kind`,

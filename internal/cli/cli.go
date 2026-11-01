@@ -26,6 +26,7 @@ import (
 	"github.com/Topher-the-Geek/vamos/internal/load"
 	"github.com/Topher-the-Geek/vamos/internal/remote"
 	"github.com/Topher-the-Geek/vamos/internal/run"
+	"github.com/Topher-the-Geek/vamos/internal/sched"
 	"github.com/Topher-the-Geek/vamos/internal/tracing"
 	"github.com/Topher-the-Geek/vamos/internal/worker"
 
@@ -74,7 +75,8 @@ type options struct {
 	rebuild       bool          // build --rebuild
 	replace       bool          // export --replace
 	tag           string        // save --tag
-	pushFrom      pushFromFlag  // push --push-from
+	tags          []string      // publish --tag
+	pushFrom      pushFromFlag  // push and publish --push-from
 	listen        string        // coordinator --listen
 	grace         time.Duration // coordinator --grace
 	window        time.Duration // coordinator --window
@@ -267,6 +269,33 @@ func NewRootCommand(cfg Config) *cobra.Command {
 	pushCmd.Flags().Var(&opts.pushFrom, "push-from",
 		"which side pushes the image, with its credentials: executor or client")
 
+	publishCmd := &cobra.Command{
+		Use:   "publish <publication> --tag <tag>...",
+		Short: "Build a publication's checks and images, then publish every image under every tag",
+		Long: "Build a publication's checks and images in one run and, only if all of them succeed, publish each\n" +
+			"image to its repository under every --tag. Every image is uploaded first, with no tag, and the tags\n" +
+			"are written only once every upload has succeeded, so that a failed upload changes no tag. The executor\n" +
+			"publishes with its own credentials and registry settings, unless --push-from=client is given:\n" +
+			"then vamos publishes with yours.",
+		Example: "  vamos publish release --tag 1.4.2 --tag 1.4 --tag latest\n" +
+			"  vamos publish release --tag v1 --set env=production --push-from=client",
+		Args: func(cmd *cobra.Command, args []string) error {
+			switch {
+			case len(args) == 0:
+				return errors.New("missing publication, e.g. vamos publish release --tag 1.4.2")
+			case len(args) > 1:
+				return fmt.Errorf("expected one publication, got %d arguments: %s", len(args),
+					strings.Join(args, " "))
+			}
+			return checkTags(opts.tags)
+		},
+		RunE: handle(func(inv *invocation, args []string) error { return inv.publish(args[0]) }),
+	}
+	publishCmd.Flags().StringArrayVar(&opts.tags, "tag", nil,
+		"a `tag` to publish every image under, such as 1.4.2 or latest; repeat it for each tag")
+	publishCmd.Flags().Var(&opts.pushFrom, "push-from",
+		"which side publishes the images, with its credentials: executor or client")
+
 	loadCmd := &cobra.Command{
 		Use:     "load <target> <image>",
 		Short:   "Build a target's image and load it into the local Docker daemon",
@@ -340,7 +369,7 @@ func NewRootCommand(cfg Config) *cobra.Command {
 		RunE:   handle(func(inv *invocation, args []string) error { return inv.graph(args) }),
 	}
 
-	for _, cmd := range []*cobra.Command{buildCmd, pushCmd, loadCmd, saveCmd, writeCmd, exportCmd} {
+	for _, cmd := range []*cobra.Command{buildCmd, pushCmd, publishCmd, loadCmd, saveCmd, writeCmd, exportCmd} {
 		cmd.Flags().StringVar(&opts.trace, "trace", "",
 			"write a trace of the command, which Perfetto (ui.perfetto.dev) opens, to `file.json`")
 	}
@@ -416,8 +445,8 @@ func NewRootCommand(cfg Config) *cobra.Command {
 	attemptCmd.Flags().MarkHidden("graph-root")
 	attemptCmd.Flags().MarkHidden("run-root")
 
-	root.AddCommand(buildCmd, pushCmd, loadCmd, saveCmd, writeCmd, exportCmd, pruneCmd, graphCmd, coordinatorCmd,
-		workerCmd, attemptCmd)
+	root.AddCommand(buildCmd, pushCmd, publishCmd, loadCmd, saveCmd, writeCmd, exportCmd, pruneCmd, graphCmd,
+		coordinatorCmd, workerCmd, attemptCmd)
 	return root
 }
 
@@ -943,6 +972,14 @@ func (inv *invocation) runGraph(
 	ex api.Executor, content func() (cache.ContentStore, error), req load.Request, rebuild bool,
 	events *eventPrinter,
 ) ([]api.Result, cache.ContentStore, error) {
+	return inv.runLoaded(ex, content, req, rebuild, events, load.Load)
+}
+
+// runLoaded is runGraph, loading the graph with loadGraph.
+func (inv *invocation) runLoaded(
+	ex api.Executor, content func() (cache.ContentStore, error), req load.Request, rebuild bool,
+	events *eventPrinter, loadGraph func(context.Context, afero.Fs, load.Request) (*graph.Graph, error),
+) ([]api.Result, cache.ContentStore, error) {
 	// The content store is opened only once the targets are configured,
 	// so that a mistake in a BUILD file touches nothing.
 	var c cache.ContentStore
@@ -971,7 +1008,7 @@ func (inv *invocation) runGraph(
 		req.Secrets[id] = true
 	}
 	ctx := inv.ctx
-	g, err := load.Load(ctx, inv.app.fs, req)
+	g, err := loadGraph(ctx, inv.app.fs, req)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1060,6 +1097,25 @@ func (inv *invocation) deliver(
 	return *outcome.Exported, nil
 }
 
+// clientImage returns res's image or index as the client reads it to deliver:
+// an image at a registry, as a coordinator's workers leave it, is read from there; the local executor
+// exports from its store to the content store, content, first, even what it pulled from a registry, so that a
+// local delivery needs no network.
+func (inv *invocation) clientImage(ctx context.Context, ex api.Executor, res api.Result, content cache.ContentStore,
+	events *eventPrinter) (finish.Image, error) {
+	if inv.opts.coordinator != "" {
+		img, located, err := finish.FromLocations(res, inv.registries)
+		if err != nil || located {
+			return img, err
+		}
+	}
+	exp, err := inv.deliver(ctx, ex, res, events)
+	if err != nil {
+		return finish.Image{}, err
+	}
+	return finish.Exported(content, exp), nil
+}
+
 // buildImage builds the image of the target named target and sends it to dest, tracing it if asked.
 func (inv *invocation) buildImage(target string, dest destination) error {
 	return inv.traced(dest.output, false, func() error {
@@ -1107,21 +1163,8 @@ func (inv *invocation) buildImage(target string, dest destination) error {
 				}
 			}
 		} else {
-			// An image at a registry, as a coordinator's workers leave it, is read from there; the local executor
-			// exports from its store to the content store first, even what it pulled from a registry, so that a
-			// local delivery needs no network.
 			var img finish.Image
-			located := false
-			if inv.opts.coordinator != "" {
-				img, located, err = finish.FromLocations(res, inv.registries)
-			}
-			if err == nil && !located {
-				var exp api.Exported
-				if exp, err = inv.deliver(ctx, ex, res, events); err == nil {
-					img = finish.Exported(content, exp)
-				}
-			}
-			if err == nil {
+			if img, err = inv.clientImage(ctx, ex, res, content, events); err == nil {
 				imageId, err = dest.send(ctx, img, sys)
 			}
 		}
@@ -1157,6 +1200,157 @@ func (inv *invocation) push(target, image string) error {
 	}
 	return inv.buildImage(target, dest)
 }
+
+// publish builds the publication named target, its checks and images, and only if all of them succeed publishes
+// each image to its repository under every --tag, from the side --push-from says, tracing it if asked;
+// it reports each destination, in the publication's order, as push reports its one.
+func (inv *invocation) publish(target string) error {
+	return inv.traced("", false, func() error {
+		ex, sys, err := inv.executor()
+		if err != nil {
+			return err
+		}
+		defer inv.closeExecutor(ex)
+		execPlatform, err := inv.capabilities(ex)
+		if err != nil {
+			return err
+		}
+		var plan *load.Publication
+		events := inv.events()
+		results, content, err := inv.runLoaded(ex, ex.ContentStore,
+			inv.request([]string{target}, load.WantPublication, execPlatform), false, events,
+			func(ctx context.Context, fsys afero.Fs, req load.Request) (*graph.Graph, error) {
+				g, p, err := load.LoadPublication(ctx, fsys, req)
+				if err == nil {
+					// Before anything is built, rather than once it is.
+					err = sched.CheckDestinations(len(p.Images), len(inv.opts.tags))
+				}
+				plan = p
+				return g, err
+			})
+		if err != nil {
+			return err
+		}
+		ctx, span := tracing.Start(inv.ctx, "publish", "tags", inv.opts.tags)
+		var destinations []api.Destination
+		if finish.PushFrom(inv.opts.pushFrom) == finish.FromExecutor {
+			destinations, err = inv.publishFromExecutor(ctx, ex, plan, results, events)
+		} else {
+			destinations, err = inv.publishFromClient(ctx, ex, plan, results, content, events, sys)
+		}
+		span.EndWith(err)
+		if err != nil {
+			return fmt.Errorf("publishing %s: %w", target, err)
+		}
+		for _, d := range destinations {
+			label := d.Repository + ":" + d.Tag
+			if named, err := reference.ParseNormalizedNamed(label); err == nil {
+				label = reference.FamiliarString(named)
+			}
+			if d.Index != "" {
+				// An index has no image ID: name it by its manifest's digest, which is what registries show.
+				if err := inv.printf("Index built! %s %s\n", label, d.Index); err != nil {
+					return err
+				}
+			} else if err := inv.printf("Image built! %s %s\n", label, d.Image); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// publishFromExecutor has the executor publish plan's images, results' by root, under every --tag, as one job,
+// with its own credentials and registry settings, and returns every destination.
+func (inv *invocation) publishFromExecutor(ctx context.Context, ex api.Executor, plan *load.Publication,
+	results []api.Result, events *eventPrinter) ([]api.Destination, error) {
+	req := api.PublishRequest{Tags: inv.opts.tags, Trace: tracing.Call(ctx)}
+	for _, image := range plan.Images {
+		req.Images = append(req.Images, api.PublishImage{Result: results[image.Root], Repository: image.Repository})
+	}
+	id, err := ex.Submit(ctx, api.Request{Publish: &req})
+	if err != nil {
+		return nil, err
+	}
+	outcome, _, err := watchJob(ctx, ex, id, events)
+	if err != nil && ctx.Err() != nil {
+		// An interruption hides how the job ended, which says what it wrote before it stopped, if it stopped at all.
+		// The executor may be out of reach too, so asking is bounded, as releasing a build is.
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		ended, rerr := ex.Result(rctx, id)
+		cancel()
+		if rerr == nil {
+			switch {
+			case ended.Failure == nil && !ended.Cancelled && ended.Published != nil:
+				outcome, err = ended, nil // it had finished: every tag was written
+			case ended.Published != nil && ended.Published.Shortfall() != "":
+				if msg := ended.Published.Shortfall(); !strings.Contains(err.Error(), msg) {
+					err = fmt.Errorf("%w: %s", err, msg)
+				}
+			case ended.Failure != nil:
+				if msg := ended.Failure.Describe(events.graph); !strings.Contains(err.Error(), msg) {
+					err = fmt.Errorf("%w: %s", err, msg)
+				}
+			}
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	if outcome.Published == nil {
+		return nil, errors.New("the executor published nothing")
+	}
+	return outcome.Published.Destinations, nil
+}
+
+// publishFromClient publishes plan's images, results' by root, under every --tag, from this process,
+// with the client's credentials and registry settings, sys, reading each image once, and returns every destination.
+func (inv *invocation) publishFromClient(ctx context.Context, ex api.Executor, plan *load.Publication,
+	results []api.Result, content cache.ContentStore, events *eventPrinter, sys *types.SystemContext) (
+	[]api.Destination, error) {
+	// The same checks as an executor's, before anything is exported.
+	check := api.PublishRequest{Tags: inv.opts.tags}
+	for _, image := range plan.Images {
+		check.Images = append(check.Images, api.PublishImage{Result: results[image.Root], Repository: image.Repository})
+	}
+	repos, _, err := sched.ParsePublication(check)
+	if err != nil {
+		return nil, err
+	}
+	images := map[int]finish.Image{}
+	var publications []finish.Publication
+	for i, image := range plan.Images {
+		img, ok := images[image.Root]
+		if !ok {
+			var err error
+			if img, err = inv.clientImage(ctx, ex, results[image.Root], content, events); err != nil {
+				return nil, err
+			}
+			images[image.Root] = img
+		}
+		publications = append(publications, finish.Publication{Image: img, Repository: repos[i]})
+	}
+	return finish.Publish(ctx, publications, inv.opts.tags, sys)
+}
+
+// checkTags checks the tags that --tag gives, before anything is loaded: at least one, each a valid tag, given once.
+func checkTags(tags []string) error {
+	if len(tags) == 0 {
+		return errors.New(`required flag "tag" not set: give each tag to publish with --tag, as in --tag 1.4.2`)
+	}
+	for i, tag := range tags {
+		if _, err := reference.WithTag(placeholderRepository, tag); err != nil {
+			return fmt.Errorf("--tag %q is not a valid tag: %w", tag, err)
+		}
+		if slices.Contains(tags[:i], tag) {
+			return fmt.Errorf("--tag %q is given twice", tag)
+		}
+	}
+	return nil
+}
+
+// placeholderRepository is a repository to check tags against, which any valid tag can name.
+var placeholderRepository, _ = reference.ParseNamed("example.com/vamos")
 
 // load builds target's image and loads it into the Docker daemon, named image.
 func (inv *invocation) load(target, image string) error {

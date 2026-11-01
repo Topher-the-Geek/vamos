@@ -414,7 +414,8 @@ Use the references as your project grows:
 - [BUILD language](reference/build.md): target arguments, steps, file selection, and tasks that run checks.
   Tasks without `source` and `include` can run tests or lint; request them explicitly with `vamos build test lint`.
   Building an application does not automatically run unrelated check targets.
-- [CLI](reference/cli.md): push an image to a registry, save an archive, or export task files.
+- [CLI](reference/cli.md): push an image to a registry, release several images under every tag with
+  `vamos publish`, save an archive, or export task files.
 - [Configuration](reference/configuration.md): split a project into packages, add parameters,
   and publish several platforms together with an image index.
 - [Cache and traces](reference/cache.md): refresh dependencies or cached checks with `--rebuild`,

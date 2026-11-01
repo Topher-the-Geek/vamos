@@ -15,8 +15,9 @@ Delivery commands build the requested target and its dependencies before sending
 
 | Command | Accepted targets | Result |
 | --- | --- | --- |
-| `vamos build <target>...` | Pulls, layers, tasks, indexes | Keep results in the build cache |
+| `vamos build <target>...` | Pulls, layers, tasks, indexes, publications | Keep results in the build cache |
 | `vamos push <target> <image>` | Pulls, layers, indexes | Publish to an image registry |
+| `vamos publish <publication> --tag <tag>...` | Publications | Publish a release's images under every tag |
 | `vamos load <target> <image>` | Pulls, layers, indexes | Load an image into Docker |
 | `vamos save <target> <file.tar>` | Pulls, layers, indexes | Write a Docker-loadable image archive |
 | `vamos export <task> <folder>` | Tasks with output | Write a fileset into a local folder |
@@ -33,7 +34,8 @@ vamos build test --rebuild
 ```
 
 Accepts one or more target names.
-An index builds all its images.
+An index builds all its images, and a [publication](build.md#publication) its checks and images,
+publishing nothing, as a dry run of `publish`.
 A successful check task can be cached even though it produces no files.
 
 `--rebuild` runs the explicitly named targets again while allowing their dependencies to be reused.
@@ -58,6 +60,40 @@ The executor currently runs inside vamos, so both read your local environment,
 but only the client honours the command line's `--tls-verify`.
 A push retries transient registry failures as `containers.conf` configures, then reads the tag back
 from the registry it wrote to, never a mirror, and fails if it names another manifest.
+
+### `publish`
+
+```sh
+vamos publish release --tag 1.4.2 --tag 1.4 --tag latest
+vamos publish release --tag v1 --set env=production --push-from=client
+```
+
+Builds a [publication](build.md#publication)'s checks and images in one run,
+and only if all of them succeed publishes each image, or index, to its repository under every tag given.
+`--tag` is required and may be repeated, so that an exact version and the tags that follow each release,
+such as `1.4`, `1` and `latest`, go out together;
+a missing, invalid or repeated tag is a command-line mistake, reported before anything is built,
+as is a publication that would write more than 1000 destinations, its repositories times its tags.
+Naming anything but a publication fails, saying what it is.
+`--set` gives the publication's own parameters, and `--push-from` works as it does for `push`:
+the executor publishes by default, and `--push-from=client` publishes with the client's credentials and
+`--tls-verify`.
+
+Publishing has two phases.
+First every image is uploaded to each of its repositories by digest, with no tag,
+so that a failed upload, which fails the command naming the repository, leaves every tag as it was.
+Only once every upload has succeeded are the tags written, each read back, as `push` reads its tag back.
+A failure while writing tags still attempts every tag, and fails the command naming each tag that wasn't written,
+with why, and each that was; running the command again finishes the job, uploading nothing already there.
+On success it reports one line for each repository and tag, `Image built! <repository>:<tag> <id>`,
+or `Index built!` with the index's digest, in the publication's order.
+
+The local executor and the client upload one repository at a time, then write one tag at a time;
+a coordinator uploads on its workers, as many at once as its `--bound`, and writes every tag on one worker afterwards.
+Between the phases the uploads are named by no tag, so a registry that removes untagged manifests,
+through ECR lifecycle rules or Harbor's garbage collection, could remove one in that window;
+the phases are seconds apart, and publishing again uploads it again.
+Reading a tag back needs read access to the repository as well as write, as `push` does.
 
 ### `load`
 
@@ -148,18 +184,23 @@ it expired; a client holds its build through delivery and releases it when done,
 A client and a coordinator must run the same version of vamos's build graph; the client refuses one that doesn't.
 `prune --coordinator URL` empties the coordinator's build cache and the cache repository's tags, keeping tag records
 and the pull-through cache; the cache registry must have deletion enabled, as the compose file's does.
-It is refused while any build or push is open, a finished build that its client still holds included, while attempts
-are still ending on the workers, and for a lease after the coordinator started, and a build whose sources were
-captured before a prune is refused at submit with a message to run it again.
+It is refused while any build, push or publication is open, a finished build that its client still holds included,
+while attempts are still ending on the workers, and for a lease after the coordinator started,
+and a build whose sources were captured before a prune is refused at submit with a message to run it again.
 `--window` says how long a finished build stays readable after it ends or was last watched before the coordinator
 forgets it; `--grace` if shorter.
 
-`load`, `save` and `push --push-from=client` read a built image from the cache repository, and a `pull()` root from
-the pull-through cache, with the client's credentials and `--tls-verify`, so the client must reach both;
+`load`, `save`, `push --push-from=client` and `publish --push-from=client` read a built image from the cache
+repository, and a `pull()` root from the pull-through cache, with the client's credentials and `--tls-verify`,
+so the client must reach both;
 a repository among those two that the coordinator reaches insecurely, as its `registries.conf` marks the repository
 or, failing an entry for it, its registry, or as the coordinator's own `--tls-verify=false` says, the client reads as
 the coordinator does, over plain HTTP, whatever `--tls-verify` and its own `registries.conf` say;
-`push` from the executor runs on a worker, copying from there with the worker's credentials.
+`push` from the executor runs on a worker, copying from there with the worker's credentials;
+`publish` from the executor runs its uploads on workers, as many at once as the coordinator's `--bound`,
+then writes every tag on one worker,
+and a publication counts as one build against `--max-builds`, however many repositories and tags it has;
+the coordinator itself never contacts a destination registry.
 `export` reads a task's files from the coordinator's build cache.
 
 Workers push every layer they build to `--cache-repository`, an OCI registry repository, tagged by image ID,
@@ -190,7 +231,8 @@ but run on any worker while none of that platform is registered.
 unless they give `--exec-platform`, so that clients of every architecture configure `EXEC_PLATFORM` alike
 and reuse each other's results; without it each client uses its own platform where the coordinator offers it.
 A worker that stops renewing an attempt's lease (`--lease`) is lost, and its work tried again elsewhere,
-up to `--retries` times; a push is never retried, since its write may have happened.
+up to `--retries` times, a publication's uploads included, since an upload by digest changes no tag;
+a push, and a publication's tagging, are never retried, since their writes may have happened.
 Beyond `--max-builds` open builds, submissions are refused as busy.
 
 There is no authentication: run a coordinator on a trusted network alone, where anyone who can reach it
@@ -200,7 +242,8 @@ The coordinator keeps its jobs in `coordinator/` under `--cache-dir`, so a resta
 them: clients reconnect within `--grace`, warn that the coordinator restarted, and see their builds finish.
 A resumed build runs again from its start: what finished before the restart is cached, and what was running starts
 again on a worker, since workers stop what they ran for a coordinator they lost and register again.
-A push or prune that was running fails, since whether it wrote is unknown, and a cancelled build stays cancelled.
+A push, publication or prune that was running fails, since whether it wrote is unknown,
+and a cancelled build stays cancelled.
 Two coordinators can't share that directory: the second refuses to start.
 A coordinator started without that directory has none of its jobs: clients report that their builds were lost,
 and rerunning reuses what finished.
@@ -264,17 +307,20 @@ Values stay in the vamos process: they never enter the build cache, images, trac
 build secrets in your own process.
 
 `--trace <file.json>` writes a [Perfetto trace](cache.md#traces)
-and is available on `build`, `push`, `load`, `save` (including its deprecated `write` alias), and `export`.
+and is available on `build`, `push`, `publish`, `load`, `save` (including its deprecated `write` alias),
+and `export`.
 
 The TLS flag displays `true` in help, and given alone means `true`, but when omitted vamos defers to `registries.conf`,
 including entries with `insecure = true`.
-It applies to what the client itself does: a push with `--push-from=client`, and reading a coordinator's images to
-load, save or push, except from a cache registry or pull-through cache that the coordinator marks insecure,
+It applies to what the client itself does: a push or publication with `--push-from=client`,
+and reading a coordinator's images to load, save, push or publish,
+except from a cache registry or pull-through cache that the coordinator marks insecure,
 which the client reads as the coordinator does, while the destination keeps `--tls-verify`;
 the executor, which pulls and pushes otherwise, follows `registries.conf` alone,
 so mark a plain-HTTP registry `insecure = true` there for it.
 
-Command-specific flags are `build --rebuild`, `push --push-from`, `save --tag`/`-t`, and `export --replace`.
+Command-specific flags are `build --rebuild`, `push --push-from`, `publish --tag` and `--push-from`,
+`save --tag`/`-t`, and `export --replace`.
 
 ## Registry credentials
 

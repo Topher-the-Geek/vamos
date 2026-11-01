@@ -66,7 +66,8 @@ func (f Fixture) requireBuilds(t *testing.T) {
 
 // Contract checks that executors that f makes keep the contract of api.Executor:
 // capabilities, a graph run watched to its terminal event and read back, refusals before any work,
-// unknown jobs, cancellation and prune, that values cross by copy, and that a watch stops when its context ends.
+// unknown jobs, cancellation, push, publish and prune,
+// that values cross by copy, and that a watch stops when its context ends.
 func Contract(t *testing.T, f Fixture) {
 	t.Run("capabilities", func(t *testing.T) { testCapabilities(t, f) })
 	t.Run("graph job", func(t *testing.T) { testGraphJob(t, f) })
@@ -78,6 +79,7 @@ func Contract(t *testing.T, f Fixture) {
 	t.Run("retention", func(t *testing.T) { testRetention(t, f) })
 	t.Run("export", func(t *testing.T) { testExport(t, f) })
 	t.Run("push", func(t *testing.T) { testPush(t, f) })
+	t.Run("publish", func(t *testing.T) { testPublish(t, f) })
 	t.Run("prune", func(t *testing.T) { testPrune(t, f) })
 	t.Run("values owned", func(t *testing.T) { testValuesOwned(t, f) })
 	t.Run("delivery values owned", func(t *testing.T) { testDeliveryValuesOwned(t, f) })

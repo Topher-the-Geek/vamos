@@ -120,10 +120,12 @@ func (w *world) ThenTheTraceCopiesNoBlobWithin(process, name string) {
 }
 
 // ThenTheTraceSpanHolds checks that the spans directly within the span of process that name names are exactly
-// children, in order, each of which may start or end in "*", as matches says.
+// children, in order, each of which may start or end in "*", as matches says, and in which placeholders stand for
+// what atPlaceholders says.
 func (w *world) ThenTheTraceSpanHolds(process, name string, children ...string) {
 	w.t.Helper()
 	s := w.span(process, name)
+	children = w.allAtPlaceholders(children)
 	got := s.childNames()
 	same := len(got) == len(children)
 	for i := 0; same && i < len(children); i++ {
@@ -166,6 +168,25 @@ func (w *world) ThenTheTraceSpanIsWithin(process, name, outerProcess, outer stri
 			}
 			if p == o {
 				break
+			}
+		}
+	}
+}
+
+// ThenEverySpanEndsBeforeAnyStarts checks that every span of process that first names ends before any span of process
+// that then names starts, by the trace's clock, stopping the scenario if either names none.
+func (w *world) ThenEverySpanEndsBeforeAnyStarts(process, first, then string) {
+	w.t.Helper()
+	tr := w.theTrace()
+	before, after := tr.all(process, w.atPlaceholders(first)), tr.all(process, w.atPlaceholders(then))
+	if len(before) == 0 || len(after) == 0 {
+		w.t.Fatalf("the trace has %d spans of %s named %q and %d named %q, want some of each",
+			len(before), process, first, len(after), then)
+	}
+	for _, b := range before {
+		for _, a := range after {
+			if b.end > a.TS {
+				w.t.Errorf("%q ends after %q starts", b.Name, a.Name)
 			}
 		}
 	}

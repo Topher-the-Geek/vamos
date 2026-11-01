@@ -12,8 +12,9 @@ Docker is a destination, not the build engine.
 
 [cli](../../internal/cli/doc.go) coordinates the phases.
 The executor owns buildah, container storage and base image pulls.
-Push normally runs there; `--push-from=client` selects client credentials and registry settings.
-Finish may contact a registry for that client push, so registry access is not exclusively an executor concern.
+Push and publish normally run there; `--push-from=client` selects client credentials and registry settings.
+Finish may contact a registry for that client push or publication,
+so registry access is not exclusively an executor concern.
 
 The graph and the content store are the load/run data boundary.
 No Starlark values, open project files or in-memory loader state may cross it.
@@ -27,10 +28,14 @@ actions free of buildah, so that a coordinator can use it, and [remote](../../in
 `api.Executor` and `cache.ContentStore` over HTTP, so that `vamos coordinator` serves one to clients that give
 `--coordinator`;
 see [remote-environment.md](remote-environment.md) for the environment it runs in.
-Push and export are jobs too: a push sends an image from the executor's store, or on a worker from the image's
-location, with the executor's credentials, and a local executor's export publishes an image's blobs to the content
-store, from which the client's finish delivers them; a coordinator exports nothing, since its workers leave every
-image at a registry location that the client reads directly.
+Push, publish and export are jobs too.
+A push sends an image from the executor's store, or on a worker from the image's location,
+with the executor's credentials;
+a publication uploads each image by digest the same way, and writes every tag only once every upload has succeeded,
+as one job; on a coordinator only workers contact a destination registry, never the coordinator itself.
+A local executor's export publishes an image's blobs to the content store, from which the client's finish delivers
+them; a coordinator exports nothing, since its workers leave every image at a registry location that the client
+reads directly.
 Only [transfer](../../internal/transfer/doc.go), which copies images with a trace, is shared by both sides.
 Dependency constraints are executable in [TestImportRules](../../internal/deps_test.go);
 consult that test before adding imports.

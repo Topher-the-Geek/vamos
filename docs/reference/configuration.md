@@ -273,6 +273,7 @@ An [index](build.md#index) supplies its own platform list, so it cannot be named
 | --- | --- |
 | `build` | Build all images into the cache |
 | `push` | Build and publish all images, preserving index order |
+| `publish` | Build and publish all images to each repository a publication gives the index, under every tag |
 | `load` | Build and load only the Docker daemon's platform |
 | `save` | Build and save only the host's platform |
 

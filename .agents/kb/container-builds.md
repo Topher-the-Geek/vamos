@@ -19,8 +19,9 @@ Platform selection spans configuration, execution and delivery.
 `EXEC_PLATFORM` describes the executor, whereas a target's platform describes its requested output.
 `workspace.edge` and `workspace.imageRoot` in [load](../../internal/load/doc.go) own propagation
 and destination selection.
-Indexes are command-line roots;
-`build` and `push` keep the index, while `load` and `save` choose a manifest before configuring its dependencies.
+Indexes are command-line roots, or a publication's;
+`build`, `push` and `publish` keep the index,
+while `load` and `save` choose a manifest before configuring its dependencies.
 This avoids building images a single-image destination cannot consume.
 
 Cross-compilation and emulated execution are separate choices.
@@ -56,14 +57,23 @@ For file destinations, inspect `Save`, `Export`, `install`
 and `swap` in [finish](../../internal/finish/doc.go) before changing preflight or installation.
 Preflight checks improve diagnostics but cannot authorize deleting files that appear while a build runs.
 The replacement fallback may briefly leave the destination absent; cleanup failure after installation is a warning.
+A publication delivers in two phases, so that a failure changes no tag before every image is in place:
+it uploads every image to its repository by digest, with no tag, and only once every upload has succeeded writes
+every tag, putting each the manifest uploaded and reading it back; a failure while tagging still attempts every tag
+and reports which were written.
+The executor's job, `run.Local`'s or a coordinator's on its workers, and the client's `finish.Publish` share
+`transfer.Upload` and `transfer.Tag`, which own those writes.
 
 Transport details belong beside their owners:
-`Image.open`, `copyTo` and `LoadDocker` in [finish.go](../../internal/finish/finish.go),
+`Image.open`, `copyTo` and `LoadDocker` in [finish.go](../../internal/finish/finish.go), and `Publish` in
+[publish.go](../../internal/finish/publish.go),
 which deliver an image from the registry its result locates it at, an index assembled from its members' locations,
 or an export in the content store, through an OCI layout;
-`export`, `pushImage` and `layoutIndex` in [executor.go](../../internal/run/executor.go),
-which publish an image's blobs or push them; `Image`, `Push`, `Policy`, `Layout` and `LayoutIndex` in
-[transfer](../../internal/transfer/doc.go), which both sides copy with; and the registry settings,
+`export` in [executor.go](../../internal/run/executor.go)
+and `sendResult` in [publish.go](../../internal/run/publish.go), which publish an image's blobs, or push or upload them;
+`Image`, `Push`, `Upload`, `Tag`, `Policy`, `Layout` and `LayoutIndex`
+in [transfer](../../internal/transfer/doc.go),
+which both sides copy with; and the registry settings,
 `run.SystemContext` for the executor's environment and `invocation.systemContext` in
 [cli.go](../../internal/cli/cli.go) for the client's, with `--tls-verify`.
 Construct image references with transport packages;

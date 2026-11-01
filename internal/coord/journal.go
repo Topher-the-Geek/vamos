@@ -49,7 +49,8 @@ type journal struct {
 }
 
 // record is what the journal keeps of a job: the request that started it, the submission that made it, and how it
-// has changed. Exactly one of Build, Push and Prune is set, until the job is evicted, when only ID and Evicted are.
+// has changed. Exactly one of Build, Push, Publish and Prune is set, until the job is evicted, when only ID and
+// Evicted are.
 type record struct {
 	ID         api.JobID         `json:"id"`
 	Submission string            `json:"submission,omitempty"` // the ID its client gave the submission
@@ -57,16 +58,17 @@ type record struct {
 	// Native names the platforms the build's actions run on natively: those the deployment offered when it was
 	// submitted, and any offered since that it reached, recorded before it gave an action to one, so that a build
 	// resumed before the workers register again still waits for theirs. A record made before has none.
-	Native    []string         `json:"native,omitempty"`
-	Push      *api.PushRequest `json:"push,omitempty"`
-	Prune     bool             `json:"prune,omitempty"`
-	Restarts  int64            `json:"restarts,omitempty"` // how many times a restart resumed or ended it
-	Cancelled bool             `json:"cancelled,omitempty"`
-	Released  bool             `json:"released,omitempty"`
-	Outcome   *api.Outcome     `json:"outcome,omitempty"` // once it ended
-	Done      int64            `json:"done,omitempty"`    // the position of its terminal event, once it ended
-	Ended     time.Time        `json:"ended,omitzero"`
-	Evicted   time.Time        `json:"evicted,omitzero"` // once it was evicted: a tombstone
+	Native    []string            `json:"native,omitempty"`
+	Push      *api.PushRequest    `json:"push,omitempty"`
+	Publish   *api.PublishRequest `json:"publish,omitempty"`
+	Prune     bool                `json:"prune,omitempty"`
+	Restarts  int64               `json:"restarts,omitempty"` // how many times a restart resumed or ended it
+	Cancelled bool                `json:"cancelled,omitempty"`
+	Released  bool                `json:"released,omitempty"`
+	Outcome   *api.Outcome        `json:"outcome,omitempty"` // once it ended
+	Done      int64               `json:"done,omitempty"`    // the position of its terminal event, once it ended
+	Ended     time.Time           `json:"ended,omitzero"`
+	Evicted   time.Time           `json:"evicted,omitzero"` // once it was evicted: a tombstone
 }
 
 // tombstones is how many evicted jobs the journal remembers, as sched.Jobs does in memory.
@@ -208,7 +210,7 @@ func readJobRecord(path string, id api.JobID) (*record, error) {
 		return nil, fmt.Errorf("%w: %w", errCorruptRecord, err)
 	}
 	kinds := 0
-	for _, set := range []bool{r.Build != nil, r.Push != nil, r.Prune} {
+	for _, set := range []bool{r.Build != nil, r.Push != nil, r.Publish != nil, r.Prune} {
 		if set {
 			kinds++
 		}

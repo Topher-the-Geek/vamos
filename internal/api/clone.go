@@ -44,6 +44,24 @@ func (r Request) Clone() Request {
 		e := r.Export.Clone()
 		r.Export = &e
 	}
+	if r.Publish != nil {
+		p := r.Publish.Clone()
+		r.Publish = &p
+	}
+	return r
+}
+
+// Clone returns a copy of r that shares no memory with it.
+func (r PublishRequest) Clone() PublishRequest {
+	if r.Images != nil {
+		images := make([]PublishImage, len(r.Images))
+		for i, image := range r.Images {
+			images[i] = PublishImage{Result: image.Result.Clone(), Repository: image.Repository}
+		}
+		r.Images = images
+	}
+	r.Tags = slices.Clone(r.Tags)
+	r.Trace = clonePointer(r.Trace)
 	return r
 }
 
@@ -108,6 +126,10 @@ func (o Outcome) Clone() Outcome {
 		o.Exported = &e
 	}
 	o.Pruned = clonePointer(o.Pruned)
+	if o.Published != nil {
+		p := Published{Destinations: slices.Clone(o.Published.Destinations)}
+		o.Published = &p
+	}
 	if o.Failure != nil {
 		f := o.Failure.Clone()
 		o.Failure = &f

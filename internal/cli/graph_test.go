@@ -16,6 +16,7 @@ func TestGraphExamples(t *testing.T) {
 	tests := []struct {
 		dir     string
 		targets []string
+		flags   []string
 	}{
 		{
 			dir:     "../../examples/typescript-mcp",
@@ -27,7 +28,8 @@ func TestGraphExamples(t *testing.T) {
 		},
 		{
 			dir:     "../../examples/strawberry-react",
-			targets: []string{"//backend:layer", "//backend:test", "//ui:layer", "//ui:lint"},
+			targets: []string{"//backend:layer", "//backend:test", "//ui:layer", "//ui:lint", "//:release"},
+			flags:   []string{"--set", "registry=registry.example/strawberry"},
 		},
 		{
 			dir:     "../../examples/golang-cli",
@@ -36,7 +38,7 @@ func TestGraphExamples(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.dir, func(t *testing.T) {
-			args := append([]string{"graph"}, tt.targets...)
+			args := append(append([]string{"graph"}, tt.targets...), tt.flags...)
 			r := vamos(t, afero.NewOsFs(), append(args, "-C", tt.dir)...).ran(t)
 			g, err := graph.Decode([]byte(r.stdout))
 			if err != nil {

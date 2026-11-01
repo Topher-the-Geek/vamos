@@ -513,6 +513,55 @@ func (w *world) ThenNothingIsPushed() {
 	}
 }
 
+// ThenTheRepositoryHasTags checks that the repository repo of the scenario's registry, in which <registry> stands for
+// it, has exactly tags, in any order: none, if none are given, or it has no such repository.
+func (w *world) ThenTheRepositoryHasTags(repo string, tags ...string) {
+	w.t.Helper()
+	r, err := name.NewRepository(w.atRegistry(repo), name.Insecure)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	got, err := remote.List(r, w.readingTheRegistry()...)
+	var terr *transport.Error
+	if errors.As(err, &terr) && terr.StatusCode == http.StatusNotFound {
+		got, err = nil, nil
+	}
+	if err != nil {
+		w.t.Fatalf("listing the tags of %s: %v", repo, err)
+	}
+	want := slices.Clone(tags)
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		w.t.Errorf("%s has tags %v, want %v", repo, got, want)
+	}
+}
+
+// ThenTheyNameTheSameManifest checks that each of images, tagged names in which <registry> stands for the scenario's
+// registry, names the same manifest, stopping the scenario if one names none.
+func (w *world) ThenTheyNameTheSameManifest(images ...string) {
+	w.t.Helper()
+	if len(images) < 2 {
+		w.t.Fatal("give at least two images to compare")
+	}
+	var first v1.Hash
+	for i, image := range images {
+		ref, err := name.ParseReference(w.atRegistry(image), name.Insecure)
+		if err != nil {
+			w.t.Fatal(err)
+		}
+		desc, err := remote.Head(ref, w.readingTheRegistry()...)
+		if err != nil {
+			w.t.Fatalf("reading %s: %v", image, err)
+		}
+		if i == 0 {
+			first = desc.Digest
+		} else if desc.Digest != first {
+			w.t.Errorf("%s names manifest %s, want the one %s names, %s", image, desc.Digest, images[0], first)
+		}
+	}
+}
+
 // readingTheRegistry returns the options that read from the scenario's registry, logged in if it needs it.
 func (w *world) readingTheRegistry() []remote.Option {
 	if w.login == nil {

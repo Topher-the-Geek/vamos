@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"slices"
 
 	"github.com/Topher-the-Geek/vamos/internal/cache"
 	"github.com/Topher-the-Geek/vamos/internal/fileset"
@@ -18,10 +19,23 @@ import (
 type Want int
 
 const (
-	WantBuild Want = iota // build them into the build cache: pulls, layers, tasks and indexes
-	WantImage             // send the image of one: a pull, layer or index
-	WantFiles             // export the files of one: a task given source
+	WantBuild       Want = iota // build them into the build cache: pulls, layers, tasks, indexes and publications
+	WantImage                   // send the image of one: a pull, layer or index
+	WantFiles                   // export the files of one: a task given source
+	WantPublication             // publish one: a publication, whose checks and images LoadPublication returns
 )
+
+// Publication is what a publication publishes, once its checks and images are built:
+// the graph's roots are its checks, then its images, each once, in order, and Images says where each goes.
+type Publication struct {
+	Images []PublishedImage // in the order the publication gives them
+}
+
+// PublishedImage is an image, or index, that a publication publishes to one repository.
+type PublishedImage struct {
+	Root       int    // the index in the graph's Roots, and so in a job's results, of the image or index
+	Repository string // the repository's full name, such as "docker.io/library/app", with no tag or digest
+}
 
 // Request asks Load for the graph of building the targets a command names.
 type Request struct {
@@ -49,77 +63,96 @@ type Request struct {
 // configures those targets, reads the files of the globs they add with req.Store, and returns their graph, checked.
 // Every mistake in a BUILD file or the command line is reported here, saying where.
 // Loading is one span of ctx's trace, and reading each glob another, within it.
-func Load(ctx context.Context, fsys afero.Fs, req Request) (_ *graph.Graph, err error) {
+func Load(ctx context.Context, fsys afero.Fs, req Request) (*graph.Graph, error) {
+	g, _, err := traceLoad(ctx, fsys, req)
+	return g, err
+}
+
+// LoadPublication is Load for the publication that req names alone, whatever req.Want says:
+// it returns the graph of its checks and images, as Publication describes its roots, and where each image goes.
+// A target that isn't a publication is refused, saying what it is.
+func LoadPublication(ctx context.Context, fsys afero.Fs, req Request) (*graph.Graph, *Publication, error) {
+	req.Want = WantPublication
+	return traceLoad(ctx, fsys, req)
+}
+
+// traceLoad is Load and LoadPublication, as one span of ctx's trace.
+func traceLoad(ctx context.Context, fsys afero.Fs, req Request) (_ *graph.Graph, _ *Publication, err error) {
 	ctx, span := tracing.Start(ctx, "load", "targets", req.Targets)
 	defer func() { span.EndWith(err) }()
-	g, w, err := load(ctx, fsys, req)
+	g, pub, w, err := load(ctx, fsys, req)
 	if w != nil {
 		span.Set("workspace", w.root, "BUILD files", len(w.packages))
 	}
 	if g != nil {
 		span.Set("nodes", len(g.Nodes))
 	}
-	return g, err
+	return g, pub, err
 }
 
-// load is Load, also returning the workspace, once opened.
-func load(ctx context.Context, fsys afero.Fs, req Request) (*graph.Graph, *workspace, error) {
+// load is LoadPublication, also returning the workspace, once opened; the publication is nil unless req wants one.
+func load(ctx context.Context, fsys afero.Fs, req Request) (*graph.Graph, *Publication, *workspace, error) {
 	dir, err := filepath.Abs(req.Dir)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	w, err := openWorkspace(ctx, fsys, dir, req.ExecPlatform)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if req.Platform != "" {
 		if w.platform, err = parsePlatform(req.Platform); err != nil {
-			return nil, w, fmt.Errorf("--platform %s: %w", req.Platform, err)
+			return nil, nil, w, fmt.Errorf("--platform %s: %w", req.Platform, err)
 		}
 	}
 
 	var roots []confLabel
+	var pub *Publication
 	switch req.Want {
+	case WantPublication:
+		if roots, pub, err = w.publicationRoots(req); err != nil {
+			return nil, nil, w, err
+		}
 	case WantImage:
 		root, err := w.imageRoot(ctx, req)
 		if err != nil {
-			return nil, w, err
+			return nil, nil, w, err
 		}
 		roots = []confLabel{root}
 	case WantFiles:
 		l, err := w.filesTarget(req.Targets[0])
 		if err != nil {
-			return nil, w, err
+			return nil, nil, w, err
 		}
 		c, err := w.commandConfigOf(l, "task", req, false)
 		if err != nil {
-			return nil, w, err
+			return nil, nil, w, err
 		}
 		roots = []confLabel{{l, c}}
 	default:
 		if roots, err = w.buildRoots(req); err != nil {
-			return nil, w, err
+			return nil, nil, w, err
 		}
 	}
 
 	g, globs, err := w.configure(roots)
 	if err != nil {
-		return nil, w, err
+		return nil, nil, w, err
 	}
 	if err := checkSecretsGiven(g, req.Secrets); err != nil {
-		return nil, w, err
+		return nil, nil, w, err
 	}
 	err = w.readGlobs(ctx, g, globs, func(ctx context.Context, dir string, sel *fileset.Selection) (
 		cache.Blob, fileset.Stats, error) {
 		return req.Store(ctx, w.fs, dir, sel)
 	})
 	if err != nil {
-		return nil, w, err
+		return nil, nil, w, err
 	}
 	if err := g.Validate(); err != nil {
-		return nil, w, err // a bug: every mistake in a BUILD file is reported before this
+		return nil, nil, w, err // a bug: every mistake in a BUILD file is reported before this
 	}
-	return g, w, nil
+	return g, pub, w, nil
 }
 
 // checkSecretsGiven refuses a graph with a run() step whose secret the command line doesn't give, if given is set,
@@ -176,14 +209,27 @@ func (w *workspace) buildRoots(req Request) ([]confLabel, error) {
 	}
 	// Check every target's arguments before configuring any.
 	// Each takes the --set flags naming its parameters.
+	// A publication is built as its checks and images, publishing nothing.
 	shared := len(labels) > 1
-	roots := make([]confLabel, len(labels))
+	named := make([]confLabel, len(labels))
 	for i, l := range labels {
 		c, err := w.commandConfigOf(l, kinds[i], req, shared)
 		if err != nil {
 			return nil, err
 		}
-		roots[i] = confLabel{l, c}
+		named[i] = confLabel{l, c}
+	}
+	var roots []confLabel
+	for i, cl := range named {
+		if kinds[i] != "publication" {
+			roots = append(roots, cl)
+			continue
+		}
+		expanded, _, err := w.expandPublication(cl)
+		if err != nil {
+			return nil, err
+		}
+		roots = append(roots, expanded...)
 	}
 	if shared {
 		if err := w.checkSets(labels, req.Sets); err != nil {
@@ -191,6 +237,57 @@ func (w *workspace) buildRoots(req Request) ([]confLabel, error) {
 		}
 	}
 	return roots, nil
+}
+
+// publicationRoots returns the roots of publishing the publication req names, in the configuration the command line
+// gives it: its checks, then its images, each once, each configured as the publication names it;
+// and where each image goes, by its index among those roots.
+func (w *workspace) publicationRoots(req Request) ([]confLabel, *Publication, error) {
+	l, err := w.publicationTarget(req.Targets[0])
+	if err != nil {
+		return nil, nil, err
+	}
+	c, err := w.commandConfigOf(l, "publication", req, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	return w.expandPublication(confLabel{l, c})
+}
+
+// expandPublication returns the roots of the publication cl, its checks, then its images, each once,
+// and where each image goes, by its index among them.
+func (w *workspace) expandPublication(cl confLabel) ([]confLabel, *Publication, error) {
+	tmpl, err := w.template(w.declaration(cl.label), cl)
+	if err != nil {
+		return nil, nil, err
+	}
+	spec := tmpl.(*publicationSpec)
+	var roots []confLabel
+	root := func(ref targetRef) (int, error) {
+		target, err := w.edge(ref, cl)
+		if err != nil {
+			return 0, err
+		}
+		if i := slices.Index(roots, target); i >= 0 {
+			return i, nil
+		}
+		roots = append(roots, target)
+		return len(roots) - 1, nil
+	}
+	for _, ref := range spec.checks {
+		if _, err := root(ref); err != nil {
+			return nil, nil, err
+		}
+	}
+	pub := &Publication{}
+	for _, image := range spec.images {
+		i, err := root(image.target)
+		if err != nil {
+			return nil, nil, err
+		}
+		pub.Images = append(pub.Images, PublishedImage{Root: i, Repository: image.repository.Name()})
+	}
+	return roots, pub, nil
 }
 
 // commandConfigOf returns the configuration that the command line gives the target with label l and kind,

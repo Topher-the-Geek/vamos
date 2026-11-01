@@ -18,7 +18,9 @@
 //
 // # Lifecycle
 //
-// Submit accepts or refuses a job, a graph run, a push or an export, before any work starts.
+// Submit accepts or refuses a job, a graph run, a push, a publication or an export, before any work starts.
+// A publication is one job however many repositories and tags it has: it uploads every image before it writes any
+// tag, and a failure while writing tags carries Published beside the Failure, saying which were written.
 // A job's events form one sequence from position zero to its terminal event, which carries its Outcome;
 // Watch delivers them, and Result returns the outcome once there is one.
 // An executor retains a bounded number of a job's events: a watch from an expired position gets a gap event first,

@@ -245,6 +245,27 @@ func (w *world) ThenItLastReports(want string) {
 	}
 }
 
+// ThenItReportsInOrder checks that the lines of the command's standard output that report sending, as
+// "Image built!" does, are exactly as many as wants, in order, each starting with its want, in which placeholders
+// stand for what atPlaceholders says.
+func (w *world) ThenItReportsInOrder(wants ...string) {
+	w.t.Helper()
+	var got []string
+	for _, line := range strings.Split(strings.TrimSuffix(w.stdout, "\n"), "\n") {
+		if strings.HasPrefix(line, imageBuilt) || strings.HasPrefix(line, "Index built! ") ||
+			strings.HasPrefix(line, filesExported) {
+			got = append(got, line)
+		}
+	}
+	same := len(got) == len(wants)
+	for i := 0; same && i < len(wants); i++ {
+		same = strings.HasPrefix(got[i], w.atPlaceholders(wants[i]))
+	}
+	if !same {
+		w.t.Errorf("it reported sending %q, want lines starting with %q", got, w.allAtPlaceholders(wants))
+	}
+}
+
 // ThenTheCommandSays checks that the command wrote want to its standard output or error.
 func (w *world) ThenTheCommandSays(want string) {
 	w.t.Helper()

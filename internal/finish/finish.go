@@ -172,10 +172,20 @@ func copyTo(ctx context.Context, img Image, ref types.ImageReference, sys *types
 
 // deliver opens the image or index img as a source, laid out in a temporary folder where it must be, sends it with
 // send, as sys describes the destination, and returns the image's ID there, or the index's digest.
-func deliver(ctx context.Context, img Image, sys *types.SystemContext, send sender) (_ string, err error) {
-	dir, err := os.MkdirTemp("", "vamos-export-")
+func deliver(ctx context.Context, img Image, sys *types.SystemContext, send sender) (string, error) {
+	written, err := sendImage(ctx, img, sys, send)
 	if err != nil {
 		return "", err
+	}
+	return describeWritten(written)
+}
+
+// sendImage opens the image or index img as a source, laid out in a temporary folder where it must be, sends it with
+// send, as sys describes the destination, and returns the manifest written.
+func sendImage(ctx context.Context, img Image, sys *types.SystemContext, send sender) (_ []byte, err error) {
+	dir, err := os.MkdirTemp("", "vamos-export-")
+	if err != nil {
+		return nil, err
 	}
 	defer func() {
 		if rerr := os.RemoveAll(dir); rerr != nil {
@@ -184,12 +194,12 @@ func deliver(ctx context.Context, img Image, sys *types.SystemContext, send send
 	}()
 	policyContext, err := transfer.Policy(sys)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer policyContext.Destroy()
 	src, sourceCtx, multi, err := img.open(ctx, policyContext, dir, sys)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	// The client's settings apply at both ends: the registry an image is read from, and the destination;
 	// but a registry that the executor reads insecurely is read so here too.
@@ -197,10 +207,11 @@ func deliver(ctx context.Context, img Image, sys *types.SystemContext, send send
 	if multi {
 		options.ImageListSelection = imagecopy.CopyAllImages
 	}
-	written, err := send(ctx, policyContext, src, options)
-	if err != nil {
-		return "", err
-	}
+	return send(ctx, policyContext, src, options)
+}
+
+// describeWritten returns what written, a manifest a delivery wrote, names: an image's ID there, or an index's digest.
+func describeWritten(written []byte) (string, error) {
 	if manifest.MIMETypeIsMultiImage(manifest.GuessMIMEType(written)) {
 		return digest.FromBytes(written).String(), nil
 	}
