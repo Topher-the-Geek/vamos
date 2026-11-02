@@ -10,7 +10,9 @@ RUN dnf -y install \
     containers-common \
     docker-cli \
     docker-compose \
+    file \
     findutils \
+    gh \
     git \
     golang \
     gpgme-devel \
@@ -27,6 +29,7 @@ RUN dnf -y install \
     pnpm \
     procps-ng \
     python3 \
+    ShellCheck \
     tar \
     tree \
     unzip \
@@ -48,14 +51,38 @@ RUN case "$(uname -m)" in \
  && chmod 755 /usr/local/bin/trace_processor_shell \
  && rm /tmp/perfetto.zip
 
-# kubeconform, to check rendered Helm manifests against the Kubernetes schemas; it has no Fedora package.
+# OpenSpec's standalone build, which runs without Node.js, for the change proposals under openspec/.
+RUN case "$(uname -m)" in \
+      x86_64) arch=x64 sum=f27fb2ff5c6c4aafb207cb0b797189215adb3a1150d4b4600a2d6a0b6e192ae1 ;; \
+      aarch64) arch=arm64 sum=b9b61371a7caa1819da34f766cc24896cfe7a743841f53121b66bd1e2f1b9e93 ;; \
+      *) echo "no openspec for $(uname -m)" >&2; exit 1 ;; \
+    esac \
+ && curl -fsSL -o /tmp/openspec.tar.gz \
+      "https://github.com/Fission-AI/OpenSpec/releases/download/v1.16.0/openspec-linux-$arch.tar.gz" \
+ && echo "$sum  /tmp/openspec.tar.gz" | sha256sum -c - \
+ && tar -xzf /tmp/openspec.tar.gz -C /usr/local/bin openspec \
+ && rm /tmp/openspec.tar.gz
+
+# Tools with no Fedora package:
+# - kubeconform, to check rendered Helm manifests against the Kubernetes schemas
+# - actionlint, to check the release workflow
 RUN GOBIN=/usr/local/bin GOMODCACHE=/tmp/gomodcache GOCACHE=/tmp/gocache \
-      go install github.com/yannh/kubeconform/cmd/kubeconform@latest \
+      go install github.com/yannh/kubeconform/cmd/kubeconform@v0.8.0 \
+ && GOBIN=/usr/local/bin GOMODCACHE=/tmp/gomodcache GOCACHE=/tmp/gocache \
+      go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 \
  && rm -rf /tmp/gomodcache /tmp/gocache
 
- RUN curl -LfsS https://claude.ai/install.sh | bash \
-  && curl -LfsS https://chatgpt.com/codex/install.sh | bash \
-  && curl -LfsS https://herdr.dev/install.sh | bash
+# Coding agents, which update themselves in ~/.local/bin.
+# Their installers append PATH lines to .bashrc or .bash_profile; restore both, and set PATH once instead,
+# for every process rather than only interactive shells.
+# Fedora's .bashrc adds ~/.local/bin and ~/bin unless PATH already starts with them, so it starts with both.
+ENV PATH=/root/.local/bin:/root/bin:$PATH
+RUN cp /root/.bashrc /root/.bash_profile /tmp/ \
+ && curl -LfsS https://claude.ai/install.sh | bash \
+ && curl -LfsS https://chatgpt.com/codex/install.sh | bash \
+ && curl -LfsS https://herdr.dev/install.sh | bash \
+ && curl -LfsS https://antigravity.google/cli/install.sh | bash \
+ && mv /tmp/.bashrc /tmp/.bash_profile /root/
 
 # Run build steps with chroot isolation, so no OCI runtime is needed.
 ENV BUILDAH_ISOLATION=chroot
