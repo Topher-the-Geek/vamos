@@ -1,4 +1,7 @@
-# BUILD language reference
+---
+title: "BUILD language reference"
+description: "Targets, steps and file selection in vamos BUILD files."
+---
 
 A `BUILD` file is a Starlark program that declares named targets.
 It may be named `BUILD.vms` instead, where a `build` directory beside it would clash with `BUILD`;

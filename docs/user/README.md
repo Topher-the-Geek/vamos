@@ -1,8 +1,11 @@
-# vamos user guide
+---
+title: "vamos user guide"
+description: "Where to start with vamos, and the references for writing your own builds."
+---
 
 Start with the [tutorial](tutorial.md).
 It introduces images and filesets, sets up vamos, and builds the
-[TypeScript UI example](../examples/typescript-ui/README.md) into a running container.
+[TypeScript UI example](https://github.com/Topher-the-Geek/vamos/blob/main/examples/typescript-ui/README.md) into a running container.
 
 Use these references when writing your own project:
 
@@ -13,7 +16,7 @@ Use these references when writing your own project:
 | [Configuration](reference/configuration.md) | Workspaces, parameters, platforms, and shared `.star` files |
 | [Cache and traces](reference/cache.md) | Reuse, rebuilding, timestamps, pruning, and inspecting a build |
 
-See the [examples](../examples/README.md) for complete projects and the build patterns they demonstrate.
+See the [examples](https://github.com/Topher-the-Geek/vamos/blob/main/examples/README.md) for complete projects and the build patterns they demonstrate.
 
 ## Remote builds
 

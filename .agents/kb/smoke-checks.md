@@ -97,7 +97,7 @@ shellcheck -s sh install.sh && mkdir -p "$TMP/devc" \
   && docker build -q --target binary --build-arg VERSION=v0.0.0-test --output "$TMP/devc/dist" . \
   && mv "$TMP/devc/dist/vamos" "$TMP/devc/dist/vamos-linux-$(go env GOARCH)" && cp install.sh "$TMP/devc/dist/" \
   && (cd "$TMP/devc/dist" && sha256sum vamos-linux-* > SHA256SUMS) \
-  && awk '/^```dockerfile/ { f = 1; next } /^```/ { f = 0 } f' docs/tutorial.md \
+  && awk '/^```dockerfile/ { f = 1; next } /^```/ { f = 0 } f' docs/user/tutorial.md \
   | sed 's#^RUN curl -fsSL -o /tmp/vamos-install.sh https://github.com/Topher-the-Geek/vamos/releases/download/[^ ]*/install.sh \\$#COPY dist /tmp/dist\nENV VAMOS_RELEASE_URL=file:///tmp/dist\nRUN curl -fsSL -o /tmp/vamos-install.sh file:///tmp/dist/install.sh \\#' \
   > "$TMP/devc/Dockerfile" && grep -qF 'file:///tmp/dist/install.sh' "$TMP/devc/Dockerfile" \
   && docker build -q -t vamos-devcontainer "$TMP/devc" \

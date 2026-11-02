@@ -12,6 +12,8 @@
     "vscode": {
       "extensions": [
         "anthropic.claude-code",
+        "astro-build.astro-vscode",
+        "bierner.markdown-mermaid",
         "charliermarsh.ruff",
         "dbaeumer.vscode-eslint",
         "golang.go",
@@ -24,6 +26,11 @@
         "tamasfe.even-better-toml"
       ]
     }
+  },
+  "forwardPorts": [4321, 8787],
+  "portsAttributes": {
+    "4321": { "label": "docs: astro dev" },
+    "8787": { "label": "docs: wrangler dev" }
   },
   "mounts": [
     "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind",

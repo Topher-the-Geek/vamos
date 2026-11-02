@@ -1,7 +1,7 @@
 # typescript-ui example
 
 A small TypeScript website built with Vite and served by nginx.
-This is the project used by the [introductory tutorial](../../docs/tutorial.md),
+This is the project used by the [introductory tutorial](../../docs/user/tutorial.md),
 which explains its `BUILD` file and how images and filesets compose.
 
 ## Build graph
@@ -31,7 +31,7 @@ flowchart TD
 
 ## Build and run
 
-Set up vamos using the [tutorial](../../docs/tutorial.md#2-set-up-vamos).
+Set up vamos using the [tutorial](../../docs/user/tutorial.md#2-set-up-vamos).
 From the repository root:
 
 ```sh

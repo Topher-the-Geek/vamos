@@ -108,7 +108,7 @@ jobs:
           cp -r install.sh "$RUNNER_TEMP/dist" "$context/"
           cp install.sh "$context/dist/"
           (cd "$context/dist" && sha256sum vamos-linux-* > SHA256SUMS)
-          awk '/^```dockerfile/ { f = 1; next } /^```/ { f = 0 } f' docs/tutorial.md \
+          awk '/^```dockerfile/ { f = 1; next } /^```/ { f = 0 } f' docs/user/tutorial.md \
             | sed 's#^RUN curl -fsSL -o /tmp/vamos-install.sh https://github.com/Topher-the-Geek/vamos/releases/download/[^ ]*/install.sh \\$#COPY dist /tmp/dist\nENV VAMOS_RELEASE_URL=file:///tmp/dist\nRUN curl -fsSL -o /tmp/vamos-install.sh file:///tmp/dist/install.sh \\#' \
             > "$context/Dockerfile"
           grep -qF 'file:///tmp/dist/install.sh' "$context/Dockerfile"

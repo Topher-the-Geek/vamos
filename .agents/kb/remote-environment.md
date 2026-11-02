@@ -145,7 +145,7 @@ The release's assets are each platform's binary, `vamos-linux-amd64` and `vamos-
 from the Dockerfile's `binary` stage, which the build cache makes the same as the image's;
 [install.sh](../../install.sh), with the release's version as its default;
 and `SHA256SUMS` for all three, which `install.sh` checks the binary against.
-`install.sh` is the way to install vamos, as the [tutorial](../../docs/tutorial.md#in-your-projects-devcontainer) shows:
+`install.sh` is the way to install vamos, as the [tutorial](../../docs/user/tutorial.md#in-your-projects-devcontainer) shows:
 in a Dockerfile from the release's URL, which pins that release, or on a machine from `releases/latest/download`.
 The Dockerfile downloads, runs and deletes it in one `RUN`, since an `ADD` would leave it in a layer
 that a later `rm` only hides, and piping it to `sh` would hide a failed download.

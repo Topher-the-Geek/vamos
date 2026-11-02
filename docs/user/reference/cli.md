@@ -1,4 +1,7 @@
-# CLI reference
+---
+title: "CLI reference"
+description: "The vamos commands for building, publishing, loading, saving and exporting images."
+---
 
 Run `vamos --help` or `vamos <command> --help` for command-line help; `vamos` alone shows it too.
 Targets are names in the current directory's `BUILD` file, or [workspace labels](configuration.md#workspaces).

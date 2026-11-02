@@ -1,5 +1,5 @@
 # Values for the vamos remote execution chart.
-# See .agents/kb/remote-environment.md for how the pieces fit together, and docs/reference/cli.md for the flags.
+# See .agents/kb/remote-environment.md for how the pieces fit together, and docs/user/reference/cli.md for the flags.
 #
 # Nothing here authenticates: the coordinator and the registries are for a trusted network alone.
 # Anyone who can reach the coordinator can build on it and read its cache, and anyone who can reach a pull-through

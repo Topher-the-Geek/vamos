@@ -181,7 +181,7 @@ if [ -n "$missing" ]; then
 fi
 
 echo "vamos runs as root, in a privileged container with BUILDAH_ISOLATION=chroot" \
-	"and a volume for /var/lib/containers; see $repository/blob/main/docs/tutorial.md."
+	"and a volume for /var/lib/containers; see $repository/blob/main/docs/user/tutorial.md."
 
 # vamos is installed either way, but fails at its first pull or run step without them.
 if [ -n "$missing" ]; then

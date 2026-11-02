@@ -3,11 +3,11 @@
 A Go CLI that uses the [buildah](https://github.com/containers/buildah) library
 to build container images described by `BUILD` files written in [Starlark](https://github.com/bazelbuild/starlark).
 
-Start with the [tutorial](docs/tutorial.md) to learn the core concepts, set up vamos,
+Start with the [tutorial](docs/user/tutorial.md) to learn the core concepts, set up vamos,
 and build a website into a running container.
-To build your own project, [install vamos](docs/tutorial.md#in-your-projects-devcontainer) in its devcontainer,
+To build your own project, [install vamos](docs/user/tutorial.md#in-your-projects-devcontainer) in its devcontainer,
 or on a Linux machine, with a release's `install.sh`.
-The [user guide](docs/README.md) links to the CLI, BUILD language, configuration, and cache references.
+The [user guide](docs/user/README.md) links to the CLI, BUILD language, configuration, and cache references.
 
 ## Development
 

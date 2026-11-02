@@ -5,6 +5,10 @@
 			"path": "."
 		},
 		{
+			"name": "docs/site",
+			"path": "docs/site"
+		},
+		{
 			"name": "examples/fastmcp",
 			"path": "examples/fastmcp"
 		},
@@ -35,11 +39,14 @@
 		],
 		"editor.tabSize": 4,
 		"files.exclude": {
+			"**/.astro": true,
 			"**/.DS_Store": true,
 			"**/.git": true,
 			"**/.pytest_cache": true,
 			"**/.venv": true,
+			"**/.wrangler": true,
 			"**/node_modules": true,
+			"docs/site": true,
 			"examples": true,
 			"vamos": true
 		},

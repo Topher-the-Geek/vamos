@@ -1,0 +1,7 @@
+# Only install releases at least two weeks old, and pin exact versions.
+minimumReleaseAge: 20160
+savePrefix: ''
+# Wrangler runs the site locally in workerd.
+onlyBuiltDependencies:
+  - esbuild
+  - workerd

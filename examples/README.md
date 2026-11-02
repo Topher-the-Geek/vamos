@@ -1,7 +1,7 @@
 # Examples
 
 Each example includes a build diagram and instructions for development and running its images.
-The [tutorial](../docs/tutorial.md) walks through the TypeScript UI example.
+The [tutorial](../docs/user/tutorial.md) walks through the TypeScript UI example.
 
 - [TypeScript UI](typescript-ui/README.md): TypeScript, pnpm, Vite, nginx.
 

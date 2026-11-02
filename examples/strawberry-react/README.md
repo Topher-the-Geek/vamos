@@ -105,7 +105,7 @@ Each package's `server` is an index of its `layer` for amd64 and arm64, which `p
 ./vamos push //ui:server ghcr.io/me/strawberry-ui:1.0 -C examples/strawberry-react
 ```
 
-The root's `//:release` is a [publication](../../docs/reference/build.md#publication):
+The root's `//:release` is a [publication](../../docs/user/reference/build.md#publication):
 it publishes both packages' `server` indexes, together, under every `--tag`,
 only once the backend's tests and both packages' lint pass.
 Its `registry` parameter, which has no default, says where:

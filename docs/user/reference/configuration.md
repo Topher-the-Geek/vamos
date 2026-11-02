@@ -1,4 +1,7 @@
-# Configuration reference
+---
+title: "Configuration reference"
+description: "Workspaces, parameters, platforms and shared .star files."
+---
 
 Use labels to compose packages, parameters to vary a target's behavior,
 and platforms to choose what its artifacts run on.

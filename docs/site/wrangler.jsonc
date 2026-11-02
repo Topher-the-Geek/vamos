@@ -1,0 +1,14 @@
+// Serves the built site as static assets on Cloudflare Workers.
+// worker.mjs runs first for all but scripts, styles and the search index, to serve pages' Markdown to agents that ask for it.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "vamos-docs",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-10-15",
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "404-page",
+    "run_worker_first": ["/*", "!/_astro/*", "!/pagefind/*"]
+  }
+}

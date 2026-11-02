@@ -1,4 +1,7 @@
-# Build cache and traces
+---
+title: "Build cache and traces"
+description: "How vamos reuses and rebuilds results, prunes its cache and traces a build."
+---
 
 vamos caches target results and reuses them when their effective inputs are unchanged.
 Delivery commands use the same cache as `build`.
