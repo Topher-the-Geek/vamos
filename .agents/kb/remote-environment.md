@@ -92,6 +92,8 @@ unless the values give `cacheRegistry.address` and each cache's `address` as nam
 `vamos build` needs the coordinator alone, which `kubectl port-forward` gives a client outside the cluster;
 `load`, `save`, `push --push-from=client` and `publish --push-from=client` need the registries by the same names
 the workers use.
+`vamos update`, and a build that records a pin, need each pulled image's upstream registry, such as Docker Hub,
+which they ask about tags directly, never through the pull-through caches.
 
 The devcontainer has `kind`, `kubectl`, `helm` and `kubeconform`.
 kind runs the cluster's node as a container on the host's Docker, on a network named `kind`,

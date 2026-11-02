@@ -41,17 +41,22 @@ vamos build packages --rebuild
 
 This rebuilds `packages`, reuses its dependencies when possible, and replaces its cached result.
 Consumers run again when the result they consume changes.
-To refresh a dependency too, name it explicitly.
+To refresh a dependency too, name it explicitly; a pull is refreshed by `vamos update` instead.
 
-Pulls remember what their tag resolved to and reuse it without contacting the registry.
-If `node` is a pull target, refresh its tag with:
+A pull that the lockfile pins uses its pin; refresh it, or every pull, with [`vamos update`](cli.md#update):
 
 ```sh
-vamos build node --rebuild
+vamos update node
 ```
 
-Then run the desired build or delivery command.
-`prune` does not refresh tag resolutions.
+The lockfile, `vamos.lock`, which the project commits, says which manifest each pulled tag is pinned to;
+the build cache keeps what was found out about it, each platform's image, under the pin's digest, so that a build of a
+pin asks no registry anything once its image is in the store.
+Pulls without a pin, as `--pins=resolve` leaves them, keep what their tag resolved to only in the build cache,
+in a record of the tag, which differs between machines and is lost with the cache;
+they remember what their tag resolved to and reuse it without contacting the registry.
+`vamos build <pull> --rebuild` resolves nothing again: it says that `vamos update` refreshes pulls,
+which pins them, and `prune` refreshes neither pins nor tag resolutions.
 
 For checks that must execute every CI run:
 
@@ -78,6 +83,7 @@ vamos prune
 ```
 
 This removes cached layer images and other build results, while keeping pulled images and recorded tag resolutions,
+both a tag's and a pin's,
 and the images that other names, such as one `buildah tag` gave, also name, by those names alone.
 It reports how many images, results and files it removed.
 The next build recreates the needed results.

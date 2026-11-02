@@ -87,7 +87,7 @@ func (r *ActionResult) Validate() error {
 }
 
 // TagRecord is what a pull()'s tag named when it was last resolved, kept so that later builds pull the same images,
-// without reaching the registry, until --rebuild resolves it again.
+// without reaching the registry; or, kept under a pin's name, what the manifest a lockfile pins a pull to holds.
 type TagRecord struct {
 	Digest   digest.Digest `json:"digest"`              // of the manifest it named: an index or an image
 	MIMEType string        `json:"mime_type,omitempty"` // the manifest's

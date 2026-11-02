@@ -39,6 +39,7 @@ type workspace struct {
 	platform     *platformValue        // the command's, given with --platform: the named target's, unless an index
 	configs      map[string]*config    // every configuration made, by key, so that equal ones are the same
 	builtins     starlark.StringDict   // of BUILD and .star files, made once
+	lock         *Lock                 // the root's lockfile, whose pins each pull's node takes
 }
 
 // buildFile is the targets declared by the BUILD file of one package.

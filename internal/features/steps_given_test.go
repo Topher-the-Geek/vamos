@@ -3,7 +3,9 @@ package features
 import (
 	"bytes"
 	"cmp"
+	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,16 +13,21 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Topher-the-Geek/vamos/internal/testenv"
 	"github.com/containerd/platforms"
+	"github.com/docker/distribution/registry/api/errcode"
+	v2 "github.com/docker/distribution/registry/api/v2"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/registry"
@@ -29,6 +36,8 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/random"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/opencontainers/go-digest"
+	"go.podman.io/image/v5/docker/reference"
 )
 
 // Given steps set up a scenario's project.
@@ -56,7 +65,8 @@ func (c closedOutput) Write(p []byte) (int, error) {
 
 // GivenAProjectThatPullsBusybox starts the BUILD file with the pull "busybox", of busybox:1.36,
 // the one BUILD text that a step writes rather than the scenario. It stops the scenario if the BUILD file holds
-// anything already.
+// anything already. Unless the scenario gives a lockfile, the project then holds one that pins busybox,
+// testenv.BusyboxLock, as testenv.Project adds it, so that no build asks Docker Hub about its tags.
 func (w *world) GivenAProjectThatPullsBusybox() {
 	w.t.Helper()
 	if w.files["BUILD"] != "" {
@@ -137,6 +147,25 @@ func (w *world) GivenThisMachineEmulates(platform string) {
 func (w *world) GivenTheProjectHolds(project files) {
 	w.t.Helper()
 	maps.Copy(w.files, project)
+}
+
+// GivenTheLockfileHolds makes the project's vamos.lock, beside its BUILD file, or its WORKSPACE file if it has one,
+// hold lockfile, dedented, in which <registry> stands for the host of the scenario's registry, and <digest of label>
+// for the digest of the index, or image, that label names, which a Given step put there.
+func (w *world) GivenTheLockfileHolds(lockfile string) {
+	w.t.Helper()
+	w.files["vamos.lock"] = dedent(w.atHeldDigests(w.atRegistry(lockfile)))
+}
+
+// GivenAnotherCommandPinsWhileTheTagsAreListed makes another command write lockfile, in which <registry> and
+// <digest of label> stand as GivenTheLockfileHolds says, as the scenario's registry first lists tags for each command
+// that follows: as one that pins a pull while that command resolves it would.
+func (w *world) GivenAnotherCommandPinsWhileTheTagsAreListed(lockfile string) {
+	w.t.Helper()
+	if w.server == nil {
+		w.t.Fatal("GivenAnotherCommandPinsWhileTheTagsAreListed needs the scenario's registry, which GivenARegistry starts")
+	}
+	w.pinnedMeanwhile = dedent(w.atHeldDigests(w.atRegistry(lockfile)))
 }
 
 // GivenTheProjectModes gives the project's files and directories these modes, rather than 0o644 and 0o755.
@@ -301,6 +330,27 @@ func (w *world) startRegistry(handler http.Handler, insecure bool) {
 			return
 		}
 		w.asked.Add(1)
+		if repo, ok := tagsList(r); ok {
+			w.refusedMu.Lock()
+			answer, refused := w.unlisting[repo]
+			page, meanwhile := w.tagPage, w.pinMeanwhile
+			w.refusedMu.Unlock()
+			if meanwhile != nil {
+				meanwhile()
+			}
+			if refused {
+				if strings.HasPrefix(answer.body, "{") {
+					rw.Header().Set("Content-Type", "application/json")
+				}
+				rw.WriteHeader(answer.status)
+				rw.Write([]byte(answer.body))
+				return
+			}
+			if page > 0 {
+				serveTagPage(rw, r, handler, repo, page)
+				return
+			}
+		}
 		if w.refuses(r) {
 			rw.Header().Set("Content-Type", "application/json")
 			rw.WriteHeader(http.StatusForbidden)
@@ -473,15 +523,54 @@ func (w *world) GivenTheRegistryHoldsAnIndex(image, label string, platformNames 
 	if err := remote.WriteIndex(w.registryRef(image), index, w.readingTheRegistry()...); err != nil {
 		w.t.Fatal(err)
 	}
+	w.noteHeldDigest(label, index.Digest)
 }
+
+// noteHeldDigest notes the digest of the manifest that label names, an index or an image that a Given step put in
+// the registry, as noteDigest does.
+func (w *world) noteHeldDigest(label string, digest func() (v1.Hash, error)) {
+	w.t.Helper()
+	d, err := digest()
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	w.noteDigest(label, d.String())
+}
+
+// noteDigest notes that label names the manifest whose digest is d, for <digest of label> to stand for.
+func (w *world) noteDigest(label, d string) {
+	if w.heldDigest == nil {
+		w.heldDigest = map[string]string{}
+	}
+	w.heldDigest[label] = d
+}
+
+// atHeldDigests returns s with each <digest of label> replaced by the digest of the index, or image, that label names,
+// which a Given step put in the registry, failing the scenario if it put none there.
+func (w *world) atHeldDigests(s string) string {
+	w.t.Helper()
+	return heldDigestPlaceholder.ReplaceAllStringFunc(s, func(placeholder string) string {
+		label := heldDigestPlaceholder.FindStringSubmatch(placeholder)[1]
+		d, ok := w.heldDigest[label]
+		if !ok {
+			w.t.Fatalf("%q names %s, but no Given step put it in the registry", s, placeholder)
+		}
+		return d
+	})
+}
+
+// heldDigestPlaceholder is <digest of label>, which atHeldDigests replaces.
+var heldDigestPlaceholder = regexp.MustCompile(`<digest of ([^>]+)>`)
 
 // GivenTheRegistryHoldsAnImage pushes to the image name image, in which <registry> stands for the scenario's
 // registry, an image of random files for platform alone, rather than an index, which label names, with the platform.
 func (w *world) GivenTheRegistryHoldsAnImage(image, label, platform string) {
 	w.t.Helper()
-	if err := remote.Write(w.registryRef(image), w.heldImage(label, platform), w.readingTheRegistry()...); err != nil {
+	img := w.heldImage(label, platform)
+	if err := remote.Write(w.registryRef(image), img, w.readingTheRegistry()...); err != nil {
 		w.t.Fatal(err)
 	}
+	w.noteHeldDigest(label, img.Digest)
 }
 
 // heldImage returns a new image of random files for platform, which label names, with the platform.
@@ -598,4 +687,291 @@ func (w *world) GivenTheRegistrysImageRunsAs(image, user string) {
 	if err := remote.Write(ref, img, w.readingTheRegistry()...); err != nil {
 		w.t.Fatal(err)
 	}
+}
+
+// fakeRegistryHost is the host of the fake registry that GivenTheRegistryListsTags starts, which <registry> stands for
+// then, so that a scenario that pins pulls needs no registry of its own.
+const fakeRegistryHost = "registry.example"
+
+// fakeRegistry is the cli.Registry that GivenTheRegistryListsTags gives commands, in place of the image's own
+// registry: it lists the tags that steps give each repository, and says that each names a digest of its own, as
+// <digest of image:tag> stands for, or the one GivenTheTagNames gave it.
+type fakeRegistry struct {
+	mu      sync.Mutex
+	tags    map[string][]string      // the tags of each repository, by name
+	refused map[string]bool          // the repositories whose tags it won't list
+	names   map[string]digest.Digest // what a tag names, by image and tag, where GivenTheTagNames said
+}
+
+// Tags lists repo's tags, or fails as a registry that won't list them, or doesn't know repo, does.
+func (r *fakeRegistry) Tags(_ context.Context, repo reference.Named) ([]string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.refused[repo.Name()] {
+		return nil, fmt.Errorf("fetching tags list: %w", errcode.ErrorCodeDenied.WithMessage("listing tags refused"))
+	}
+	tags, ok := r.tags[repo.Name()]
+	if !ok {
+		return nil, fmt.Errorf("fetching tags list: repository name not known to registry")
+	}
+	return slices.Clone(tags), nil
+}
+
+// Digest returns what the tag ref names, or fails as a registry without it does.
+func (r *fakeRegistry) Digest(_ context.Context, ref reference.NamedTagged) (digest.Digest, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !slices.Contains(r.tags[ref.Name()], ref.Tag()) {
+		return "", fmt.Errorf("reading manifest %s in %s: %w", ref.Tag(), ref.Name(), v2.ErrorCodeManifestUnknown)
+	}
+	if d, ok := r.names[ref.Name()+":"+ref.Tag()]; ok {
+		return d, nil
+	}
+	return fakeDigest(ref.Name() + ":" + ref.Tag()), nil
+}
+
+// fakeDigest is the digest of the manifest that the fake registry says image, a name and tag, names.
+func fakeDigest(image string) digest.Digest {
+	return digest.FromString(image)
+}
+
+// GivenTheRegistryListsTags gives commands a fake registry, in place of each image's own, whose repository repo, in
+// which <registry> stands for its host, lists tags, besides those it listed already, each naming a manifest of its
+// own, whose digest <digest of repo:tag> stands for, with repo as the scenario writes it or normalized.
+// The fake answers what pinning pulls asks about tags; images can't be pulled from it.
+func (w *world) GivenTheRegistryListsTags(repo string, tags ...string) {
+	w.t.Helper()
+	r := w.theFakeRegistry()
+	name := w.repositoryName(repo)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.tags[name]; !ok {
+		r.tags[name] = []string{} // known, even with no tags
+	}
+	for _, tag := range tags {
+		if !slices.Contains(r.tags[name], tag) {
+			r.tags[name] = append(r.tags[name], tag)
+		}
+		d := fakeDigest(name + ":" + tag).String()
+		w.noteDigest(name+":"+tag, d)
+		w.noteDigest(w.atRegistry(repo)+":"+tag, d)
+	}
+}
+
+// GivenTheTagNames makes the fake registry of GivenTheRegistryListsTags list image's tag, if it doesn't, and say that
+// it names a manifest that label names, whose digest <digest of label> stands for, as a tag moved to it would.
+// In image, <registry> stands for the fake's host.
+func (w *world) GivenTheTagNames(image, label string) {
+	w.t.Helper()
+	r := w.theFakeRegistry()
+	named, err := reference.ParseNormalizedNamed(w.atRegistry(image))
+	if err != nil {
+		w.t.Fatalf("image %q: %v", image, err)
+	}
+	tagged, ok := named.(reference.NamedTagged)
+	if !ok {
+		w.t.Fatalf("image %q has no tag", image)
+	}
+	w.GivenTheRegistryListsTags(tagged.Name(), tagged.Tag())
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	d := fakeDigest(label)
+	r.names[tagged.Name()+":"+tagged.Tag()] = d
+	w.noteDigest(label, d.String())
+}
+
+// GivenTheRegistryRefusesToListTags makes the scenario's registry, of its own or the fake of
+// GivenTheRegistryListsTags, refuse to list the tags of repo, in which <registry> stands for its host, as a registry
+// that forbids listing does, while it still says what each tag names.
+func (w *world) GivenTheRegistryRefusesToListTags(repo string) {
+	w.t.Helper()
+	if w.fakeRegistry == nil && w.server != nil {
+		named, err := reference.ParseNormalizedNamed(w.atRegistry(repo))
+		if err != nil {
+			w.t.Fatalf("repository %q: %v", repo, err)
+		}
+		w.answerTagLists(reference.Path(named), http.StatusForbidden,
+			`{"errors": [{"code": "DENIED", "message": "listing tags refused"}]}`)
+		return
+	}
+	r := w.theFakeRegistry()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	name := w.repositoryName(repo)
+	r.refused[name] = true
+	if _, ok := r.tags[name]; !ok {
+		r.tags[name] = nil // known, as the registry knows it
+	}
+}
+
+// theFakeRegistry returns the fake registry that commands are given, starting it if no step has, as the scenario's
+// registry, which <registry> stands for; it stops the scenario if a registry of its own was started instead.
+func (w *world) theFakeRegistry() *fakeRegistry {
+	w.t.Helper()
+	if w.fakeRegistry != nil {
+		return w.fakeRegistry
+	}
+	if w.registry != "" {
+		w.t.Fatal("the scenario has a registry of its own, which commands ask about tags, rather than a fake one")
+	}
+	w.registry = fakeRegistryHost
+	w.fakeRegistry = &fakeRegistry{tags: map[string][]string{}, refused: map[string]bool{},
+		names: map[string]digest.Digest{}}
+	return w.fakeRegistry
+}
+
+// repositoryName returns repo, in which <registry> stands for the scenario's registry's host, as a normalized
+// repository name, stopping the scenario if it isn't one, or has a tag or digest.
+func (w *world) repositoryName(repo string) string {
+	w.t.Helper()
+	named, err := reference.ParseNormalizedNamed(w.atRegistry(repo))
+	if err != nil {
+		w.t.Fatalf("repository %q: %v", repo, err)
+	}
+	if !reference.IsNameOnly(named) {
+		w.t.Fatalf("repository %q has a tag or digest", repo)
+	}
+	return named.Name()
+}
+
+// GivenTheRegistryListsTagsInPagesOf makes the scenario's registry of its own list a repository's tags n at a time,
+// in the order it holds them, each page linking to the next, as registries with many tags do.
+func (w *world) GivenTheRegistryListsTagsInPagesOf(n int) {
+	w.t.Helper()
+	if w.server == nil || n < 1 {
+		w.t.Fatal("no Given step started a registry of the scenario's own to list tags in pages, or no page size")
+	}
+	w.refusedMu.Lock()
+	defer w.refusedMu.Unlock()
+	w.tagPage = n
+}
+
+// tagsList returns the repository whose tags r lists, if r lists tags.
+func tagsList(r *http.Request) (string, bool) {
+	if r.Method != http.MethodGet {
+		return "", false
+	}
+	path, ok := strings.CutPrefix(r.URL.Path, "/v2/")
+	if !ok {
+		return "", false
+	}
+	return strings.CutSuffix(path, "/tags/list")
+}
+
+// serveTagPage serves the page of repo's tags, as registry handler lists them, that r asks for, page at a time:
+// those after r's last, linking to the next page if there are more.
+func serveTagPage(rw http.ResponseWriter, r *http.Request, handler http.Handler, repo string, page int) {
+	all := httptest.NewRecorder()
+	whole := r.Clone(r.Context()) // with its credentials, for a registry that needs them
+	whole.URL.RawQuery, whole.RequestURI = "", ""
+	handler.ServeHTTP(all, whole)
+	var list struct {
+		Name string   `json:"name"`
+		Tags []string `json:"tags"`
+	}
+	if all.Code != http.StatusOK || json.Unmarshal(all.Body.Bytes(), &list) != nil {
+		maps.Copy(rw.Header(), all.Header())
+		rw.WriteHeader(all.Code)
+		rw.Write(all.Body.Bytes())
+		return
+	}
+	tags := list.Tags
+	if last := r.URL.Query().Get("last"); last != "" {
+		if i := slices.Index(tags, last); i >= 0 {
+			tags = tags[i+1:]
+		} else {
+			tags = nil // past the end, rather than back at the start
+		}
+	}
+	if len(tags) > page {
+		rw.Header().Set("Link", fmt.Sprintf(`</v2/%s/tags/list?n=%d&last=%s>; rel="next"`, repo, page,
+			url.QueryEscape(tags[page-1])))
+		tags = tags[:page]
+	}
+	rw.Header().Set("Content-Type", "application/json")
+	data, _ := json.Marshal(map[string]any{"name": list.Name, "tags": tags})
+	rw.Write(data)
+}
+
+// GivenTheRegistryAlsoTags tags what image names in the scenario's registry, in which <registry> stands for its host,
+// with each of tags too, in its repository.
+func (w *world) GivenTheRegistryAlsoTags(image string, tags ...string) {
+	w.t.Helper()
+	ref := w.registryRef(image)
+	desc, err := remote.Get(ref, w.readingTheRegistry()...)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	for _, tag := range tags {
+		if err := remote.Tag(ref.Context().Tag(tag), desc, w.readingTheRegistry()...); err != nil {
+			w.t.Fatal(err)
+		}
+	}
+}
+
+// GivenAPullThroughCacheMirrorsTheRegistryWithAnIndex starts a registry of its own that registries.conf makes a
+// mirror of the scenario's registry, as a pull-through cache is, which holds at image, in which <registry> stands for
+// the scenario's registry's host, an index, as GivenTheRegistryHoldsAnIndex makes one, which label names, though
+// the scenario's registry may hold another there.
+func (w *world) GivenAPullThroughCacheMirrorsTheRegistryWithAnIndex(image, label string, platformNames ...string) {
+	w.t.Helper()
+	if w.server == nil {
+		w.t.Fatal("no Given step started a registry for the cache to mirror")
+	}
+	served := newRegistry()
+	cache := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		w.cacheAsked.Add(1)
+		served.ServeHTTP(rw, r)
+	}))
+	w.t.Cleanup(cache.Close)
+	host := strings.TrimPrefix(cache.URL, "http://")
+	testenv.MirroredRegistry(w.t, w.registry, host)
+	var index v1.ImageIndex = empty.Index
+	for _, platform := range platformNames {
+		index = mutate.AppendManifests(index, mutate.IndexAddendum{
+			Add:        w.heldImage(label, platform),
+			Descriptor: v1.Descriptor{Platform: w.parsedPlatform(platform)},
+		})
+	}
+	ref, err := name.ParseReference(strings.Replace(w.atRegistry(image), w.registry, host, 1), name.Insecure)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	if err := remote.WriteIndex(ref, index, w.readingTheRegistry()...); err != nil {
+		w.t.Fatal(err)
+	}
+	w.noteHeldDigest(label, index.Digest)
+	w.cacheAsked.Store(0) // what writing it asked
+}
+
+// GivenTheRegistryAnswersTagListsOf makes the scenario's registry of its own answer every request to list the tags of
+// repo, in which <registry> stands for its host, with status and body, as a registry or a proxy in front of one that
+// refuses listing, or fails, may.
+func (w *world) GivenTheRegistryAnswersTagListsOf(repo string, status int, body string) {
+	w.t.Helper()
+	if w.server == nil {
+		w.t.Fatal("no Given step started a registry of the scenario's own")
+	}
+	named, err := reference.ParseNormalizedNamed(w.atRegistry(repo))
+	if err != nil {
+		w.t.Fatalf("repository %q: %v", repo, err)
+	}
+	w.answerTagLists(reference.Path(named), status, body)
+}
+
+// answerTagLists makes the scenario's registry answer lists of the tags of the repository at path with status and
+// body.
+func (w *world) answerTagLists(path string, status int, body string) {
+	w.refusedMu.Lock()
+	defer w.refusedMu.Unlock()
+	if w.unlisting == nil {
+		w.unlisting = map[string]tagListAnswer{}
+	}
+	w.unlisting[path] = tagListAnswer{status, body}
+}
+
+// tagListAnswer is how the scenario's registry answers a list of a repository's tags, in place of the list.
+type tagListAnswer struct {
+	status int
+	body   string
 }

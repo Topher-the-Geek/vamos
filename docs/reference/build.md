@@ -55,7 +55,11 @@ A single-platform image must match the configured platform; a mismatch is an err
 Use fully qualified repository names to make the source explicit.
 An image's tag belongs in `tag`, rather than inside `image`.
 Pull targets have no user parameters; only their platform configures them.
-Previously resolved tags are reused until explicitly [rebuilt](cache.md#refreshing-results):
+A pull whose image and tag the lockfile, `vamos.lock` at the workspace root, pins uses the manifest of the pin's
+digest, choosing its platform's image from it if it is an index, and never asks a registry what the tag names;
+a pin that its registry no longer has fails, saying to run [`vamos update`](cli.md#update) for the pull.
+An unpinned pull, as `--pins=resolve` leaves one, reuses what its tag resolved to before, which the build cache keeps,
+even with `--rebuild`, until [`vamos update`](cli.md#update) pins it:
 a tag that names an index is resolved once, so a platform built for later gets its image from the index the tag named
 then, from the store if it holds it, or else from the registry.
 A pull whose image its registry doesn't have, or won't give, fails, suggesting to check the name,

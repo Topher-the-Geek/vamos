@@ -89,7 +89,7 @@ func TestSave_WritesAnArchive(t *testing.T) {
 		`)
 		w.WhenISave("all", intoTheProject("all.tar"))
 		w.ThenItSucceeds()
-		w.ThenTheImagePathsAre(under("/app"), "/app/BUILD", "/app/hello.txt")
+		w.ThenTheImagePathsAre(under("/app"), "/app/BUILD", "/app/hello.txt", "/app/vamos.lock")
 	})
 
 	t.Run("A new archive is readable by all, as the umask allows", func(t *testing.T) {

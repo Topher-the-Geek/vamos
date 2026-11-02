@@ -18,6 +18,7 @@ import (
 	"github.com/Topher-the-Geek/vamos/internal/tracing"
 
 	"github.com/opencontainers/go-digest"
+	"go.podman.io/image/v5/docker/reference"
 )
 
 // Request is one self-contained action, as the Scheduler hands it to a Runner:
@@ -42,12 +43,10 @@ type Request struct {
 	Bases []cache.Location `json:"bases,omitempty"`
 	// Displays names each step as the BUILD file wrote it, by index, for the trace; messages are the Scheduler's.
 	Displays []string `json:"displays,omitempty"`
-	// Tag is the record of the tag a resolve resolves, as the record store has it, or nil if it has none,
-	// so that the Runner reads no record.
+	// Tag is the record of the tag a resolve resolves, or of its pin if Action.Pinned, as the record store has it,
+	// or nil if it has none, so that the Runner reads no record.
 	Tag *cache.TagRecord `json:"tag,omitempty"`
-	// Again asks a resolve to resolve its tag afresh, rather than as Tag records it.
-	Again bool `json:"again,omitempty"`
-	// Force says the job asked for this run, as --rebuild does, a regeneration or a fresh resolution:
+	// Force says the job asked for this run, as --rebuild of a layer or task does, or a regeneration:
 	// it never joins an attempt in flight, and consulted no cache.
 	Force bool `json:"force,omitempty"`
 	// Rewrite names the blobs found corrupt in this job, which a task that makes them writes again
@@ -253,7 +252,7 @@ type Backend struct {
 
 // Options is how a Scheduler runs a graph, beyond the graph itself.
 type Options struct {
-	Rebuild   bool      // run the roots again, and resolve their tags again, as api.GraphRequest.Rebuild asks
+	Rebuild   bool      // run the roots again, but for pulls, as api.GraphRequest.Rebuild asks
 	Timestamp time.Time // if set, the earliest time that targets which run stamp their files with
 	// Bound is how many targets the Scheduler runs at once; 1, or less, runs them one at a time, in node order.
 	Bound int
@@ -290,7 +289,7 @@ type Scheduler struct {
 	runner  Runner
 	events  Events
 	opts    Options
-	rebuild map[graph.Ref]bool // the roots to run again, and the pulls to resolve again
+	rebuild map[graph.Ref]bool // the roots to run again; a pull among them says that vamos update refreshes it
 
 	corrupt map[digest.Digest]bool   // blobs found corrupt in this job, which a task that makes them rewrites
 	pinned  map[string]digest.Digest // the index each tag resolved to in this job, so every platform shares it
@@ -402,22 +401,16 @@ type completion struct {
 // Nor is a failure whose container couldn't be removed: a later success would hide it, so the job fails with it.
 func (s *Scheduler) walk(ctx context.Context) error {
 	g := s.graph
-	// Every pull of a tag that one pulls again gets the image it names now, even if pulled before that one.
-	againTags := map[string]bool{}
-	var pulls []graph.Ref
-	for i, n := range g.Nodes {
-		if n.Pull != nil {
-			pulls = append(pulls, graph.Ref(i))
-			if s.rebuild[graph.Ref(i)] {
-				againTags[n.Pull.Image] = true
-			}
-		}
-	}
 	// Every pull is a dependency of every other node; rather than an edge each, the pulls left are counted,
 	// so that a graph's dependencies grow with its edges, not with its pulls times its targets.
-	pullsLeft := len(pulls)
+	pullsLeft := 0
+	for _, n := range g.Nodes {
+		if n.Pull != nil {
+			pullsLeft++
+		}
+	}
 	dependents := make([][]graph.Ref, len(g.Nodes))
-	lastOfTag := map[string]graph.Ref{}
+	lastOfTag := map[string]graph.Ref{} // the last pull of each record, by its name
 	done := make([]bool, len(g.Nodes))
 	why := map[graph.Ref]string{} // why a layer or task runs though it may be cached, if it must
 	for i, n := range g.Nodes {
@@ -426,10 +419,13 @@ func (s *Scheduler) walk(ctx context.Context) error {
 		case n.Source != nil:
 			done[i] = true // its files are in the content store already
 		case n.Pull != nil:
-			if prev, ok := lastOfTag[n.Pull.Image]; ok {
+			// Pulls that share a record resolve in turn, so that each adds its platform to what the last wrote:
+			// those of a tag, and those pinned to a manifest, of whichever tag.
+			record := recordName(n.Pull.Image, n.Pull.Digest)
+			if prev, ok := lastOfTag[record]; ok {
 				dependents[prev] = append(dependents[prev], ref)
 			}
-			lastOfTag[n.Pull.Image] = ref
+			lastOfTag[record] = ref
 		default:
 			for _, r := range n.Refs() {
 				if r != graph.Scratch {
@@ -520,7 +516,7 @@ func (s *Scheduler) walk(ctx context.Context) error {
 			seq++
 			started[i], running[i] = seq, true
 			active++
-			start := s.prepare(ref, why[ref], againTags)
+			start := s.prepare(ref, why[ref])
 			go func() { completions <- start(ctx) }()
 		}
 		if active == 0 {
@@ -619,14 +615,13 @@ func (e *inputError) Unwrap() error {
 }
 
 // prepare returns what runs the node ref, with why if it is a layer or task that must run though it may be cached,
-// and againTags naming the tags to resolve afresh.
 // Everything the node needs of the Scheduler's state is read here, before it starts; the function returned reads
 // only the stores, so that it can run beside other nodes.
-func (s *Scheduler) prepare(ref graph.Ref, why string, againTags map[string]bool) func(context.Context) completion {
+func (s *Scheduler) prepare(ref graph.Ref, why string) func(context.Context) completion {
 	n := s.graph.Node(ref)
 	switch {
 	case n.Pull != nil:
-		return s.prepareResolve(ref, againTags[n.Pull.Image])
+		return s.prepareResolve(ref)
 	case n.Index != nil:
 		return s.prepareIndex(ref)
 	}
@@ -638,7 +633,9 @@ func (s *Scheduler) record(c completion) {
 	n := s.graph.Node(c.ref)
 	switch {
 	case n.Pull != nil:
-		s.pinned[n.Pull.Image] = c.result.Index
+		if n.Pull.Digest == "" { // a pinned pull's index is its pin, which every pull of its tag has
+			s.pinned[n.Pull.Image] = c.result.Index
+		}
 		s.images[c.ref] = madeImage(c.result)
 	case n.Index != nil:
 		s.indexes[c.ref] = c.manifests
@@ -662,9 +659,10 @@ func madeImage(result *cache.ActionResult) builtImage {
 }
 
 // prepareResolve returns what resolves the pull ref: the image its tag names for its platform, from the index the
-// tag resolved to earlier in this job, if it did, so that every platform's image of one tag comes from one index.
-// With again, the tag is resolved afresh rather than as the record store has it.
-func (s *Scheduler) prepareResolve(ref graph.Ref, again bool) func(context.Context) completion {
+// lockfile pins it to, if it does, or else the index the tag resolved to earlier in this job, if it did,
+// so that every platform's image of one tag comes from one index.
+// A pull is never resolved afresh, even rebuilt: vamos update refreshes its pin, which a rebuilt pull says.
+func (s *Scheduler) prepareResolve(ref graph.Ref) func(context.Context) completion {
 	n := s.graph.Node(ref)
 	a := &Action{
 		Version:  ActionVersion,
@@ -673,19 +671,21 @@ func (s *Scheduler) prepareResolve(ref graph.Ref, again bool) func(context.Conte
 		Platform: n.Pull.Platform,
 		Index:    s.pinned[n.Pull.Image],
 	}
-	again = again && a.Index == ""
-	// A fresh resolution never joins one in flight, which may give the tag as the record store has it.
-	force := s.rebuild[ref] || again
+	if n.Pull.Digest != "" {
+		a.Index, a.Pinned = n.Pull.Digest, true
+	}
 	runPlatform := s.runPlatform(a.Platform)
 	return func(ctx context.Context) (c completion) {
 		c.ref = ref
 		ctx, span := tracing.StartTrack(ctx, n.Desc, n.Desc, "image", n.Pull.Image, "platform", n.Pull.Platform)
 		defer func() { span.EndWith(c.err) }()
-		if s.rebuild[ref] {
-			// The tag may name a newer image now.
-			s.events.Status(ref, "pulling again")
+		if a.Pinned {
+			span.Set("pinned", a.Index.String())
 		}
-		result, err := s.resolve(ctx, ref, a, runPlatform, again, force)
+		if s.rebuild[ref] {
+			s.events.Status(ref, "pulls are refreshed by vamos update")
+		}
+		result, err := s.resolve(ctx, ref, a, runPlatform)
 		if err != nil {
 			c.err = s.failed(ref, err)
 			return c
@@ -698,43 +698,65 @@ func (s *Scheduler) prepareResolve(ref graph.Ref, again bool) func(context.Conte
 	}
 }
 
-// resolve resolves a, the pull ref's Action: from the tag's record, if it holds a complete instance for the platform
+// recordName returns the name of the record of a pull of image pinned to pin, or of none if pin is "":
+// the tag's, image, or the pin's, as PinName gives it.
+func recordName(image string, pin digest.Digest) string {
+	if pin == "" {
+		return image
+	}
+	return PinName(image, pin)
+}
+
+// PinName returns the name that the record of image, a name and tag, pinned to the manifest d is kept under in the
+// record store: the image's name with that digest, rather than its tag, so that a pin never reads nor writes the
+// tag's own record, and pins of one manifest share what was found out about it, which never changes.
+func PinName(image string, d digest.Digest) string {
+	named, err := reference.ParseNamed(image)
+	if err != nil {
+		return image + "@" + d.String() // a graph's images are checked; this keeps the name distinct all the same
+	}
+	return reference.TrimNamed(named).String() + "@" + d.String()
+}
+
+// resolve resolves a, the pull ref's Action: from its record, if it holds a complete instance for the platform
 // whose image the Checker finds present, and otherwise through the Runner, which is given the record,
 // so that a cached resolve asks the Runner nothing.
-// A record of another index than the one pinned is passed on all the same: the Runner resolves the pinned index.
-// The Runner runs it on runPlatform, by preference.
-func (s *Scheduler) resolve(ctx context.Context, ref graph.Ref, a *Action, runPlatform string, again, force bool) (
+// The record is the one Action.RecordName names: the pin's, if a is pinned, and otherwise the tag's;
+// a tag's record of another index than the one the job pinned is passed on all the same: the Runner resolves the
+// pinned index.
+// The Runner runs it on runPlatform, by preference; a pin that the registry won't give is advised to be updated.
+func (s *Scheduler) resolve(ctx context.Context, ref graph.Ref, a *Action, runPlatform string) (
 	*cache.ActionResult, error) {
-	var recorded *cache.TagRecord
-	if !again {
-		var err error
-		if recorded, err = s.records.Tag(ctx, a.Image); err != nil {
-			return nil, fmt.Errorf("reading the build cache: %w", err)
-		}
-		if recorded != nil && (a.Index == "" || recorded.Digest == a.Index) {
-			if i, ok := recorded.Instances[a.Platform]; ok && i.Complete() {
-				result := &cache.ActionResult{
-					Image:     i.Image,
-					Platform:  i.Platform,
-					Index:     recorded.Digest,
-					Epoch:     i.Epoch,
-					Locations: i.Locations,
-				}
-				problem, err := s.checker.Check(ctx, a, result)
-				if err != nil {
-					return nil, fmt.Errorf("reading the build cache: %w", err)
-				}
-				if problem == nil {
-					tracing.Current(ctx).Set("cached", true)
-					return result, nil
-				}
-				tracing.Current(ctx).Set("unusable", problem.Error())
+	recorded, err := s.records.Tag(ctx, a.RecordName())
+	if err != nil {
+		return nil, fmt.Errorf("reading the build cache: %w", err)
+	}
+	if recorded != nil && (a.Index == "" || recorded.Digest == a.Index) {
+		if i, ok := recorded.Instances[a.Platform]; ok && i.Complete() {
+			result := &cache.ActionResult{
+				Image:     i.Image,
+				Platform:  i.Platform,
+				Index:     recorded.Digest,
+				Epoch:     i.Epoch,
+				Locations: i.Locations,
 			}
+			problem, err := s.checker.Check(ctx, a, result)
+			if err != nil {
+				return nil, fmt.Errorf("reading the build cache: %w", err)
+			}
+			if problem == nil {
+				tracing.Current(ctx).Set("cached", true)
+				return result, nil
+			}
+			tracing.Current(ctx).Set("unusable", problem.Error())
 		}
 	}
-	req := Request{Action: a, Tag: recorded, Again: again, Force: force, RunPlatform: runPlatform}
+	req := Request{Action: a, Tag: recorded, RunPlatform: runPlatform}
 	rep, err := s.runner.Run(ctx, req, s.output(ref))
-	if err != nil {
+	if errors.Is(err, ErrPinUnavailable) { // advised here, since jobs that name the pull otherwise share the attempt
+		return nil, fmt.Errorf("%w; if the registry no longer has it, vamos update %s pins what the tag names now",
+			err, s.graph.Node(ref).Label)
+	} else if err != nil {
 		return nil, err
 	}
 	result := rep.Result

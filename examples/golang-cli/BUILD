@@ -1,4 +1,4 @@
-# Match the tag to the Go version in go.mod.
+# Match the tag to the Go version in go.mod, then run vamos update to pin it again in vamos.lock.
 # The tag names an index, and its manifest for whichever platform names this target is pulled.
 # Here that is only ever the exec platform, since "build" runs on it.
 pull(

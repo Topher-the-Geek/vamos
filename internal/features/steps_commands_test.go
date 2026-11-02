@@ -55,8 +55,14 @@ var sendingCommands = []string{"save", "export"}
 // everyCommand are the commands that build, which When steps run with options.
 var everyCommand = []string{"save", "export", "build", "push", "load", "publish"}
 
+// everyCommandAndUpdate are everyCommand and update, which reaches registries, as they do, and builds nothing.
+var everyCommandAndUpdate = append(slices.Clone(everyCommand), "update")
+
 // everyCommandAndGraph are everyCommand and graph, which configures a graph as they do, building nothing.
 var everyCommandAndGraph = append(slices.Clone(everyCommand), "graph")
+
+// everyCommandGraphAndUpdate are everyCommand, graph and update, which configure a graph as they do.
+var everyCommandGraphAndUpdate = append(slices.Clone(everyCommandAndGraph), "update")
 
 // to sends to the path name, relative to the folder that the command sends to,
 // rather than to the target's name, with .tar for save. Save and export take it.
@@ -131,7 +137,7 @@ func withSecrets(secrets ...string) option {
 
 // forPlatform builds for platform, such as linux/arm64, with --platform. Every command takes it.
 func forPlatform(platform string) option {
-	return option{"forPlatform", everyCommand, func(_ *world, c *commandLine) {
+	return option{"forPlatform", everyCommandAndUpdate, func(_ *world, c *commandLine) {
 		c.flags = append(c.flags, "--platform", platform)
 	}}
 }
@@ -147,7 +153,7 @@ func fromTheClient() option {
 // withoutTLSVerification lets vamos itself reach a registry over plain HTTP, with --tls-verify=false.
 // Every command takes it.
 func withoutTLSVerification() option {
-	return option{"withoutTLSVerification", everyCommand, func(w *world, c *commandLine) {
+	return option{"withoutTLSVerification", everyCommandAndUpdate, func(w *world, c *commandLine) {
 		c.verifyTLS(w, "withoutTLSVerification")
 		c.flags = append(c.flags, "--tls-verify=false")
 	}}
@@ -182,6 +188,14 @@ func onTheExecPlatform(platform string) option {
 func replacing() option {
 	return option{"replacing", []string{"export"}, func(_ *world, c *commandLine) {
 		c.flags = append(c.flags, "--replace")
+	}}
+}
+
+// pinning gives --pins=policy, which says what the command does with a pull that the lockfile doesn't pin:
+// record, resolve or require. Every command that builds takes it.
+func pinning(policy string) option {
+	return option{"pinning", everyCommand, func(_ *world, c *commandLine) {
+		c.flags = append(c.flags, "--pins="+policy)
 	}}
 }
 
@@ -462,6 +476,33 @@ func (w *world) WhenIBuild(target string, options ...option) {
 	w.sendsNothing("WhenIBuild")
 	args := append([]string{"build", target}, c.targets...)
 	w.run(append(args, c.flags...)...)
+}
+
+// WhenIUpdate pins the pulls of the project to what their tags name now, with vamos update, all of them unless
+// options name some.
+func (w *world) WhenIUpdate(options ...option) {
+	w.t.Helper()
+	c := w.apply("update", options)
+	w.sendsNothing("WhenIUpdate")
+	w.run(append(append([]string{"update"}, c.targets...), c.flags...)...)
+}
+
+// dryRun gives --dry-run, so that vamos update writes nothing and fails if the lockfile would change.
+// Update takes it.
+func dryRun() option {
+	return option{"dryRun", []string{"update"}, func(_ *world, c *commandLine) {
+		c.flags = append(c.flags, "--dry-run")
+	}}
+}
+
+// onlyThePulls names pulls for vamos update to pin, rather than every pull. Update takes it.
+func onlyThePulls(pulls ...string) option {
+	return option{"onlyThePulls", []string{"update"}, func(w *world, c *commandLine) {
+		if len(pulls) == 0 {
+			w.t.Fatal("onlyThePulls() names no pull")
+		}
+		c.targets = append(c.targets, pulls...)
+	}}
 }
 
 // WhenIShowTheGraph shows the graph that target configures, which the scenario keeps, for Then steps that compare

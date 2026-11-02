@@ -140,14 +140,16 @@ func join(ev Output, starter Output) {
 }
 
 // publish writes what the attempt of req reported: a layer's or task's result under its key,
-// or the record of the tag a resolve resolved, so that the artifact is published before the result is.
+// or the record of the tag a resolve resolved, or of its pin, as Action.RecordName names it,
+// so that the artifact is published before the result is.
 // A result that can't be recorded fails the attempt, keeping its log, as the artifact can't be reused.
 func (s *Sharing) publish(ctx context.Context, req Request, rep *Report) (err error) {
 	switch {
 	case rep == nil || rep.Result == nil:
 		return errors.New("the attempt reported no result")
 	case rep.Tag != "":
-		if err := s.records.SetTag(ctx, rep.Tag, rep.TagRecord); err != nil {
+		// Named here, whatever the Runner calls it, so that a pin never writes the tag's record.
+		if err := s.records.SetTag(ctx, req.Action.RecordName(), rep.TagRecord); err != nil {
 			return fmt.Errorf("saving to the build cache: %w", err)
 		}
 	case req.Key != "":

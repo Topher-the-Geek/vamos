@@ -210,7 +210,7 @@ func fakeRun(f *fixture, gate func(a *remote.Assignment, killed func() bool) err
 		act := req.Action
 		if act.Kind == sched.KindResolve {
 			index := act.Index
-			if index == "" && !req.Again && req.Tag != nil {
+			if index == "" && req.Tag != nil {
 				index = req.Tag.Digest
 			}
 			if index == "" {

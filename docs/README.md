@@ -28,6 +28,8 @@ Run a coordinator only on a trusted network: it has no authentication, so anyone
 and read its cache, and anyone who can reach a pull-through cache reads what its upstream credentials can.
 The client must reach the coordinator, the cache registry and, for images that are plain `pull()`s, the pull-through
 cache, with its own registry credentials.
+`vamos update`, and a build that records a pin, ask each pulled image's own upstream registry about its tags, from
+the client, never a pull-through cache, whose answer about a tag can be stale; so the client must reach those too.
 A registry that the coordinator's `registries.conf` marks insecure, as the Helm chart's are, the client reads over
 plain HTTP too; for another, `--tls-verify=false` or a `registries.conf` entry allows one that speaks plain HTTP.
 A build runs its commands on the platform the coordinator's workers have; see

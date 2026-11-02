@@ -62,7 +62,7 @@ func TestPullerPinnedIndex(t *testing.T) {
 	first, firstAMD64 := push()
 	second, _ := push()
 
-	// The tag now names the second index, as another job's --rebuild recorded.
+	// The tag now names the second index, as another job that resolved it later recorded.
 	recorded := &cache.TagRecord{Digest: second}
 	pl := &puller{systemContext: &types.SystemContext{DockerInsecureSkipTLSVerify: types.OptionalBoolTrue}}
 	named, err := reference.ParseNamed(image)

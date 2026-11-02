@@ -39,6 +39,12 @@
 // position, before watchers see it, Spec.Ending; restores the finished ones after a restart, with Restore; and is
 // told of evictions, OnEvict. A Job resumed after a restart gives positions past those of its earlier runs,
 // Spec.First and Spec.Resumed, so that a watch from one of those gets a gap that says the executor restarted.
+// A pull that the lockfile pins, through graph.Pull.Digest, resolves that index or image for every platform, its
+// Action Pinned, so that it shares no attempt with a tag's resolve, and reads and writes the pin's record, which
+// Action.RecordName names by digest, never the tag's, so that a moved tag changes nothing and a cached pin asks no
+// registry anything; Sharing names the record itself. Pulls that share a record resolve in turn. A pin its registry
+// won't give fails as ErrPinUnavailable, which crosses from a worker as AttemptFailure.PinUnavailable, and each job
+// advises updating its own pull, since jobs share the attempt.
 // A Scheduler resolves pulls first, then dispatches ready targets up to Options.Bound at once, checking cached
 // results through a Checker and running the rest through the Runner, which Sharing wraps: an ordinary job attaches to
 // an attempt of the same key in flight, a forced one never does, and an attempt is cancelled once no job is attached.

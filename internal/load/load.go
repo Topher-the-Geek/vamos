@@ -52,6 +52,10 @@ type Request struct {
 	// and for which platform, with why, so that an index sends only its manifest for that platform.
 	// Its error is returned as it is.
 	DestPlatform func(context.Context) (imgspecv1.Platform, string, error)
+	// Pin, if set, is given the graph once its targets are configured, with the pins that the lockfile, at the
+	// workspace's root, root, gives its pulls, before any glob is read, so that it can pin the others, giving them
+	// their digests, and write their pins to the lockfile, which a glob then reads as it is.
+	Pin func(ctx context.Context, g *graph.Graph, root string) error
 	// Store reads the files that a glob selects within dir in fsys, as it returns their tree, with their stats:
 	// into the content store, for a build.
 	// It is called only once the targets are configured, so that a mistake in a BUILD file touches nothing.
@@ -92,18 +96,9 @@ func traceLoad(ctx context.Context, fsys afero.Fs, req Request) (_ *graph.Graph,
 
 // load is LoadPublication, also returning the workspace, once opened; the publication is nil unless req wants one.
 func load(ctx context.Context, fsys afero.Fs, req Request) (*graph.Graph, *Publication, *workspace, error) {
-	dir, err := filepath.Abs(req.Dir)
+	w, err := open(ctx, fsys, req)
 	if err != nil {
-		return nil, nil, nil, err
-	}
-	w, err := openWorkspace(ctx, fsys, dir, req.ExecPlatform)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	if req.Platform != "" {
-		if w.platform, err = parsePlatform(req.Platform); err != nil {
-			return nil, nil, w, fmt.Errorf("--platform %s: %w", req.Platform, err)
-		}
+		return nil, nil, w, err
 	}
 
 	var roots []confLabel
@@ -142,6 +137,11 @@ func load(ctx context.Context, fsys afero.Fs, req Request) (*graph.Graph, *Publi
 	if err := checkSecretsGiven(g, req.Secrets); err != nil {
 		return nil, nil, w, err
 	}
+	if req.Pin != nil {
+		if err := req.Pin(ctx, g, w.root); err != nil {
+			return nil, nil, w, err
+		}
+	}
 	err = w.readGlobs(ctx, g, globs, func(ctx context.Context, dir string, sel *fileset.Selection) (
 		cache.Blob, fileset.Stats, error) {
 		return req.Store(ctx, w.fs, dir, sel)
@@ -153,6 +153,28 @@ func load(ctx context.Context, fsys afero.Fs, req Request) (*graph.Graph, *Publi
 		return nil, nil, w, err // a bug: every mistake in a BUILD file is reported before this
 	}
 	return g, pub, w, nil
+}
+
+// open opens the workspace holding req.Dir, with its lockfile, as loading req begins, returning it once opened even if
+// what follows fails.
+func open(ctx context.Context, fsys afero.Fs, req Request) (*workspace, error) {
+	dir, err := filepath.Abs(req.Dir)
+	if err != nil {
+		return nil, err
+	}
+	w, err := openWorkspace(ctx, fsys, dir, req.ExecPlatform)
+	if err != nil {
+		return nil, err
+	}
+	if w.lock, err = ReadLock(fsys, w.root); err != nil {
+		return w, err
+	}
+	if req.Platform != "" {
+		if w.platform, err = parsePlatform(req.Platform); err != nil {
+			return w, fmt.Errorf("--platform %s: %w", req.Platform, err)
+		}
+	}
+	return w, nil
 }
 
 // checkSecretsGiven refuses a graph with a run() step whose secret the command line doesn't give, if given is set,

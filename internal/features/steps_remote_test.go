@@ -89,6 +89,20 @@ func (w *world) GivenACoordinatorThatOffers(offered []string, preferred string) 
 	w.startCoordinatorThatSays(caps)
 }
 
+// GivenACoordinatorOfAnotherGraphVersionThatOffers starts a coordinator, at <coordinator>, that says it runs commands
+// on offered, preferring the first, but runs only graphs of another version than this vamos's, as one of another
+// release does, and answers nothing else, not finding it.
+func (w *world) GivenACoordinatorOfAnotherGraphVersionThatOffers(offered ...string) {
+	w.t.Helper()
+	caps := api.Capabilities{GraphVersions: []int{graph.Version + 1000}}
+	for _, p := range offered {
+		caps.Platforms = append(caps.Platforms, w.platform(p))
+	}
+	p := w.platform(offered[0])
+	caps.ExecPlatform = &p
+	w.startCoordinatorThatSays(caps)
+}
+
 // platform returns the platform that text names, stopping the scenario if it names none.
 func (w *world) platform(text string) imgspecv1.Platform {
 	w.t.Helper()
@@ -221,9 +235,9 @@ func (w *world) atCoordinator(s string) string {
 }
 
 // onTheCoordinator builds on the coordinator at url, with --coordinator, in which <coordinator> stands for the
-// scenario's. Every command takes it, and graph, which asks the coordinator which platform to configure for.
+// scenario's. Every command takes it, and graph and update, which ask the coordinator which platform to configure for.
 func onTheCoordinator(url string) option {
-	return option{"onTheCoordinator", everyCommandAndGraph, func(w *world, c *commandLine) {
+	return option{"onTheCoordinator", everyCommandGraphAndUpdate, func(w *world, c *commandLine) {
 		w.t.Helper()
 		c.flags = append(c.flags, "--coordinator", w.atCoordinator(url))
 	}}
@@ -288,7 +302,7 @@ func (w *world) GivenAnotherClientBuildsOnTheCoordinator(target string, options 
 	var err error
 	go func() {
 		defer close(done)
-		cmd := cli.NewRootCommand(cli.Config{Fs: fsys, Store: &w.stores.Options})
+		cmd := cli.NewRootCommand(w.commandConfig(fsys))
 		cmd.SetOut(&output)
 		cmd.SetErr(&output)
 		cmd.SetArgs(args)

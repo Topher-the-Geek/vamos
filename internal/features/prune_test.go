@@ -8,7 +8,7 @@ import (
 
 // newPruneWorld starts a scenario of the prune feature, from its background: stores of its own, since prune empties
 // them, and a project whose layers and task are built on the image of a registry of its own, base:v1, so that it
-// needn't pull busybox. prune removes cached layer images and other build results, while keeping pulled images and
+// needn't pull busybox, which its lockfile pins. prune removes cached layer images and other build results, while keeping pulled images and
 // recorded tag resolutions.
 func newPruneWorld(t *testing.T) *world {
 	t.Helper()
@@ -16,6 +16,7 @@ func newPruneWorld(t *testing.T) *world {
 	w.GivenStoresOfTheScenariosOwn()
 	w.GivenARegistry()
 	w.GivenTheRegistryHoldsAnIndex("<registry>/base:v1", "base", thisPlatform())
+	w.GivenTheLockfileHolds(lockfilePinning(pin{"<registry>/base:v1", "v1", "<digest of base>"}))
 	w.GivenTheBuildFileDeclares(`
 		pull(name="base", image="<registry>/base", tag="v1")
 		glob(name="input", include=["input.txt"])

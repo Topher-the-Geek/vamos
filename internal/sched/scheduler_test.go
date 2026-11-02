@@ -67,7 +67,7 @@ func (f *fakeRunner) Run(ctx context.Context, req Request, ev Output) (*Report, 
 	if a.Kind == KindResolve {
 		f.resolves = append(f.resolves, req)
 		index := a.Index
-		if index == "" && !req.Again && req.Tag != nil {
+		if index == "" && req.Tag != nil {
 			index = req.Tag.Digest
 		}
 		if index == "" {
@@ -226,11 +226,12 @@ func multiPlatformGraph(t *testing.T) *graph.Graph {
 
 // TestSchedulerPinsIndex checks that a tag moved between two platforms' resolutions gives both platforms images
 // from the first index, since the second resolution asks for the index the first returned,
-// and that the index assembled lists both, for their platforms, without any container storage.
+// and that the index assembled lists both, for their platforms, without any container storage;
+// and that rebuilding the pulls resolves nothing afresh.
 func TestSchedulerPinsIndex(t *testing.T) {
 	m, f := fakeFixture(t)
 	first := f.registry["example.com/base:v1"]
-	// After the first resolution the tag moves, and another job records the move, as a concurrent --rebuild would:
+	// After the first resolution the tag moves, and another job records the move, as one resolving it later would:
 	// only the pin keeps the second platform on the first index.
 	f.moved = func() {
 		f.registry["example.com/base:v1"] = digest.FromString("index 2")
@@ -269,44 +270,27 @@ func TestSchedulerPinsIndex(t *testing.T) {
 		t.Errorf("tag record = %+v, %v; want the first index", record, err)
 	}
 
-	// A later job with --rebuild for the pulls resolves afresh, and the moved tag's index serves both platforms.
-	f.resolves = nil
+	// A later job with --rebuild for the pulls resolves nothing afresh: both come from the tag's record, of the first
+	// index, and each says that vamos update refreshes pulls.
+	f.resolves, ev.statuses = nil, nil
 	g := multiPlatformGraph(t)
 	g.Roots = []graph.Ref{0, 1}
 	s = schedule(g, m, m, f, ev, true, time.Time{})
 	if _, err := s.Run(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	second := digest.FromString("index 2")
-	if !f.resolves[0].Again || f.resolves[1].Again || f.resolves[1].Action.Index != second {
-		t.Errorf("resolves again = %v, %v with index %q; want the first afresh and the second pinned to %s",
-			f.resolves[0].Again, f.resolves[1].Again, f.resolves[1].Action.Index, second)
+	if len(f.resolves) != 0 {
+		t.Errorf("%d resolves, want none, from the tag's record", len(f.resolves))
 	}
-	if !slices.Contains(ev.statuses, "0: pulling again") {
-		t.Errorf("statuses = %q, want the pull reported as pulled again", ev.statuses)
+	for i, platform := range []string{"linux/amd64", "linux/arm64"} {
+		if got, want := s.images[graph.Ref(i)].id, imageOf(first, platform).Encoded(); got != want {
+			t.Errorf("the rebuilt base for %s is %s, want %s, from the first index", platform, got, want)
+		}
 	}
-}
-
-// TestSchedulerFreshResolveForced checks that a pull which resolves its tag afresh, because another pull of the tag
-// is rebuilt, is forced even though it isn't a root, so that it never joins a resolution in flight that reads
-// the record store's stale index and would pin it for the rebuilt pull.
-func TestSchedulerFreshResolveForced(t *testing.T) {
-	m, f := fakeFixture(t)
-	g := multiPlatformGraph(t)
-	g.Roots = []graph.Ref{1} // the second platform's pull alone is rebuilt
-	if _, err := schedule(g, m, m, f, &recordedEvents{}, true, time.Time{}).Run(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	if len(f.resolves) != 2 {
-		t.Fatalf("%d resolves, want 2", len(f.resolves))
-	}
-	if first := f.resolves[0]; !first.Again || !first.Force {
-		t.Errorf("the first pull resolved with again = %v, force = %v; want a forced fresh resolution",
-			first.Again, first.Force)
-	}
-	if second := f.resolves[1]; second.Again || second.Action.Index != f.registry["example.com/base:v1"] {
-		t.Errorf("the rebuilt pull resolved with again = %v and index %q; want it pinned to the fresh index",
-			second.Again, second.Action.Index)
+	for _, want := range []string{"0: pulls are refreshed by vamos update", "1: pulls are refreshed by vamos update"} {
+		if !slices.Contains(ev.statuses, want) {
+			t.Errorf("statuses = %q, want %q", ev.statuses, want)
+		}
 	}
 }
 
@@ -723,7 +707,7 @@ func TestSchedulerCachedResolve(t *testing.T) {
 	delete(f.images, imageOf(record.Digest, "linux/arm64"))
 	f.registry["example.com/base:v1"] = digest.FromString("index 2") // which a fresh resolution would find
 	testenv.Must(t, must2(schedule(g, m, m, f, &recordedEvents{}, false, time.Time{}).Run(t.Context())))
-	if len(f.resolves) != 1 || f.resolves[0].Action.Platform != "linux/arm64" || f.resolves[0].Again ||
+	if len(f.resolves) != 1 || f.resolves[0].Action.Platform != "linux/arm64" ||
 		f.resolves[0].Tag == nil || f.resolves[0].Tag.Digest != record.Digest {
 		t.Errorf("resolves after an image went missing = %+v, want one, for linux/arm64, given the record", f.resolves)
 	}
@@ -1194,7 +1178,7 @@ func TestSchedulerParallelRegeneratesStale(t *testing.T) {
 }
 
 // movingRecords is a record store whose tag records move to another index from the second read on,
-// as another job's --rebuild between two pulls of one tag would move them.
+// as another job that resolved the tag between two pulls of it would move them.
 type movingRecords struct {
 	cache.RecordStore
 	to    digest.Digest
@@ -1566,4 +1550,131 @@ func TestSchedulerOffered(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestSchedulerResolvesLockfilePins checks that pulls the lockfile pins resolve the pinned index for every platform,
+// whatever the tag names now, reading and writing the pin's record, which PinName names, never the tag's, so that a
+// later job reuses them without resolving; and that a pin the registry won't give, as a worker reports it, is advised
+// to be updated, naming the pull.
+func TestSchedulerResolvesLockfilePins(t *testing.T) {
+	m, f := fakeFixture(t)
+	g := multiPlatformGraph(t)
+	pin := digest.FromString("index 0") // what the tag named when it was pinned; it names "index 1" now
+	for _, ref := range []graph.Ref{0, 1} {
+		g.Nodes[ref].Pull.Digest = pin
+	}
+	tagRecord := &cache.TagRecord{Digest: digest.FromString("index 1")}
+	testenv.Must(t, m.SetTag(t.Context(), "example.com/base:v1", tagRecord))
+
+	s := schedule(g, m, m, f, &recordedEvents{}, false, time.Time{})
+	testenv.Must(t, must2(s.Run(t.Context())))
+	if len(f.resolves) != 2 {
+		t.Fatalf("%d resolves, want one for each platform", len(f.resolves))
+	}
+	for _, req := range f.resolves {
+		// The second platform is given the pin's record, as the first wrote it.
+		if req.Action.Index != pin || !req.Action.Pinned || req.Tag != nil && req.Tag.Digest != pin {
+			t.Errorf("resolve for %s asked for index %s, pinned %v, given record %+v; want the pin, pinned, "+
+				"and the pin's record, if any", req.Action.Platform, req.Action.Index, req.Action.Pinned, req.Tag)
+		}
+	}
+	for i, platform := range []string{"linux/amd64", "linux/arm64"} {
+		if got, want := s.images[graph.Ref(i)].id, imageOf(pin, platform).Encoded(); got != want {
+			t.Errorf("the base for %s is %s, want %s, from the pinned index", platform, got, want)
+		}
+	}
+	// A resolve of the same index as a tag's, pinned earlier in its job, shares no attempt with the pin's.
+	unpinned := *f.resolves[0].Action
+	unpinned.Pinned = false
+	if unpinned.Key() == f.resolves[0].Action.Key() {
+		t.Error("a pinned resolve has the key of the tag's resolve of the same index")
+	}
+	if record, err := m.Tag(t.Context(), "example.com/base:v1"); err != nil || !reflect.DeepEqual(record, tagRecord) {
+		t.Errorf("tag record = %+v, %v; want it as it was, %+v", record, err, tagRecord)
+	}
+	name := PinName("example.com/base:v1", pin)
+	if name != "example.com/base@"+pin.String() {
+		t.Errorf("PinName = %q, want the image's name with the pin's digest", name)
+	}
+	record, err := m.Tag(t.Context(), name)
+	if err != nil || record == nil || record.Digest != pin || len(record.Instances) != 2 {
+		t.Errorf("pin record = %+v, %v; want the pin with both platforms' images", record, err)
+	}
+
+	f.resolves = nil
+	testenv.Must(t, must2(schedule(g, m, m, f, &recordedEvents{}, false, time.Time{}).Run(t.Context())))
+	if len(f.resolves) != 0 {
+		t.Errorf("a later job resolved %d pulls, want none, from the pin's record", len(f.resolves))
+	}
+
+	gone := &failingResolves{fakeRunner: f}
+	g.Nodes[0].Pull.Digest, g.Nodes[1].Pull.Digest = digest.FromString("gone"), digest.FromString("gone")
+	b := Backend{Content: m, Records: m, Checker: f, Runner: NewSharing(gone, m, m)}
+	_, err = New(g, b, &recordedEvents{}, Options{Bound: 1}).Run(t.Context())
+	want := `pull "base" (linux/amd64): image "example.com/base:v1": manifest unknown; if the registry no longer has ` +
+		"it, vamos update base pins what the tag names now"
+	if err == nil || err.Error() != want {
+		t.Errorf("run = %v, want %q", err, want)
+	}
+}
+
+// failingResolves is a Runner whose resolves fail as a registry that won't give what they are pinned to makes them,
+// as data, as a worker's failure crosses to its coordinator.
+type failingResolves struct{ *fakeRunner }
+
+func (r *failingResolves) Run(ctx context.Context, req Request, ev Output) (*Report, error) {
+	if req.Action.Kind == KindResolve {
+		return nil, FailureOf(PinUnavailable(fmt.Errorf("image %q: manifest unknown", req.Action.Image))).Err()
+	}
+	return r.fakeRunner.Run(ctx, req, ev)
+}
+
+// TestSchedulerSerializesPullsOfOnePin checks that pulls of different tags pinned to one manifest, which share the
+// pin's record, resolve in turn even when several may run at once, so that the record keeps every platform's image.
+func TestSchedulerSerializesPullsOfOnePin(t *testing.T) {
+	m, f := fakeFixture(t)
+	g := multiPlatformGraph(t)
+	pin := digest.FromString("index 0")
+	g.Nodes[1].Pull.Image = "example.com/base:latest"
+	for _, ref := range []graph.Ref{0, 1} {
+		g.Nodes[ref].Pull.Digest = pin
+	}
+	testenv.Must(t, g.Validate())
+	r := &overlappingResolves{fakeRunner: f, arrived: make(chan struct{}, 2)}
+	b := Backend{Content: m, Records: m, Checker: f, Runner: NewSharing(r, m, m)}
+	testenv.Must(t, must2(New(g, b, &recordedEvents{}, Options{Bound: 2}).Run(t.Context())))
+	record, err := m.Tag(t.Context(), PinName("example.com/base:v1", pin))
+	if err != nil || record == nil || len(record.Instances) != 2 {
+		t.Errorf("pin record = %+v, %v; want both platforms' images", record, err)
+	}
+}
+
+// overlappingResolves is a Runner whose resolves each wait a while for another to start, so that two that the
+// Scheduler runs at once overlap, each having been given the record as it was before either.
+type overlappingResolves struct {
+	*fakeRunner
+	mu      sync.Mutex
+	arrived chan struct{}
+}
+
+func (r *overlappingResolves) Run(ctx context.Context, req Request, ev Output) (*Report, error) {
+	if req.Action.Kind == KindResolve {
+		r.arrived <- struct{}{}
+		deadline := time.After(200 * time.Millisecond)
+		for len(r.arrived) < 2 {
+			select {
+			case <-deadline:
+				return r.run(ctx, req, ev)
+			case <-time.After(time.Millisecond):
+			}
+		}
+	}
+	return r.run(ctx, req, ev)
+}
+
+// run runs req on the fake, one at a time, since its bookkeeping isn't safe for runs at once.
+func (r *overlappingResolves) run(ctx context.Context, req Request, ev Output) (*Report, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.fakeRunner.Run(ctx, req, ev)
 }

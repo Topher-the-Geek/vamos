@@ -62,7 +62,7 @@ func TestPull_FetchesItsImage(t *testing.T) {
 
 // TestPull_FailureSaysWhy specifies that a pull whose image its registry doesn't have, or won't give, fails,
 // suggesting to check the name, and to log in if the image is private, and that one whose registry can't be reached
-// fails, saying why.
+// fails, saying why, as the executor resolves a pull without a pin, with --pins=resolve.
 func TestPull_FailureSaysWhy(t *testing.T) {
 	t.Run("An image the registry won't give fails, suggesting to check the name", func(t *testing.T) {
 		// Docker Hub won't give an image it doesn't have, as it won't give a private one.
@@ -71,7 +71,7 @@ func TestPull_FailureSaysWhy(t *testing.T) {
 			pull(name="base", image="vamos-no-such-image")
 			layer(name="app", base="base")
 		`)
-		w.WhenISave("app")
+		w.WhenISave("app", pinning("resolve"))
 		w.ThenItFailsWith(`pull "base": image "docker.io/library/vamos-no-such-image:latest"`,
 			"check the name, and log in if the image is private")
 		w.ThenNothingIsSaved()
@@ -81,7 +81,7 @@ func TestPull_FailureSaysWhy(t *testing.T) {
 		func(t *testing.T) {
 			w := newPullWorld(t)
 			w.GivenTheBuildFileDeclares(`pull(name="base", image="127.0.0.1:1/app")`)
-			w.WhenISave("base", withoutTLSVerification())
+			w.WhenISave("base", withoutTLSVerification(), pinning("resolve"))
 			w.ThenItFailsWith(`pull "base": image "127.0.0.1:1/app:latest"`, "connection refused")
 			w.ThenTheCommandDoesNotSay("check the name")
 			w.ThenNothingIsSaved()
@@ -152,11 +152,12 @@ func TestPull_TakesNoParameters(t *testing.T) {
 }
 
 // TestPull_ResolvedTagsAreReused specifies that a pull of a tag that names an index selects the matching image,
-// and that a tag resolved before is reused, for every platform, until it is explicitly rebuilt.
+// and that, without a pin, as --pins=resolve leaves it, a tag resolved before is reused, for every platform;
+// and that one that an update pinned is reused even after a prune.
 func TestPull_ResolvedTagsAreReused(t *testing.T) {
 	t.Run("A pull selects its index's image for the platform", func(t *testing.T) {
 		w := newPullTagWorld(t)
-		w.WhenISave("app")
+		w.WhenISave("app", pinning("resolve"))
 		w.ThenItSucceeds()
 		w.ThenTheImageIsForThisMachine()
 		w.ThenTheImageIsBuiltOn("first", thisPlatform())
@@ -164,10 +165,10 @@ func TestPull_ResolvedTagsAreReused(t *testing.T) {
 
 	t.Run("A tag that moves keeps naming what it named, without asking the registry", func(t *testing.T) {
 		w := newPullTagWorld(t)
-		w.WhenISave("app")
+		w.WhenISave("app", pinning("resolve"))
 		w.ThenItSucceeds()
 		w.GivenTheRegistryHoldsAnIndex("<registry>/base:v1", "second", thisPlatform(), anotherPlatform())
-		w.WhenISave("app")
+		w.WhenISave("app", pinning("resolve"))
 		w.ThenItSucceeds()
 		w.ThenTheRegistryWasNotAsked()
 		w.ThenTheImageIsBuiltOn("first", thisPlatform())
@@ -175,39 +176,43 @@ func TestPull_ResolvedTagsAreReused(t *testing.T) {
 
 	t.Run("A platform not built for before gets the image of the index the tag named then", func(t *testing.T) {
 		w := newPullTagWorld(t)
-		w.WhenISave("app")
+		w.WhenISave("app", pinning("resolve"))
 		w.ThenItSucceeds()
 		w.GivenTheRegistryHoldsAnIndex("<registry>/base:v1", "second", thisPlatform(), anotherPlatform())
-		w.WhenISave("app", forPlatform(anotherPlatform()))
+		w.WhenISave("app", forPlatform(anotherPlatform()), pinning("resolve"))
 		w.ThenItSucceeds()
 		w.ThenTheImageIsFor(anotherPlatform())
 		w.ThenTheImageIsBuiltOn("first", anotherPlatform())
 	})
 
-	t.Run("--rebuild resolves the tag again, for every platform", func(t *testing.T) {
-		w := newPullTagWorld(t)
-		w.WhenISave("app")
-		w.ThenItSucceeds()
-		w.GivenTheRegistryHoldsAnIndex("<registry>/base:v1", "second", thisPlatform(), anotherPlatform())
-		w.WhenIBuild("base", rebuilding())
-		w.ThenItSucceeds()
-		w.ThenTheOutputIs(`pull "base": pulling again` + "\n")
-		w.WhenISave("app")
-		w.ThenItSucceeds()
-		w.ThenTheImageIsBuiltOn("second", thisPlatform())
-		w.WhenISave("app", forPlatform(anotherPlatform()))
-		w.ThenItSucceeds()
-		w.ThenTheImageIsBuiltOn("second", anotherPlatform())
-	})
+	t.Run("After a prune, builds use the images that a tag without a pin resolved to, without the registry",
+		func(t *testing.T) {
+			w := newPullTagWorld(t)
+			w.GivenStoresOfTheScenariosOwn() // since it prunes them
+			w.WhenISave("app", pinning("resolve"))
+			w.ThenItSucceeds()
+			w.WhenISave("app", forPlatform(anotherPlatform()), pinning("resolve"))
+			w.ThenItSucceeds()
+			w.WhenIPrune()
+			w.ThenItSucceeds()
+			w.WhenISave("app", pinning("resolve"))
+			w.ThenItSucceeds()
+			w.ThenTheRegistryWasNotAsked()
+			w.ThenTheImageIsBuiltOn("first", thisPlatform())
+			w.GivenTheRegistryStops()
+			w.WhenISave("app", forPlatform(anotherPlatform()), pinning("resolve"))
+			w.ThenItSucceeds()
+			w.ThenTheImageIsBuiltOn("first", anotherPlatform())
+		})
 
-	t.Run("After a prune, builds use the images that the tag last resolved to, without the registry",
+	t.Run("After a prune, builds use the images that an update last pinned, without the registry",
 		func(t *testing.T) {
 			w := newPullTagWorld(t)
 			w.GivenStoresOfTheScenariosOwn() // since it prunes them
 			w.WhenISave("app")
 			w.ThenItSucceeds()
 			w.GivenTheRegistryHoldsAnIndex("<registry>/base:v1", "second", thisPlatform(), anotherPlatform())
-			w.WhenIBuild("base", rebuilding())
+			w.WhenIUpdate()
 			w.ThenItSucceeds()
 			w.WhenISave("app")
 			w.ThenItSucceeds()
@@ -229,6 +234,128 @@ func TestPull_ResolvedTagsAreReused(t *testing.T) {
 		})
 }
 
+// TestPull_RebuildingResolvesNothing specifies that building a pull with --rebuild neither resolves its tag again
+// nor changes its pin, and says that vamos update refreshes a pull.
+func TestPull_RebuildingResolvesNothing(t *testing.T) {
+	t.Run("Rebuilding a pinned pull points to update", func(t *testing.T) {
+		w := newPullTagWorld(t)
+		w.GivenTheLockfileHolds(baseOnFirst)
+		w.GivenTheRegistryHoldsAnIndex("<registry>/base:v1", "second", thisPlatform(), anotherPlatform())
+		w.WhenIBuild("base", rebuilding())
+		w.ThenItSucceeds()
+		w.ThenTheOutputIs(`pull "base": pulls are refreshed by vamos update` + "\n")
+		w.ThenTheLockfileIsUnchanged()
+		w.WhenISave("app")
+		w.ThenItSucceeds()
+		w.ThenTheImageIsBuiltOn("first", thisPlatform())
+	})
+
+	t.Run("Rebuilding a pull without a pin keeps what its tag named, without the registry", func(t *testing.T) {
+		w := newPullTagWorld(t)
+		w.WhenISave("app", pinning("resolve"))
+		w.ThenItSucceeds()
+		w.GivenTheRegistryHoldsAnIndex("<registry>/base:v1", "second", thisPlatform(), anotherPlatform())
+		w.WhenIBuild("base", rebuilding(), pinning("resolve"))
+		w.ThenItSucceeds()
+		w.ThenTheOutputIs(`pull "base": pulls are refreshed by vamos update` + "\n")
+		w.ThenTheRegistryWasNotAsked()
+		w.WhenISave("app", forPlatform(anotherPlatform()), pinning("resolve"))
+		w.ThenItSucceeds()
+		w.ThenTheImageIsBuiltOn("first", anotherPlatform())
+		w.ThenThereIsNoLockfile()
+	})
+}
+
+// baseOnFirst is a lockfile that pins the tag v1 of base, in the scenario's registry, to the index "first".
+const baseOnFirst = `
+	{
+	  "version": 1,
+	  "pulls": {
+	    "<registry>/base:v1": {
+	      "tag": "v1",
+	      "digest": "<digest of first>"
+	    }
+	  }
+	}
+`
+
+// TestPull_PinnedPullsUseTheirPins specifies that a pull whose tag the lockfile pins uses the manifest of the pin's
+// digest, choosing its platform's image from it if it is an index, without asking what the tag names,
+// and that a pin its registry no longer has fails, saying to update it.
+func TestPull_PinnedPullsUseTheirPins(t *testing.T) {
+	t.Run("A moved tag keeps the pinned image", func(t *testing.T) {
+		w := newPullTagWorld(t)
+		w.GivenTheLockfileHolds(baseOnFirst)
+		w.GivenTheRegistryHoldsAnIndex("<registry>/base:v1", "second", thisPlatform(), anotherPlatform())
+		w.WhenISave("app")
+		w.ThenItSucceeds()
+		w.ThenTheImageIsBuiltOn("first", thisPlatform())
+	})
+
+	t.Run("A pin built before asks no registry anything", func(t *testing.T) {
+		w := newPullTagWorld(t)
+		w.GivenTheLockfileHolds(baseOnFirst)
+		w.WhenISave("app")
+		w.ThenItSucceeds()
+		w.WhenISave("app")
+		w.ThenItSucceeds()
+		w.ThenTheRegistryWasNotAsked()
+		w.ThenTheImageIsBuiltOn("first", thisPlatform())
+	})
+
+	t.Run("Another platform gets the pinned index's image", func(t *testing.T) {
+		w := newPullTagWorld(t)
+		w.GivenTheLockfileHolds(baseOnFirst)
+		w.GivenTheRegistryHoldsAnIndex("<registry>/base:v1", "second", thisPlatform(), anotherPlatform())
+		w.WhenISave("app", forPlatform(anotherPlatform()))
+		w.ThenItSucceeds()
+		w.ThenTheImageIsFor(anotherPlatform())
+		w.ThenTheImageIsBuiltOn("first", anotherPlatform())
+	})
+
+	t.Run("A pin of an image for another platform fails, saying it is pinned to that image alone",
+		func(t *testing.T) {
+			w := newBuildingWorld(t)
+			w.GivenARegistry()
+			w.GivenTheRegistryHoldsAnImage("<registry>/base:v1", "single", "linux/s390x")
+			w.GivenTheBuildFileDeclares(appOnTheTag)
+			w.GivenTheLockfileHolds(`
+				{
+				  "version": 1,
+				  "pulls": {
+				    "<registry>/base:v1": {
+				      "tag": "v1",
+				      "digest": "<digest of single>"
+				    }
+				  }
+				}
+			`)
+			w.WhenIBuild("app")
+			w.ThenItFailsWith(`pull "base": image "<registry>/base:v1" is pinned to <digest of single>, ` +
+				fmt.Sprintf("an image for linux/s390x, not %s, alone, ", thisPlatform()) +
+				"rather than an index of images for several platforms")
+		})
+
+	t.Run("A pinned digest that is gone says to update", func(t *testing.T) {
+		w := newPullTagWorld(t)
+		w.GivenTheLockfileHolds(`
+			{
+			  "version": 1,
+			  "pulls": {
+			    "<registry>/base:v1": {
+			      "tag": "v1",
+			      "digest": "sha256:` + strings.Repeat("0", 64) + `"
+			    }
+			  }
+			}
+		`)
+		w.WhenIBuild("app")
+		w.ThenItFailsWith(`pull "base": image "<registry>/base:v1": its registry won't give sha256:`+
+			strings.Repeat("0", 64)+", which the lockfile pins it to",
+			"if the registry no longer has it, vamos update base pins what the tag names now")
+	})
+}
+
 // TestPull_ThePlatformMustMatch specifies that a pull of a tag that names an index selects the matching image,
 // which the index must have, and that a single-platform image must match the configured platform.
 func TestPull_ThePlatformMustMatch(t *testing.T) {
@@ -247,7 +374,7 @@ func TestPull_ThePlatformMustMatch(t *testing.T) {
 		w.GivenARegistry()
 		w.GivenTheRegistryHoldsAnImage("<registry>/base:v1", "single", "linux/s390x")
 		w.GivenTheBuildFileDeclares(appOnTheTag)
-		w.WhenIBuild("app")
+		w.WhenIBuild("app", pinning("resolve"))
 		w.ThenItFailsWith(`pull "base": image "<registry>/base:v1"`,
 			fmt.Sprintf("is for linux/s390x, not %s, and its tag names that image alone, "+
 				"not an index of images for several platforms", thisPlatform()))

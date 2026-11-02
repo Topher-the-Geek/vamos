@@ -53,3 +53,7 @@ docker run --rm vamos-echo /echo -n hola            # hola, without a newline
 
 `echo` is an index of the image for each platform.
 `push` sends all of it, while `load` sends the image for the Docker daemon's platform.
+
+`vamos.lock` pins the `golang` image, so that every build uses the same compiler.
+After changing the pull's tag, or to move to the newest `1.25.x-alpine`, run `./vamos update -C examples/golang-cli`
+and commit the lockfile; `./vamos update --dry-run -C examples/golang-cli` checks that the pin is current.

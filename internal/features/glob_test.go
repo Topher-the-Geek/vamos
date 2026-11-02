@@ -76,7 +76,7 @@ func TestGlob_PathsStayRelativeToTheBuildDirectory(t *testing.T) {
 	t.Run("A dot selects the whole directory", func(t *testing.T) {
 		w := newGlobWorld(t)
 		w.GivenTheBuildFileDeclares(`
-			glob(name="all", include=["."], exclude=["BUILD"])
+			glob(name="all", include=["."], exclude=["BUILD", "vamos.lock"])
 			layer(name="app", base="busybox", steps=[add("all", "/app")])
 		`)
 		w.GivenTheProjectHolds(files{
@@ -142,7 +142,7 @@ func TestGlob_PatternsSelectFiles(t *testing.T) {
 	t.Run("An excluded directory is left out with everything in it", func(t *testing.T) {
 		w := newGlobWorld(t)
 		w.GivenTheBuildFileDeclares(`
-			glob(name="code", include=["."], exclude=["BUILD", "**/node_modules"])
+			glob(name="code", include=["."], exclude=["BUILD", "vamos.lock", "**/node_modules"])
 			layer(name="app", base="busybox", steps=[add("code", "/app")])
 		`)
 		w.GivenTheProjectHolds(files{
@@ -319,7 +319,7 @@ func TestGlob_LinksAreCopiedAsLinks(t *testing.T) {
 		w.GivenTheProjectLinks(links{"-vendor/link": "../BUILD"})
 		w.WhenISave("app")
 		w.ThenItSucceeds()
-		w.ThenTheImagePathsAre(under("/app"), "/app/-vendor", "/app/-vendor/link", "/app/BUILD")
+		w.ThenTheImagePathsAre(under("/app"), "/app/-vendor", "/app/-vendor/link", "/app/BUILD", "/app/vamos.lock")
 		w.ThenTheImageLinks(links{"/app/-vendor/link": "../BUILD"})
 	})
 }

@@ -6,6 +6,8 @@
 // Node references encode dependency order.
 // Consumers must validate decoded data before indexing references;
 // source positions are diagnostic data, not evaluator state.
+// A pull's Digest is its pin from the lockfile, which the graph carries in place of the lockfile itself:
+// set, the executor uses that manifest rather than asking what the tag names.
 // Loading owns user-facing validation before a graph reaches execution.
 //
 // # Changes

@@ -17,7 +17,25 @@ type AttemptFailure struct {
 	// Corrupt names the blob that was found corrupt, if that is why the attempt failed, so that the Scheduler
 	// regenerates it; Message describes the corruption.
 	Corrupt *cache.Blob `json:"corrupt,omitempty"`
+	// PinUnavailable says that the registry won't give what the lockfile pins a resolve to, ErrPinUnavailable,
+	// so that the Scheduler advises updating the pin.
+	PinUnavailable bool `json:"pin_unavailable,omitempty"`
 }
+
+// ErrPinUnavailable is what a resolve's error is, as PinUnavailable makes it, when its registry won't give the manifest
+// that the lockfile pins it to, so that each job that shares the attempt advises updating its own pull.
+var ErrPinUnavailable = errors.New("the registry won't give what the lockfile pins")
+
+// PinUnavailable returns err, which reads as it does, as ErrPinUnavailable too.
+func PinUnavailable(err error) error {
+	return &pinUnavailable{err}
+}
+
+// pinUnavailable is an error that is ErrPinUnavailable too.
+type pinUnavailable struct{ err error }
+
+func (e *pinUnavailable) Error() string   { return e.err.Error() }
+func (e *pinUnavailable) Unwrap() []error { return []error{e.err, ErrPinUnavailable} }
 
 // FailureOf returns err, a Runner's, as data.
 func FailureOf(err error) *AttemptFailure {
@@ -39,6 +57,7 @@ func FailureOf(err error) *AttemptFailure {
 	if errors.As(err, &ce) {
 		f.Corrupt = &ce.Blob
 	}
+	f.PinUnavailable = errors.Is(err, ErrPinUnavailable)
 	return f
 }
 
@@ -51,6 +70,9 @@ func (f *AttemptFailure) Err() error {
 		cause = corruptCause(f.Message, *f.Corrupt)
 	} else {
 		cause = errors.New(f.Message)
+	}
+	if f.PinUnavailable {
+		cause = PinUnavailable(cause)
 	}
 	if f.Step == nil {
 		return WithLog(cause, f.Log)

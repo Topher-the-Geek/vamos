@@ -21,6 +21,7 @@ Delivery commands build the requested target and its dependencies before sending
 | `vamos load <target> <image>` | Pulls, layers, indexes | Load an image into Docker |
 | `vamos save <target> <file.tar>` | Pulls, layers, indexes | Write a Docker-loadable image archive |
 | `vamos export <task> <folder>` | Tasks with output | Write a fileset into a local folder |
+| `vamos update [pull...]` | Pulls, or none for every pull | Pin pulls to what their tags name, in `vamos.lock`; `--dry-run` checks the pins |
 | `vamos prune` | No targets | Remove cached build results |
 | `vamos coordinator` | No targets | Coordinate builds across workers for clients on the network |
 | `vamos worker` | No targets | Run builds that a coordinator assigns |
@@ -39,7 +40,8 @@ publishing nothing, as a dry run of `publish`.
 A successful check task can be cached even though it produces no files.
 
 `--rebuild` runs the explicitly named targets again while allowing their dependencies to be reused.
-For a named pull, it checks the registry again for the tag's current image.
+A named pull resolves nothing again, keeping its pin, or its tag's record if it has no pin,
+and says that [`vamos update`](#update) refreshes pulls.
 See [refreshing results](cache.md#refreshing-results).
 
 ### `push`
@@ -153,6 +155,96 @@ They receive the task's timestamp, and keep the modes the task selected them wit
 setuid and setgid bits among them where the task's `mode_mask` retains them, whatever their owner.
 Symbolic links are written as links, never followed.
 
+### `update`
+
+```sh
+vamos update            # every pull() in the workspace
+vamos update node base  # only these pulls
+```
+
+Pins pulls in the lockfile, `vamos.lock`, at the workspace's root:
+the directory with the `WORKSPACE` file, or else the directory of the `BUILD` file.
+For each pull, it lists the tags of the image's repository and resolves the pull's tag to the newest stable tag it
+covers, with the same `v` prefix and suffix, whose leading numbers are the tag's:
+`1.3` resolves to the newest `1.3.x`, and `24-alpine` to the newest `24.x.y-alpine`.
+A tag that covers no other, a prerelease, or a tag that isn't a version, such as `latest`, resolves to itself.
+It then asks the registry for the digest of the manifest that the resolved tag names, an index or an image,
+and pins the pull's image and tag to both.
+A registry that won't list a repository's tags still says what a tag names, so the tag resolves to itself, noted;
+one that can't be reached fails the command, naming the image and saying why, and changes nothing.
+Every build of a pinned pull uses that digest, and never asks a registry what the tag names;
+see [`pull()`](build.md#pull).
+
+Updating every pull finds the workspace's `BUILD` files by walking it, past hidden directories and other workspaces,
+though it finds a pull in a hidden directory that a package it found uses, even through a function of `ctx`,
+by configuring every target as building it would,
+and removes the pins of images that no pull uses; naming pulls changes only their pins.
+A target that can't be configured so, as one with a parameter that has no default, may use a pull that isn't found,
+so a full update then keeps, and reports, the pins that no pull it found uses.
+Naming a target that isn't a pull fails.
+A pull whose image or tag is a function of `ctx` is pinned as building it would configure it,
+for `--platform`, or else this machine's platform, and for the execution platform that `ctx.exec_platform` names,
+which a coordinator that `--coordinator` names is asked for, as a build asks it;
+a full update then keeps the pins that no pull uses, saying so, since another configuration of that pull may use them.
+`update` prints each pin it adds, changes or removes, with the tag and digest before and after,
+or that `vamos.lock` is up to date, or was rewritten with the same pins as this vamos writes it.
+It then reports, for each pulled tag that reads as a version, the newest stable tag of a newer minor or patch release
+within its major version, or the final release of a prerelease, and of a newer major version, where there is one,
+comparing only tags with the same `v` prefix and suffix; a tag that the pulled tag covers isn't newer, since it
+resolves to that.
+It notes the newest prerelease newer than the tag resolved to, such as `1.6-rc1`, and each tag that isn't a version,
+such as `latest` or `bookworm`, whose newer releases it can't report.
+None of these fails the command; to move to a newer release, edit the pull's tag in its `BUILD` file and update again.
+The lines of the pins come first, sorted by image, then those of each image's releases, image by image:
+
+```text
+pinned docker.io/library/node:24-alpine to 24.11.1-alpine@sha256:9f3c…
+updated ghcr.io/me/base:1.3 from 1.3.1@sha256:5d0e… to 1.3.2@sha256:1a2b…
+removed ghcr.io/me/old:1, which no pull uses, from 1@sha256:77c4…
+docker.io/library/debian:bookworm isn't tagged with a version, so newer releases of it can't be reported
+docker.io/library/node:24-alpine has a newer major release, 25-alpine
+ghcr.io/me/base:1.3 has a newer minor release, 1.5, and a newer major release, 2.1
+ghcr.io/me/base:1.3 has a newer prerelease, 1.6-rc1
+```
+
+Nothing is written unless every pull resolves.
+
+`vamos update --dry-run` resolves and reports as `update` does, saying what would change, but writes nothing,
+creating no lockfile where there is none.
+It fails, exiting with status 1 as any failure does, with `vamos.lock would change; run vamos update`,
+when `update` would change the lockfile;
+newer releases, prereleases and tags that aren't versions alone don't fail it.
+A lockfile with the same pins that `update` would rewrite fails it too, as one that an older vamos wrote may be,
+until the rewritten lockfile is committed.
+A pull whose image or tag is a function of `ctx` is checked as the command line configures it,
+so give the `--platform` that builds give; the pins it keeps for other configurations aren't checked.
+CI can run it to check that the pins are current, and build with `VAMOS_PINS=require`, so that a pull without a pin
+fails rather than resolve its tag:
+
+```sh
+vamos update --dry-run
+```
+
+The lockfile is JSON, written with sorted keys, one field per line, so that a change to one pin changes only that pin's
+lines:
+
+```json
+{
+  "version": 1,
+  "pulls": {
+    "docker.io/library/node:24-alpine": {
+      "tag": "24.11.1-alpine",
+      "digest": "sha256:9f3c…"
+    }
+  }
+}
+```
+
+Commit it, so that every build of a commit uses the same images and each upgrade is a reviewed change.
+vamos writes it; edit the `BUILD` file's tags, not the lockfile.
+A malformed lockfile, or one of a newer version than this vamos reads, fails every command that loads it,
+as does a digest that isn't sha256, by which pulling verifies the manifest.
+
 ### `prune`
 
 ```sh
@@ -160,8 +252,8 @@ vamos prune
 ```
 
 Removes all cached layer images and other build results.
-It keeps pulled images and the recorded resolutions of their tags.
-To refresh a pull's tag, use `vamos build <pull-name> --rebuild`.
+It keeps pulled images and the recorded resolutions of their tags and pins.
+To refresh a pull, use [`vamos update <pull-name>`](#update).
 
 
 ### `coordinator`
@@ -196,6 +288,10 @@ so the client must reach both;
 a repository among those two that the coordinator reaches insecurely, as its `registries.conf` marks the repository
 or, failing an entry for it, its registry, or as the coordinator's own `--tls-verify=false` says, the client reads as
 the coordinator does, over plain HTTP, whatever `--tls-verify` and its own `registries.conf` say;
+`update`, and recording a pin, list a pulled image's tags and ask what one names at the image's own registry, from
+the client, with its credentials and `--tls-verify`, never through a pull-through cache or a mirror, whose answer about
+a tag can be stale, so the client must reach each upstream registry too; the images themselves are still fetched by
+digest through the pull-through cache;
 `push` from the executor runs on a worker, copying from there with the worker's credentials;
 `publish` from the executor runs its uploads on workers, as many at once as the coordinator's `--bound`,
 then writes every tag on one worker,
@@ -280,6 +376,7 @@ These flags are shared by commands that build targets:
 | `--coordinator <URL>` | Build on the coordinator at this URL rather than in this process | `$VAMOS_COORDINATOR`, or none |
 | `--tls-verify <bool>` | Require HTTPS and verify certificates when vamos itself contacts a registry: pushing from the client, and reading a coordinator's images to deliver | `registries.conf` |
 | `--timestamp <time>` | Minimum timestamp for newly executed targets | Derived from bases and added tasks |
+| `--pins <policy>` | What a command that builds does with a pull that `vamos.lock` doesn't pin: `record` resolves its tag at its own registry, from the client, as [`update`](#update) does, adds its pin and reports it; `resolve` resolves it on the executor, keeping what the tag named only in the build cache; `require` fails, naming every pull without a pin, before anything runs | `$VAMOS_PINS`, or else `record` |
 
 `--platform` cannot be given when naming an index.
 With multiple build targets, each `--set` applies to named targets declaring that parameter,
@@ -370,7 +467,7 @@ Command-line usage mistakes print usage; runtime failures do not.
 | An `add()` source is rejected | It must name a glob or a task with both `source` and `include` |
 | A glob matches no files | Check its paths relative to the BUILD file and its exclusions |
 | Export refuses a nonempty folder | Choose a dedicated output folder or pass `--replace` |
-| A moved registry tag still uses an old image | [Rebuild the pull target](cache.md#refreshing-results) |
+| A moved registry tag still uses an old image | Pin what it names now with [`vamos update`](#update), and commit `vamos.lock` |
 | Docker cannot be reached | Check the socket mount, `DOCKER_HOST`, and Docker's TLS environment variables |
 | `can't reach the coordinator at ...` | Check the URL in `--coordinator` or `VAMOS_COORDINATOR`, and that this machine is on the coordinator's network |
 | `the coordinator ... runs graph versions ..., not this vamos's` | Use a vamos of the coordinator's version, or upgrade the coordinator |

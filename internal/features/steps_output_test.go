@@ -138,11 +138,11 @@ func (w *world) fails(usage bool, wants []string) {
 // atPlaceholders returns s with each <destination> replaced by the folder that the last command sent to,
 // each <working directory> by the test's, each <registry> by the host of the scenario's registry,
 // each <outside> by the folder of GivenAFileOutsideTheProjectHolds, each <coordinator> by the scenario's coordinator's
-// URL,
+// URL, each <digest of label> by the digest of the index or image that label names in the scenario's registry,
 // and each <saved image N> by the short ID of the Nth image the scenario saved, as vamos shows one.
 func (w *world) atPlaceholders(s string) string {
 	w.t.Helper()
-	s = w.atOutside(w.atRegistry(w.atCoordinator(s)))
+	s = w.atHeldDigests(w.atOutside(w.atRegistry(w.atCoordinator(s))))
 	for i, img := range w.saved {
 		if placeholder := fmt.Sprintf("<saved image %d>", i+1); strings.Contains(s, placeholder) {
 			s = strings.ReplaceAll(s, placeholder, w.imageID(img)[:12])
@@ -225,6 +225,55 @@ func (w *world) ThenTheOutputIs(want string) {
 	w.t.Helper()
 	if w.stdout != want {
 		w.t.Errorf("stdout = %q, want %q", w.stdout, want)
+	}
+}
+
+// ThenItReports checks that the command's standard output is exactly lines, each ended by a newline,
+// in which placeholders stand for what atPlaceholders says.
+func (w *world) ThenItReports(lines ...string) {
+	w.t.Helper()
+	want := ""
+	for _, line := range w.allAtPlaceholders(lines) {
+		want += line + "\n"
+	}
+	if w.stdout != want {
+		w.t.Errorf("stdout =\n%s\nwant\n%s", w.stdout, want)
+	}
+}
+
+// ThenThePullThroughCacheWasNotAsked checks that the pull-through cache of
+// GivenAPullThroughCacheMirrorsTheRegistryWithAnIndex served nothing since that step put its index there.
+func (w *world) ThenThePullThroughCacheWasNotAsked() {
+	w.t.Helper()
+	if n := w.cacheAsked.Load(); n != 0 {
+		w.t.Errorf("the pull-through cache served %d requests, want none", n)
+	}
+}
+
+// ThenTheLockfileIs checks that the project's one lockfile is vamos.lock at its root, as the last command left it,
+// holding exactly lockfile, dedented, in which placeholders stand for what atPlaceholders says.
+func (w *world) ThenTheLockfileIs(lockfile string) {
+	w.t.Helper()
+	want := files{"vamos.lock": dedent(w.atPlaceholders(lockfile))}
+	if !maps.Equal(w.lockfiles, want) {
+		w.t.Errorf("the project's lockfiles are\n%v\nwant\n%v", w.lockfiles, want)
+	}
+}
+
+// ThenThereIsNoLockfile checks that the last command left the project without a lockfile.
+func (w *world) ThenThereIsNoLockfile() {
+	w.t.Helper()
+	if len(w.lockfiles) > 0 {
+		w.t.Errorf("the project has lockfiles %v, want none", w.lockfiles)
+	}
+}
+
+// ThenTheLockfileIsUnchanged checks that the project's lockfiles, or its lack of one, are as they were before the
+// last command ran.
+func (w *world) ThenTheLockfileIsUnchanged() {
+	w.t.Helper()
+	if !maps.Equal(w.lockfiles, w.lockedBefore) {
+		w.t.Errorf("the project's lockfiles are\n%v\nwant them as they were\n%v", w.lockfiles, w.lockedBefore)
 	}
 }
 

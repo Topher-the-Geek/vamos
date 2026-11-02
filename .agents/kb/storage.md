@@ -8,6 +8,12 @@ The executor's container store holds images.
 `run.CacheDir` locates the directory beside the executor's container store (normally `/var/lib/containers/vamos`),
 so persisting `/var/lib/containers` keeps both; nothing outside run and cache names that directory,
 and a client gets its content store from the executor it builds with.
+The project's lockfile, `vamos.lock`, which [load](../../internal/load/doc.go) reads, is the source of truth for
+a pinned pull: the digest that its tag is pinned to, committed with the project. The record store keeps, for each pin,
+a record under the image's name and that digest, `sched.PinName`, of the manifest and each platform's image, which
+never goes stale, since a digest names one manifest forever; a tag's record, under the tag, is what an unpinned pull,
+under `--pins=resolve`, resolved to, which differs between machines and caches. A pinned pull never reads or writes
+its tag's record.
 Record metadata alone cannot prove an image or tree is still available.
 Content is verified as it is read: a task whose cached files are found corrupt runs again,
 a glob whose files are corrupt fails the build, since only the client can capture them again,
@@ -77,8 +83,9 @@ and `Scheduler.resolve` pins each tag's index within a job, so every platform's 
 `--rebuild` is not a blanket rebuild of every dependency.
 Each platform's `cache.TagInstance` records the image's ID, platform, epoch and locations once pulled,
 so `Scheduler.resolve` serves a cached pull from the record and the checker alone, asking the runner nothing;
-only a missing or incomplete instance, an image the checker can't find, or `--rebuild` reaches the puller,
-which is given the record in its request and reads none itself.
+only a missing or incomplete instance, or an image the checker can't find, reaches the puller,
+which is given the record in its request and reads none itself;
+`--rebuild` resolves no pull again, since `vamos update` refreshes pins instead.
 `TestSchedulerCachedResolve` and `TestTagRecordLegacyInstances` hold this,
 and `TestPull_ResolvedTagsAreReused` still requires that nothing reaches a registry
 once the record and images are cached.

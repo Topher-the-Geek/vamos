@@ -28,9 +28,19 @@
 //
 // NewRootCommand wires commands and parses flags into options; the handlers, build, push, publish, load, save,
 // export, prune, graph, coordinator, worker and attempt, hold the phase boundary; Config says which container store the
-// local executor builds in, so that tests give it their own.
+// local executor builds in, so that tests give it their own, and which Registry pinning asks about tags:
+// otherwise upstreamRegistry, which asks each image's own registry from the client, with its credentials and
+// --tls-verify, never a mirror, so that scenarios can replace it and need no registry.
 // buildImage delivers from a result's registry locations only over a coordinator; the local executor exports from
 // its store, so that a local delivery needs no network; clientImage owns that choice.
+// applyPins, in pins.go, does what --pins, or VAMOS_PINS, says with the pulls of a configured graph that the lockfile
+// doesn't pin, as runLoaded's load.Request.Pin, before any glob is read, so that a glob reads the lockfile as recorded:
+// record resolves them as update does and adds their pins, resolve leaves them to the executor, and require fails.
+// update, in update.go, pins pulls without an executor: load.Pulls finds them, Registry lists each repository's tags
+// once, resolveTag in tags.go chooses the newest tag each covers, and load.UpdateLock rewrites the lockfile with them;
+// newerReleases chooses the newer releases and prerelease it reports. --dry-run asks load.WouldUpdateLock instead.
+// A repository whose registry refuses to list its tags, as listingRefused tells, has its tags resolve to themselves,
+// noted; any other failure to list them fails the update.
 // publish loads a publication's graph and plan with load.LoadPublication, through runLoaded, then submits one
 // api.PublishRequest, or publishes from the client with finish.Publish; checkTags checks --tag before loading.
 // invocation.executor chooses the executor, and invocation.capabilities refuses one of another graph version.

@@ -40,6 +40,7 @@ func testGraph(t *testing.T) *Graph {
 			{Label: "busybox", Desc: `pull "busybox"`, Pull: &Pull{
 				Image:    "docker.io/library/busybox:1.36",
 				Platform: "linux/amd64",
+				Digest:   digest.FromString("index"),
 			}},
 			{Label: "build", Desc: `task "build"`, Task: &Task{
 				Base: 1,
@@ -122,6 +123,16 @@ func TestGraphValidate(t *testing.T) {
 			name:   "an image without a tag",
 			change: func(g *Graph) { g.Nodes[1].Pull.Image = "docker.io/library/busybox" },
 			want:   `image "docker.io/library/busybox" has no tag`,
+		},
+		{
+			name:   "a pin that isn't a digest",
+			change: func(g *Graph) { g.Nodes[1].Pull.Digest = "sha256:1234" },
+			want:   `image "docker.io/library/busybox:1.36" is pinned to "sha256:1234": invalid checksum digest length`,
+		},
+		{
+			name:   "a pin that isn't a sha256 digest",
+			change: func(g *Graph) { g.Nodes[1].Pull.Digest = digest.SHA512.FromString("index") },
+			want:   `", not a sha256 digest`,
 		},
 		{
 			name:   "a source tree that isn't a digest",

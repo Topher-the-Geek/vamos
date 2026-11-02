@@ -109,10 +109,22 @@ func TestRemote_BuildsOnWorkers(t *testing.T) {
 			w := newBuildingWorld(t)
 			w.GivenARegistry()
 			w.GivenTheRegistryHoldsAnIndex("<registry>/base:v1", "base", thisPlatform())
-			// No registry answers at upstream.invalid, so only the pull-through cache can serve the pull.
+			// No registry answers at upstream.invalid, so only the pull-through cache can serve the pull, which the
+			// lockfile pins, so that the client asks no registry about its tag.
 			w.GivenACoordinatorWithAWorker("--pull-through", "upstream.invalid:5000=<registry>")
 			w.GivenTheBuildFileDeclares(`
 				pull(name="base", image="upstream.invalid:5000/base", tag="v1")
+			`)
+			w.GivenTheLockfileHolds(`
+				{
+				  "version": 1,
+				  "pulls": {
+				    "upstream.invalid:5000/base:v1": {
+				      "tag": "v1",
+				      "digest": "<digest of base>"
+				    }
+				  }
+				}
 			`)
 			w.WhenISave("base", onTheCoordinator("<coordinator>"))
 			w.ThenItSucceeds()
@@ -182,6 +194,8 @@ func TestRemote_InterruptedCoordinatorCancelsItsBuilds(t *testing.T) {
 	t.Run("A build waiting on a registry ends, cancelled, when its coordinator is interrupted", func(t *testing.T) {
 		w := newBuildingWorld(t)
 		w.GivenARegistryThatNeverAnswers()
+		// So that the executor, not the client, waits on the registry.
+		w.GivenTheEnvironmentSets("VAMOS_PINS", "resolve")
 		w.GivenALocalCoordinator()
 		w.GivenTheBuildFileDeclares(`
 			pull(name="base", image="<registry>/base", tag="v1")

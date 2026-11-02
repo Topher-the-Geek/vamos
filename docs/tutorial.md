@@ -423,7 +423,7 @@ Use the references as your project grows:
   `vamos publish`, save an archive, or export task files.
 - [Configuration](reference/configuration.md): split a project into packages, add parameters,
   and publish several platforms together with an image index.
-- [Cache and traces](reference/cache.md): refresh dependencies or cached checks with `--rebuild`,
+- [Cache and traces](reference/cache.md): refresh cached checks with `--rebuild` and pulls with `vamos update`,
   and inspect where build time goes.
 - [Remote builds](README.md#remote-builds): share one build cache and a pool of workers with a team,
   through a coordinator that any build command reaches with `--coordinator`.

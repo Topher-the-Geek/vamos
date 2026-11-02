@@ -78,17 +78,29 @@ type world struct {
 	localErr          error              // what it ended with, once interrupted
 	localTook         time.Duration      // how long it took to end, once interrupted
 
-	prepared   string                 // the folder the next command sends to, if Given steps have put something there
-	outside    string                 // a folder outside the project, for files that commands read, such as secrets
-	outsideWas map[string]outsideFile // what GivenAFileOutsideTheProjectHolds wrote there, by name
-	registry   string                 // the host of the scenario's registry, <registry>, once a Given step starts it
-	login      authn.Authenticator    // that the scenario's registry needs, which steps that read from it use
-	server     *httptest.Server       // that serves the scenario's registry, once a Given step starts it
-	asked      atomic.Int64           // the requests that the scenario's registry has served
-	stopped    atomic.Bool            // whether the scenario's registry has stopped answering
-	refusedMu  sync.Mutex             // guards refused, which the registry's requests read
-	refused    map[string]bool        // the repositories whose writes it refuses, true for tags alone
-	held       map[string]v1.Image    // the images that Given steps put in the registry, by label and platform
+	prepared   string                   // the folder the next command sends to, if Given steps have put something there
+	outside    string                   // a folder outside the project, for files that commands read, such as secrets
+	outsideWas map[string]outsideFile   // what GivenAFileOutsideTheProjectHolds wrote there, by name
+	registry   string                   // the host of the scenario's registry, <registry>, once a Given step starts it
+	login      authn.Authenticator      // that the scenario's registry needs, which steps that read from it use
+	server     *httptest.Server         // that serves the scenario's registry, once a Given step starts it
+	asked      atomic.Int64             // the requests that the scenario's registry has served
+	stopped    atomic.Bool              // whether the scenario's registry has stopped answering
+	refusedMu  sync.Mutex               // guards refused, which the registry's requests read
+	refused    map[string]bool          // the repositories whose writes it refuses, true for tags alone
+	unlisting  map[string]tagListAnswer // how it answers lists of the tags of repositories, by path, in their place
+	tagPage    int                      // how many tags it lists a page, or 0 for all of them on one
+	// pinnedMeanwhile, if a step gave it, is the lockfile that another command writes the first time the scenario's
+	// registry lists tags, as one that pins a pull while this command resolves it would; pinMeanwhile writes it.
+	pinnedMeanwhile string
+	pinMeanwhile    func()
+	cacheAsked      atomic.Int64        // the requests that a pull-through cache mirroring it has served
+	held            map[string]v1.Image // the images that Given steps put in the registry, by label and platform
+	heldDigest      map[string]string   // the digests of the indexes and images that Given steps put there, by label
+	// fakeRegistry, if a step started it, is what commands ask about tags, in place of each image's own registry.
+	fakeRegistry *fakeRegistry
+	lockfiles    files // the project's lockfiles, by path, as the last command left them
+	lockedBefore files // and as they were before it ran
 
 	stdout       string
 	stderr       string
@@ -213,7 +225,7 @@ func (w *world) execute(fsys afero.Fs, args []string) {
 	w.image, w.index, w.archive, w.entries, w.exported, w.sentAs = nil, nil, "", nil, "", ""
 	w.loadRan, w.trace = false, nil
 	w.tracePath, w.traceTo = w.traceTo, ""
-	cmd := cli.NewRootCommand(cli.Config{Fs: fsys, Store: &w.stores.Options})
+	cmd := cli.NewRootCommand(w.commandConfig(fsys))
 	var stdout, stderr, tried bytes.Buffer
 	var cue *interrupter
 	ctx, cancel := context.WithCancel(w.t.Context())
@@ -245,6 +257,25 @@ func (w *world) execute(fsys afero.Fs, args []string) {
 			defer timer.Stop()
 		}
 	}
+	w.lockedBefore = w.lockfilesIn(fsys)
+	if w.pinnedMeanwhile != "" {
+		lockfile, once := w.pinnedMeanwhile, sync.Once{}
+		w.refusedMu.Lock()
+		w.pinMeanwhile = func() {
+			once.Do(func() {
+				path := filepath.Join(testenv.ProjectDir, "vamos.lock")
+				if err := afero.WriteFile(fsys, path, []byte(lockfile), 0o644); err != nil {
+					w.t.Errorf("another command writing the lockfile: %v", err)
+				}
+			})
+		}
+		w.refusedMu.Unlock()
+		defer func() {
+			w.refusedMu.Lock()
+			w.pinMeanwhile = nil
+			w.refusedMu.Unlock()
+		}()
+	}
 	start := time.Now()
 	w.err = cmd.ExecuteContext(ctx)
 	w.endedAt = time.Now()
@@ -255,8 +286,57 @@ func (w *world) execute(fsys afero.Fs, args []string) {
 		w.cachedAfter = w.cached()
 	}
 	w.stdout, w.stderr, w.tried = stdout.String(), stderr.String(), tried.String()
+	// The project keeps the lockfiles that the command wrote, as a project on disk would, for the next command.
+	w.lockfiles = w.lockfilesIn(fsys)
+	maps.Copy(w.files, w.lockfiles)
 	w.printedCue = cue != nil && cue.fired
 	w.outputClosed = false // for this command alone
+}
+
+// commandConfig returns the configuration of a command that the scenario runs in the project fsys, on its stores,
+// asking its fake registry about tags if a step started one.
+func (w *world) commandConfig(fsys afero.Fs) cli.Config {
+	cfg := cli.Config{Fs: fsys, Store: &w.stores.Options}
+	if w.fakeRegistry != nil { // rather than a nil *fakeRegistry, which isn't a nil cli.Registry
+		cfg.Registry = w.fakeRegistry
+	}
+	return cfg
+}
+
+// lockfilesIn returns the lockfiles in the project fsys, by path within it: every vamos.lock, found without
+// following links, though the project's directory itself may be one.
+func (w *world) lockfilesIn(fsys afero.Fs) files {
+	w.t.Helper()
+	found := files{}
+	var walk func(rel string) error
+	walk = func(rel string) error {
+		dir := filepath.Join(testenv.ProjectDir, rel)
+		entries, err := afero.ReadDir(fsys, dir)
+		if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			path := filepath.Join(rel, e.Name())
+			switch {
+			case e.Mode()&fs.ModeSymlink != 0:
+			case e.IsDir():
+				if err := walk(path); err != nil {
+					return err
+				}
+			case e.Name() == "vamos.lock":
+				data, err := afero.ReadFile(fsys, filepath.Join(testenv.ProjectDir, path))
+				if err != nil {
+					return err
+				}
+				found[filepath.ToSlash(path)] = string(data)
+			}
+		}
+		return nil
+	}
+	if err := walk(""); err != nil {
+		w.t.Fatalf("reading the project's lockfiles: %v", err)
+	}
+	return found
 }
 
 // project returns a new filesystem holding the scenario's project: in memory, unless it holds links

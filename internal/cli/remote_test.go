@@ -39,6 +39,9 @@ func TestUsesContainerStore(t *testing.T) {
 		"build --help":                  false,
 		"build -h app":                  false,
 		"-C dir build app":              true,
+		"update":                        false,
+		"update base":                   false,
+		"build update":                  true,
 	} {
 		if got := UsesContainerStore(strings.Fields(args)); got != want {
 			t.Errorf("UsesContainerStore(%q) = %v, want %v", args, got, want)

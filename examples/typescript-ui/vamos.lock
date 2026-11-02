@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "pulls": {
+    "docker.io/library/nginx:alpine": {
+      "tag": "alpine",
+      "digest": "sha256:785835ea65db4bba6f021acc0f3be91b0fef76a53fe41f8588c6698d2aed0606"
+    },
+    "docker.io/library/node:24-alpine": {
+      "tag": "24.22.2-alpine",
+      "digest": "sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85"
+    }
+  }
+}

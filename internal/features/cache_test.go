@@ -420,7 +420,8 @@ func TestCache_FailuresAreNotCached(t *testing.T) {
 }
 
 // TestCache_RebuildRefreshesTheNamedTargets specifies that --rebuild runs the targets it names again,
-// reuses their dependencies when possible, and replaces their cached results.
+// reuses their dependencies when possible, and replaces their cached results; a pull it names it doesn't resolve
+// again, saying that vamos update refreshes pulls.
 func TestCache_RebuildRefreshesTheNamedTargets(t *testing.T) {
 	t.Run("A rebuilt target replaces its cached result, and the targets it uses are reused", func(t *testing.T) {
 		w := newCacheWorld(t)
@@ -434,7 +435,7 @@ func TestCache_RebuildRefreshesTheNamedTargets(t *testing.T) {
 		w.WhenIBuild("deps", rebuilding())
 		w.ThenItSucceeds()
 		w.ThenTheTargetsWere(statuses{layer("base"): reused, layer("deps"): rebuilt})
-		w.ThenTheOutputDoesNotInclude("pulling again")
+		w.ThenTheOutputDoesNotInclude("pulls are refreshed by vamos update")
 		w.WhenISave("app")
 		w.ThenItSucceeds()
 		w.ThenTheTargetsWere(statuses{layer("deps"): reused, layer("app"): ran})
@@ -455,11 +456,11 @@ func TestCache_RebuildRefreshesTheNamedTargets(t *testing.T) {
 		w.ThenTheImageIsTheOneSavedFirst()
 	})
 
-	t.Run("Rebuilding a pull resolves its tag again", func(t *testing.T) {
+	t.Run("Rebuilding a pull says that update refreshes it", func(t *testing.T) {
 		w := newCacheWorld(t)
 		w.WhenIBuild("busybox", rebuilding())
 		w.ThenItSucceeds()
-		w.ThenTheOutputIs("pull \"busybox\": pulling again\n")
+		w.ThenTheOutputIs("pull \"busybox\": pulls are refreshed by vamos update\n")
 	})
 }
 

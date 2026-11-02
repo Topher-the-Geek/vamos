@@ -13,7 +13,7 @@ import (
 
 // TestFailureCrosses checks that a Runner's error survives as data: a step's failure keeps its step, hint, cleanup
 // and log, a corrupt input stays corrupt for errors.Is and names its blob, a logged failure keeps its log,
-// and each reads the same after crossing as JSON.
+// an unavailable pin stays one for errors.Is, and each reads the same after crossing as JSON.
 func TestFailureCrosses(t *testing.T) {
 	log := cache.Blob{Digest: digest.FromString("log"), Size: 3}
 	blob := cache.Blob{Digest: digest.FromString("file"), Size: 4}
@@ -30,6 +30,8 @@ func TestFailureCrosses(t *testing.T) {
 		{name: "wrapped corrupt", err: fmt.Errorf("adding the tree: %w", cache.Corrupt(blob, "it changed"))},
 		{name: "wrapped corrupt in a step", err: &StepError{Step: 0, Err: fmt.Errorf("reading: %w",
 			cache.Corrupt(blob, "short"))}},
+		{name: "pin unavailable", err: PinUnavailable(errors.New("manifest unknown"))},
+		{name: "wrapped pin unavailable", err: fmt.Errorf("pulling: %w", PinUnavailable(errors.New("denied")))},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -44,6 +46,10 @@ func TestFailureCrosses(t *testing.T) {
 			got := crossed.Err()
 			if got.Error() != c.err.Error() {
 				t.Errorf("after crossing, the error reads %q, want %q", got, c.err)
+			}
+			if errors.Is(got, ErrPinUnavailable) != errors.Is(c.err, ErrPinUnavailable) {
+				t.Errorf("after crossing, pin unavailable = %v, want %v", errors.Is(got, ErrPinUnavailable),
+					errors.Is(c.err, ErrPinUnavailable))
 			}
 			if errors.Is(got, cache.ErrCorrupt) != errors.Is(c.err, cache.ErrCorrupt) {
 				t.Errorf("after crossing, corrupt = %v, want %v", errors.Is(got, cache.ErrCorrupt),

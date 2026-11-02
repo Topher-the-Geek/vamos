@@ -49,14 +49,18 @@ type Config struct {
 	// otherwise it is the one that buildah and podman use here.
 	// Tests set it, so that they never touch the developer's.
 	Store *storage.StoreOptions
+	// Registry, if set, is what pinning a pull asks about tags; otherwise the client asks each image's own registry.
+	// Scenarios set it, so that they need no registry.
+	Registry Registry
 }
 
 // app is the vamos command line: what every invocation shares.
 // Each command is a method of invocation, which holds the state of one run, so that a handler can be tested
 // without constructing the root command.
 type app struct {
-	fs    afero.Fs
-	store *storage.StoreOptions
+	fs       afero.Fs
+	store    *storage.StoreOptions
+	registry Registry // Config's, or nil for the upstream registry
 }
 
 // options are the flags of one invocation; each command reads the ones it takes.
@@ -70,6 +74,8 @@ type options struct {
 	platform      string        // --platform
 	trace         string        // --trace
 	execPlatform  string        // --exec-platform
+	dryRun        bool          // update --dry-run
+	pins          pinsFlag      // --pins, of the commands that build
 	emulate       bool          // --emulate
 	coordinator   string        // --coordinator, or $VAMOS_COORDINATOR
 	rebuild       bool          // build --rebuild
@@ -181,7 +187,7 @@ func (inv *invocation) release(ex api.Executor) {
 
 // NewRootCommand returns the vamos command line, with its subcommands, as cfg says.
 func NewRootCommand(cfg Config) *cobra.Command {
-	a := &app{fs: cfg.Fs, store: cfg.Store}
+	a := &app{fs: cfg.Fs, store: cfg.Store, registry: cfg.Registry}
 	defaults := defaultOptions()
 	opts := &defaults
 
@@ -342,13 +348,27 @@ func NewRootCommand(cfg Config) *cobra.Command {
 		Long: "Build the named targets, and the targets they use, into the build cache, where\n" +
 			"push, load, save and export find them. Targets already cached are reused, unless --rebuild is given:\n" +
 			"then the named targets run again, though the targets they use are still reused. A pull() named\n" +
-			"with --rebuild is pulled again, in case its tag names a newer image.",
+			"with --rebuild resolves nothing again, keeping its pin, if it has one; vamos update refreshes it.",
 		Example: "  vamos build packages //backend:test\n  vamos build compile --rebuild",
 		Args:    atLeastOne("target name", "vamos build packages"),
 		RunE:    handle(func(inv *invocation, args []string) error { return inv.build(args) }),
 	}
 	buildCmd.Flags().BoolVar(&opts.rebuild, "rebuild", false,
 		"run the named targets again rather than reuse cached results")
+
+	updateCmd := &cobra.Command{
+		Use:   "update [pull...]",
+		Short: "Pin pulls to the images their tags name now, in vamos.lock",
+		Long: "Resolve the tag of every pull() in the workspace, or of the pulls named, at its own registry, to the\n" +
+			"newest stable tag it covers, and pin it to the digest of the manifest that tag names, in vamos.lock at\n" +
+			"the workspace's root, which builds then use whatever the tag names later. Prints each pin added,\n" +
+			"changed or removed; updating every pull removes the pins that no pull uses. Commit vamos.lock.\n" +
+			"With --dry-run, write nothing, and fail if vamos.lock would change, as a check in CI.",
+		Example: "  vamos update\n  vamos update node //ui:base\n  vamos update --dry-run",
+		RunE:    handle(func(inv *invocation, args []string) error { return inv.update(args) }),
+	}
+	updateCmd.Flags().BoolVar(&opts.dryRun, "dry-run", false,
+		"write nothing, report what would change, and fail if vamos.lock would change")
 
 	pruneCmd := &cobra.Command{
 		Use:   "prune",
@@ -372,6 +392,9 @@ func NewRootCommand(cfg Config) *cobra.Command {
 	for _, cmd := range []*cobra.Command{buildCmd, pushCmd, publishCmd, loadCmd, saveCmd, writeCmd, exportCmd} {
 		cmd.Flags().StringVar(&opts.trace, "trace", "",
 			"write a trace of the command, which Perfetto (ui.perfetto.dev) opens, to `file.json`")
+		cmd.Flags().Var(&opts.pins, "pins",
+			"what to do with a pull that vamos.lock doesn't pin: record its pin, resolve its tag without one, or "+
+				"require one (default $VAMOS_PINS, or else record)")
 	}
 
 	coordinatorCmd := &cobra.Command{
@@ -445,14 +468,14 @@ func NewRootCommand(cfg Config) *cobra.Command {
 	attemptCmd.Flags().MarkHidden("graph-root")
 	attemptCmd.Flags().MarkHidden("run-root")
 
-	root.AddCommand(buildCmd, pushCmd, publishCmd, loadCmd, saveCmd, writeCmd, exportCmd, pruneCmd, graphCmd,
-		coordinatorCmd, workerCmd, attemptCmd)
+	root.AddCommand(buildCmd, pushCmd, publishCmd, loadCmd, saveCmd, writeCmd, exportCmd, updateCmd, pruneCmd,
+		graphCmd, coordinatorCmd, workerCmd, attemptCmd)
 	return root
 }
 
 // UsesContainerStore reports whether the command line args names a command that opens container storage:
 // every command but a coordinator, which schedules builds and keeps no images, unless it builds locally,
-// and but the root command, help and --version, which print and exit.
+// update, which asks registries alone, and the root command, help and --version, which print and exit.
 // main consults it before the re-exec that container storage needs from a root without capabilities,
 // which fails where user namespaces are refused, as in a Dockerfile's RUN step that runs `vamos --version`.
 // The command is found as cobra finds it, so that a target or directory named "coordinator" isn't mistaken for it;
@@ -472,7 +495,11 @@ func UsesContainerStore(args []string) bool {
 	if help, err := cmd.Flags().GetBool("help"); cmd == root || err == nil && help {
 		return false
 	}
-	if cmd.Name() != "coordinator" {
+	switch cmd.Name() {
+	case "update": // which asks registries alone
+		return false
+	case "coordinator":
+	default:
 		return true
 	}
 	local, err := cmd.Flags().GetBool("local")
@@ -503,6 +530,19 @@ func (inv *invocation) request(names []string, want load.Want, execPlatform imgs
 	}
 }
 
+// givenExecPlatform returns the platform that --exec-platform gives, normalized, refusing one that isn't os/arch or
+// os/arch/variant: platforms.Parse takes an OS alone, filling in this machine's architecture, which isn't what was
+// asked.
+func (inv *invocation) givenExecPlatform() (imgspecv1.Platform, error) {
+	text := inv.opts.execPlatform
+	p, err := graph.ParsePlatform(text)
+	if err != nil || !strings.Contains(text, "/") {
+		return imgspecv1.Platform{}, fmt.Errorf("--exec-platform %s: platform %q: want os/arch or "+
+			"os/arch/variant, such as \"linux/arm64\"", text, text)
+	}
+	return p, nil
+}
+
 // execPlatform returns the execution platform to configure the graph for, among those the executor offers, caps:
 // the one --exec-platform names, or else the one the executor says clients use, as a coordinator may, or else this
 // machine's, if offered, or else the only one offered. Several offered, none of them this machine's, must be chosen
@@ -513,11 +553,9 @@ func (inv *invocation) execPlatform(caps api.Capabilities) (imgspecv1.Platform, 
 		offered = append(offered, platforms.Format(platforms.Normalize(p)))
 	}
 	if text := inv.opts.execPlatform; text != "" {
-		// platforms.Parse takes an OS alone, filling in this machine's architecture, which isn't what was asked.
-		p, err := graph.ParsePlatform(text)
-		if err != nil || !strings.Contains(text, "/") {
-			return imgspecv1.Platform{}, fmt.Errorf("--exec-platform %s: platform %q: want os/arch or "+
-				"os/arch/variant, such as \"linux/arm64\"", text, text)
+		p, err := inv.givenExecPlatform()
+		if err != nil {
+			return imgspecv1.Platform{}, err
 		}
 		switch {
 		case len(offered) == 0:
@@ -1006,6 +1044,9 @@ func (inv *invocation) runLoaded(
 	req.Secrets = map[string]bool{}
 	for id := range secrets {
 		req.Secrets[id] = true
+	}
+	if req.Pin, err = inv.pinner(); err != nil {
+		return nil, nil, err
 	}
 	ctx := inv.ctx
 	g, err := loadGraph(ctx, inv.app.fs, req)

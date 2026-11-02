@@ -38,7 +38,7 @@ Container copies and stdout/stderr delivery can still involve multiple goroutine
 Do not infer that event consumers are single-threaded from the target scheduler.
 The local executor runs several jobs at once and deduplicates the actions in flight by key, in `sched.Sharing`:
 an ordinary job that misses the cache attaches to the attempt of that key already running,
-including one a forced rebuild started; a forced rebuild, or a fresh resolution of a tag, never attaches
+including one a forced rebuild started; a forced rebuild never attaches
 and consults no cache, and its attempt replaces any in flight as the one later jobs attach to;
 each attempt returns its own result to every job attached, and the latest write wins the record,
 which `sharing.publish` writes once the attempt's artifact is published and before any job gets the result.

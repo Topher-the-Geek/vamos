@@ -173,7 +173,7 @@ type GraphRequest struct {
 	// Platform is the execution platform the graph was configured for, as EXEC_PLATFORM named it;
 	// an executor that doesn't offer it refuses the graph.
 	Platform  imgspecv1.Platform `json:"platform"`
-	Rebuild   bool               `json:"rebuild,omitempty"`  // run the roots again, and resolve their tags again
+	Rebuild   bool               `json:"rebuild,omitempty"`  // run the roots again; a pull isn't resolved again
 	Timestamp time.Time          `json:"timestamp,omitzero"` // the earliest time that targets which run stamp with
 	// Emulate permits run() steps in images for another platform than Platform, which run under emulation;
 	// without it, where an executor requires the permission, such a target fails before anything runs.

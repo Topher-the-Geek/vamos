@@ -1,12 +1,15 @@
 package testenv
 
 import (
+	"cmp"
 	"fmt"
 	"io/fs"
+	"maps"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/spf13/afero"
@@ -19,14 +22,57 @@ const ProjectDir = "/project"
 // Tests that build pull it once into their suite's store, and later builds find it there.
 const PullBusybox = `pull(name="busybox", image="docker.io/library/busybox", tag="1.36")` + "\n"
 
+// BusyboxIndex is the digest of the index that PullBusybox's tag, busybox:1.36, names at Docker Hub, which the
+// lockfile of a test project that pulls it pins it to, so that no build asks Docker Hub about its tags.
+// Should Docker Hub stop serving it, `crane digest docker.io/library/busybox:1.36` gives the new one.
+const BusyboxIndex = "sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
+
+// BusyboxLock is a lockfile that pins PullBusybox's tag to BusyboxIndex, as vamos writes one.
+const BusyboxLock = `{
+  "version": 1,
+  "pulls": {
+    "docker.io/library/busybox:1.36": {
+      "tag": "1.36",
+      "digest": "` + BusyboxIndex + `"
+    }
+  }
+}
+`
+
+// withBusyboxPin returns files, with BusyboxLock as its lockfile if a BUILD file among them pulls busybox, as
+// PullBusybox does, and none is a lockfile: at the workspace's root, beside its WORKSPACE file, or else beside that
+// BUILD file.
+func withBusyboxPin(files map[string]string) map[string]string {
+	var pulling, workspace string
+	for _, name := range slices.Sorted(maps.Keys(files)) {
+		switch base := filepath.Base(name); {
+		case base == "vamos.lock":
+			return files
+		case base == "WORKSPACE" && (workspace == "" || len(name) < len(workspace)):
+			workspace = name
+		case pulling == "" && (base == "BUILD" || base == "BUILD.vms") && strings.Contains(files[name], PullBusybox):
+			pulling = name
+		}
+	}
+	if pulling == "" {
+		return files
+	}
+	root := filepath.Dir(cmp.Or(workspace, pulling))
+	pinned := maps.Clone(files)
+	pinned[filepath.Join(root, "vamos.lock")] = BusyboxLock
+	return pinned
+}
+
 // NewNonce returns a value new to each call, for actions that must run rather than come from the cache.
 func NewNonce() string {
 	return fmt.Sprintf("%016x", rand.Uint64())
 }
 
-// Project returns an in-memory filesystem holding files, keyed by their path within ProjectDir.
+// Project returns an in-memory filesystem holding files, keyed by their path within ProjectDir, with a lockfile
+// that pins busybox if they pull it, as withBusyboxPin says.
 func Project(t *testing.T, files map[string]string) afero.Fs {
 	t.Helper()
+	files = withBusyboxPin(files)
 	fsys := afero.NewMemMapFs()
 	if err := fsys.MkdirAll(ProjectDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -49,6 +95,7 @@ func Project(t *testing.T, files map[string]string) afero.Fs {
 // Links maps a link's path within ProjectDir to its target.
 func DiskProject(t *testing.T, files, links map[string]string) (fsys afero.Fs, root string) {
 	t.Helper()
+	files = withBusyboxPin(files)
 	root = t.TempDir()
 	fsys = afero.NewBasePathFs(afero.NewOsFs(), root)
 	if err := fsys.MkdirAll(ProjectDir, 0o755); err != nil {

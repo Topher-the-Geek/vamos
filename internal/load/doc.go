@@ -8,6 +8,10 @@
 // there is no workspace-wide validation pass.
 // A package still loading, because one it loaded names its targets, gives the targets it has declared so far.
 // BUILD mistakes retain source positions here rather than becoming executor graph-validation errors.
+// The workspace root's vamos.lock is read once per load, and a malformed one, or one of a newer version, fails it;
+// each pull's node takes the digest that the lockfile pins its normalized image and tag to, or none,
+// and Request.Pin may pin the others, writing the lockfile, once the targets are configured and before any glob is
+// read.
 // A run() step's secrets are names alone; a step whose secret Request.Secrets lacks is refused once configured,
 // before sources are captured.
 //
@@ -32,4 +36,12 @@
 // and dependency expansion; lowering constructs graph nodes.
 // workspace.readGlobs captures sources after configuration.
 // Step values and their lowering live in step.go; changes must also reach graph and run.
+// Pulls, in pulls.go, returns the pulls that vamos update pins: those named, or every pull of the workspace, whose
+// BUILD files it finds by walking it, the one workspace-wide scan, which skips hidden directories and other workspaces.
+// lock.go owns the lockfile's format: ReadLock, Lock.Marshal, which gives the same bytes for the same pins,
+// and UpdateLock, which holds the workspace's lock, an flock of its root on disk, while it reads the lockfile again and
+// writes it durably through a temporary file renamed over it, so that concurrent writers each keep their pins;
+// WouldUpdateLock says whether it would write, writing nothing.
+// Fields that this vamos doesn't know are kept on rewrite, a pin's while the pin is unchanged, so raise LockVersion
+// only for a change that an older vamos would get wrong even so.
 package load

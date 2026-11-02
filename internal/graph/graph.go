@@ -13,13 +13,14 @@ import (
 	"github.com/Topher-the-Geek/vamos/internal/cache"
 	"github.com/Topher-the-Geek/vamos/internal/fileset"
 	"github.com/containerd/platforms"
+	"github.com/opencontainers/go-digest"
 	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"go.podman.io/image/v5/docker/reference"
 )
 
 // Version changes whenever what a graph means changes,
 // so that a client and an executor of different versions refuse each other's graphs rather than build something else.
-const Version = 3 // 3: a layer's entrypoint, and run() steps' secrets
+const Version = 4 // 4: a pull's pinned digest
 
 // Graph is everything a build runs:
 // each target in each configuration it's needed in, in an order where each node comes after the nodes it uses.
@@ -73,6 +74,9 @@ type Source struct {
 type Pull struct {
 	Image    string `json:"image"`    // a name with a tag: docker.io/library/node:24-alpine
 	Platform string `json:"platform"` // normalized, as platforms.Format gives it
+	// Digest, if set, is the manifest that the lockfile pins Image to, an index or an image,
+	// which the pull uses rather than asking what the tag names.
+	Digest digest.Digest `json:"digest,omitempty"`
 }
 
 // Layer is an image made by applying steps to a base.
@@ -349,6 +353,14 @@ func (g *Graph) validateNode(ref Ref) error {
 		}
 		if _, ok := named.(reference.Digested); ok {
 			return fmt.Errorf("image %q has a digest", n.Pull.Image)
+		}
+		if n.Pull.Digest != "" {
+			if err := n.Pull.Digest.Validate(); err != nil {
+				return fmt.Errorf("image %q is pinned to %q: %w", n.Pull.Image, n.Pull.Digest, err)
+			}
+			if n.Pull.Digest.Algorithm() != digest.SHA256 {
+				return fmt.Errorf("image %q is pinned to %q, not a sha256 digest", n.Pull.Image, n.Pull.Digest)
+			}
 		}
 		return nil
 

@@ -23,7 +23,8 @@
 // whose retained events watchers read from any position and whose terminal event carries its outcome.
 // A job opens storage lazily and hands the graph to a sched.Scheduler, one target at a time, which resolves pulls
 // first, then walks targets in dependency order, computing each one's key and looking its result up.
-// A pull whose tag record holds a complete instance for its platform resolves without the runner.
+// A pull whose tag record, or pin's record, holds a complete instance for its platform resolves without the runner;
+// a pinned pull's runner takes the index or image the lockfile pins, as the tag's, and its failure names the pin.
 // A result is reused once the checker confirms its artifacts are in the container store; otherwise the runner
 // executes the action: it builds a temporary container, captures its log, publishes the artifact and reports it.
 // Task containers are discarded; layer images outlive the job in storage.

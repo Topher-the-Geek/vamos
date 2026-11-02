@@ -131,6 +131,7 @@ They observe only what a user can:
 the command's standard output, where its statuses and steps' output go, its error,
 the image it saved, the folder it exported and the images left in the store.
 A workspace's packages are declared with `GivenThePackageDeclares`, and commands run in one with `GivenIWorkIn`.
+A project's `vamos.lock` is written as the scenario shows it with `GivenTheLockfileHolds`.
 Observe a layer's image with `WhenISave` and a task's files with `WhenIExport`;
 a push, with `WhenIPush`, or a publication, with `WhenIPublish`, to a registry of the scenario's own that
 `GivenARegistry` starts,
@@ -140,6 +141,15 @@ has written one),
 reads back what it pushed, or published last, for the steps about the image, or `ThenTheIndexManifestsAre` for an
 index, while `ThenTheRepositoryHasTags` and `ThenTheyNameTheSameManifest` check the repositories a publication
 writes, and `GivenTheRegistryRefusesWritesTo` and `GivenTheRegistryRefusesTagsIn` make the registry refuse them;
+`<digest of label>` stands for the digest of an index or image that a Given step put there by label;
+`GivenTheRegistryListsTags` instead gives commands a fake registry, which `<registry>` then stands for,
+in place of each image's own, to answer what pinning pulls asks about tags, listing a repository's tags, each naming a
+manifest of its own, `<digest of image:tag>`, or the one `GivenTheTagNames` moves it to,
+and `GivenTheRegistryRefusesToListTags` makes it, or the scenario's own registry, refuse to list one's,
+while `GivenTheRegistryAnswersTagListsOf` makes the scenario's own answer lists of a repository's tags as it says,
+`GivenTheRegistryListsTagsInPagesOf` makes it list them in pages, `GivenTheRegistryAlsoTags`
+tags what an image names with more tags, and `GivenAPullThroughCacheMirrorsTheRegistryWithAnIndex` starts a mirror
+of it that holds another index, which `ThenThePullThroughCacheWasNotAsked` checks served nothing;
 a load, with `WhenILoad` into a fake Docker daemon of the scenario's own that `GivenADockerDaemon` starts,
 reads back what the daemon loaded, and `GivenTheHostsDockerDaemon` loads into the host's, where there is one;
 see a glob's files in a layer that adds them, which the scenario declares, such as
@@ -151,7 +161,9 @@ declared at the top of the feature's file, after its background,
 which the scenario or the background declares with `GivenTheBuildFileDeclares` or `GivenTheProjectHolds`,
 so that the reader sees the fixture's name and finds its text in the same file.
 A background declares only what every scenario of its feature uses, and its doc comment says what that is.
-Steps don't write BUILD text, but for the pull of busybox that `GivenAProjectThatPullsBusybox` starts a BUILD file with:
+Steps don't write BUILD text, but for the pull of busybox that `GivenAProjectThatPullsBusybox` starts a BUILD file with,
+which `testenv.Project` pins in a `vamos.lock` of the project's, `testenv.BusyboxLock`, unless the scenario gives one,
+so that builds under the default `--pins=record` never ask Docker Hub about its tags:
 `GivenTheBuildFileDeclares`, `GivenThePackageDeclares` and `GivenTheBuildFileChanges` write the scenario's own,
 and `GivenTheBuildFileChanges` changes only text that the scenario or a fixture in the same file declares.
 Each command sends to a folder of its own, which `GivenTheDestinationHolds` can fill first,

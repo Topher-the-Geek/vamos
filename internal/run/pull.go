@@ -29,7 +29,8 @@ import (
 )
 
 // tagRecord is what a pull()'s tag named when vamos last resolved it, kept in the record store
-// so that later builds pull the same images, without reaching the registry, until --rebuild resolves it again.
+// so that later builds pull the same images, without reaching the registry; a pinned pull keeps a record of its pin
+// instead, under its digest, and never reads or writes its tag's.
 type tagRecord = cache.TagRecord
 
 // puller executes resolve actions: it resolves a tag to the image it names for a platform, pulls that image
@@ -70,7 +71,8 @@ func (pl *puller) mirror(ref reference.Named) (reference.Named, error) {
 
 // resolve resolves req, a resolve action, as a span of ctx's trace, and returns the image's ID, platform,
 // epoch and locations, the index, or image, that its tag named, and the tag's record to write, with its instance
-// for the platform complete.
+// for the platform complete. A pinned action's tag names its Index, its record is the pin's, and an error says
+// what it is pinned to.
 func (pl *puller) resolve(ctx context.Context, req sched.Request) (*sched.Report, error) {
 	a := req.Action
 	image := a.Image
@@ -86,13 +88,21 @@ func (pl *puller) resolve(ctx context.Context, req sched.Request) (*sched.Report
 	if err != nil {
 		return nil, fmt.Errorf("image %q: %w", image, err)
 	}
-	recorded := req.Tag
-	if req.Again {
-		recorded = nil // the tag is resolved afresh, whatever it named before
+	// A pull that fails says what the lockfile pins it to, if it does, the manifest what that is,
+	// and that the registry won't give it, if it won't, as sched.ErrPinUnavailable, for the Scheduler's advice.
+	failed := func(manifest string, err error) error {
+		switch {
+		case !a.Pinned:
+			return pullError(image, err)
+		case imageUnavailable(err):
+			return sched.PinUnavailable(fmt.Errorf("image %q: its registry won't give %s, which the lockfile pins "+
+				"it to: %w; log in if the image is private", image, manifest, err))
+		}
+		return fmt.Errorf("image %q, pinned to %s: %w", image, a.Index, err)
 	}
-	instance, record, err := pl.instance(ctx, tagged, platform, a.Index, recorded)
+	instance, record, err := pl.instance(ctx, tagged, platform, a.Index, req.Tag)
 	if err != nil {
-		return nil, pullError(image, err)
+		return nil, failed(a.Index.String(), err)
 	}
 	upstream, err := reference.WithDigest(reference.TrimNamed(tagged), instance)
 	if err != nil {
@@ -122,7 +132,8 @@ func (pl *puller) resolve(ctx context.Context, req sched.Request) (*sched.Report
 		img, err = pl.fetch(ctx, digested, platform)
 		if err != nil {
 			// With the tag's record cached, this is the first request to reach the registry.
-			return nil, pullError(image, err)
+			return nil, failed(fmt.Sprintf("%s, its image for %s in %s", instance, platforms.Format(platform),
+				a.Index), err)
 		}
 	}
 	if err != nil {
@@ -139,6 +150,11 @@ func (pl *puller) resolve(ctx context.Context, req sched.Request) (*sched.Report
 		return nil, fmt.Errorf("image %q: %w", image, err)
 	}
 	if !platforms.NewMatcher(platform).Match(got) {
+		if a.Pinned {
+			return nil, fmt.Errorf("image %q is pinned to %s, an image for %s, not %s, alone, "+
+				"rather than an index of images for several platforms", image, a.Index, platforms.Format(got),
+				platforms.Format(platform))
+		}
 		return nil, fmt.Errorf("image %q is for %s, not %s, and its tag names that image alone, "+
 			"not an index of images for several platforms", image, platforms.Format(got), platforms.Format(platform))
 	}
@@ -168,7 +184,7 @@ func (pl *puller) resolve(ctx context.Context, req sched.Request) (*sched.Report
 		Epoch:     result.Epoch,
 		Locations: result.Locations,
 	}
-	return &sched.Report{Result: result, Tag: tagged.String(), TagRecord: record}, nil
+	return &sched.Report{Result: result, Tag: a.RecordName(), TagRecord: record}, nil
 }
 
 // storeLocation returns the location of the image with ID id in the executor's own container store.

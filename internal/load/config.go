@@ -858,7 +858,8 @@ func (l *lowering) image(cl confLabel) (graph.Ref, error) {
 	n := graph.Node{Label: l.w.display(cl.label), Pos: l.w.declaration(cl.label).pos.String()}
 	if p, ok := l.cr.pulls[cl]; ok {
 		n.Desc = l.w.describe("pull", cl)
-		n.Pull = &graph.Pull{Image: p.image.String(), Platform: cl.cfg.platform.String()}
+		image := p.image.String()
+		n.Pull = &graph.Pull{Image: image, Platform: cl.cfg.platform.String(), Digest: l.w.lock.Pulls[image].Digest}
 	} else if manifests, ok := l.cr.indexes[cl]; ok {
 		n.Desc = l.w.describe("index", cl)
 		n.Index = &graph.Index{}
