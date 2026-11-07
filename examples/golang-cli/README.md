@@ -20,7 +20,7 @@ config:
     padding: 6
 ---
 flowchart TD
-    golang[<div style="text-align:left"><i>pull golang</i><hr/>golang:1.25-alpine</div>]
+    golang[<div style="text-align:left"><i>pull golang</i><hr/>golang:1.26-alpine</div>]
     source[<div style="text-align:left"><i>glob build-files</i><hr/>go.mod<br/>main.go</div>]
     build[<div style="text-align:left"><i>task build</i><hr/>go build<br/>cross-compile<hr/>echo</div>]
     layer[<div style="text-align:left"><i>layer layer</i><hr/>scratch<br/>/echo hola</div>]
@@ -55,5 +55,5 @@ docker run --rm vamos-echo /echo -n hola            # hola, without a newline
 `push` sends all of it, while `load` sends the image for the Docker daemon's platform.
 
 `vamos.lock` pins the `golang` image, so that every build uses the same compiler.
-After changing the pull's tag, or to move to the newest `1.25.x-alpine`, run `./vamos update -C examples/golang-cli`
+After changing the pull's tag, or to move to the newest `1.26.x-alpine`, run `./vamos update -C examples/golang-cli`
 and commit the lockfile; `./vamos update --dry-run -C examples/golang-cli` checks that the pin is current.

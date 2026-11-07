@@ -1,9 +1,9 @@
 {
   "version": 1,
   "pulls": {
-    "docker.io/library/golang:1.25-alpine": {
-      "tag": "1.25.14-alpine",
-      "digest": "sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59"
+    "docker.io/library/golang:1.26-alpine": {
+      "tag": "1.26.10-alpine",
+      "digest": "sha256:87c65a688975c0b1d4585d204874c45ca78354670e3a5f11368c5a492303d696"
     }
   }
 }

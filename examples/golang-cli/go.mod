@@ -1,4 +1,4 @@
 module echo
 
 // Package Update: `$ go version`
-go 1.25.9
+go 1.26.9

@@ -59,7 +59,7 @@ Check 6's reply is `{"data":{"increment":{"value":1}}}`.
 VAMOS_PINS=require ./vamos load echo vamos-echo -C examples/golang-cli && docker run --rm vamos-echo \
   && VAMOS_PINS=require ./vamos save //:layer "$TMP/echo.tar" -t vamos-echo:other --platform linux/amd64 \
   -C examples/golang-cli && docker load -i "$TMP/echo.tar" && docker run --rm --platform linux/amd64 vamos-echo:other
-# Optionally, whether the pin is still what the tag names at Docker Hub: a newer 1.25.x-alpine there fails it.
+# Optionally, whether the pin is still what the tag names at Docker Hub: a newer 1.26.x-alpine there fails it.
 ./vamos update --dry-run -C examples/golang-cli
 ```
 
